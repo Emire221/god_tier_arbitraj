@@ -1,0 +1,28 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+
+# Solidity compiler
+solc_version = "0.8.27"
+evm_version = "cancun"
+
+# Warning 2394 = EIP-1153 transient storage composability uyarısı.
+# Kontrat tüm tstore slot'larını çağrı sonunda temizliyor (composability-safe).
+ignored_error_codes = [2394]
+
+# Optimizer — production-ready settings
+optimizer = true
+optimizer_runs = 1_000_000     # High runs = cheaper runtime calls (ideal for bots)
+via_ir = true                  # Use IR pipeline to avoid stack-too-deep
+
+# ── Lint: Statik analiz uyarılarını bastır ────────────────────────────────
+# unsafe-typecast: callback'teki int256→uint256 cast'ler bilinçli ve güvenli
+# erc20-unchecked-transfer: _safeTransfer zaten return value kontrol ediyor
+[lint]
+exclude_lints = ["unsafe-typecast", "erc20-unchecked-transfer"]
+
+[fmt]
+line_length = 100
+tab_width = 4
+bracket_spacing = true

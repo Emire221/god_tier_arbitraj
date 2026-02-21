@@ -256,13 +256,32 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
                 &config.usdc_address,
             );
 
-        // minProfit hesaplama: expected profit'un %90'ı (owedToken cinsinden)
-        let min_profit = compute_min_profit(
-            opportunity.expected_profit_usd,
-            opportunity.buy_price,
-            pools[0].token0_is_weth,
-            opportunity.buy_pool_idx,
-        );
+        // minProfit hesaplama: exact U256 math ile (USD/float YOK)
+        let exact_min_profit = {
+            let buy_state = states[opportunity.buy_pool_idx].read();
+            let sell_state = states[opportunity.sell_pool_idx].read();
+            let amount_wei = U256::from((opportunity.optimal_amount_weth * 1e18) as u128);
+            let sell_fee_pips = pools[opportunity.sell_pool_idx].fee_bps * 100;
+            let buy_fee_pips = pools[opportunity.buy_pool_idx].fee_bps * 100;
+            let (exact_profit, _) = math::exact::compute_exact_arbitrage_profit(
+                sell_state.sqrt_price_x96,
+                sell_state.liquidity,
+                sell_state.tick,
+                sell_fee_pips,
+                pools[opportunity.sell_pool_idx].tick_spacing,
+                sell_state.tick_bitmap.as_ref(),
+                buy_state.sqrt_price_x96,
+                buy_state.liquidity,
+                buy_state.tick,
+                buy_fee_pips,
+                pools[opportunity.buy_pool_idx].tick_spacing,
+                buy_state.tick_bitmap.as_ref(),
+                amount_wei,
+                pools[0].token0_is_weth,
+            );
+            exact_profit
+        };
+        let min_profit = compute_min_profit_exact(exact_min_profit);
 
         // Atomik nonce al
         let nonce = nonce_manager.get_and_increment();
@@ -541,35 +560,20 @@ fn compute_directions_and_tokens(
 
 /// minProfit hesapla (owedToken cinsinden, uint128 wei)
 ///
-/// Beklenen kârın %90'ını minProfit olarak ayarla (sandviç koruması).
+/// math::exact::compute_exact_arbitrage_profit ile hesaplanan
+/// exact_profit_wei değerinin %90'ını minProfit olarak ayarla.
 /// Kalan %10 güvenlik marjı — slippage, gas fiyat değişimi vb.
-fn compute_min_profit(
-    expected_profit_usd: f64,
-    eth_price_usd: f64,
-    token0_is_weth: bool,
-    buy_pool_idx: usize,
-) -> u128 {
-    let safety_factor = 0.90;
-    let profit_with_safety = expected_profit_usd * safety_factor;
+///
+/// ÖNEMLİ: Float ve USD çevirisi YOKTUR. Tamamen U256 tam sayı matematik.
+fn compute_min_profit_exact(exact_profit_wei: U256) -> u128 {
+    // %90 güvenlik faktörü: (profit * 90) / 100
+    let min_profit_u256 = (exact_profit_wei * U256::from(90)) / U256::from(100);
 
-    // owedToken ne? → buy_pool_idx ve token0_is_weth'e bağlı
-    let is_owed_weth = if token0_is_weth {
-        buy_pool_idx == 1 // Pool 1 ucuz → WETH borçlu
+    // u128'e sığdır (kontrat uint128 bekler). Overflow durumunda u128::MAX kullan.
+    if min_profit_u256 > U256::from(u128::MAX) {
+        u128::MAX
     } else {
-        buy_pool_idx == 0
-    };
-
-    if is_owed_weth {
-        // owedToken = WETH (18 decimal)
-        if eth_price_usd > 0.0 {
-            let profit_weth = profit_with_safety / eth_price_usd;
-            (profit_weth * 1e18) as u128
-        } else {
-            0u128
-        }
-    } else {
-        // owedToken = USDC (6 decimal)
-        (profit_with_safety * 1e6) as u128
+        min_profit_u256.to::<u128>()
     }
 }
 

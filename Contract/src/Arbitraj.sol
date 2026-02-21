@@ -253,7 +253,7 @@ contract ArbitrajBotu {
             zeroForOne,          // swap yönü
             int256(amount),      // exact input
             priceLimit,          // fiyat sınırı
-            ""                   // data: BOŞ (TLOAD kullanılır)
+            hex"01"              // data: ≥1 byte → callback tetiklenir (TLOAD kullanılır)
         );
 
         // ── 7. BAKİYE KONTROLÜ — SONRA ──────────────────────────────────
@@ -359,7 +359,7 @@ contract ArbitrajBotu {
                 aeroZeroForOne,          // Slipstream swap yönü
                 int256(amountReceived),  // exact input (alınan miktar)
                 aeroLimit,               // fiyat sınırı
-                ""                       // data: BOŞ (TLOAD kullanılır)
+                hex"01"                  // data: ≥1 byte → callback tetiklenir (TLOAD kullanılır)
             );
 
             // ── UniV3 Borcunu Öde ────────────────────────────────────────

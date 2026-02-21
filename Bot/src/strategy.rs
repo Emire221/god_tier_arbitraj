@@ -1,8 +1,13 @@
 // ============================================================================
-//  STRATEGY v7.0 — Arbitraj Strateji Motoru + 130-Byte Calldata + Nonce
+//  STRATEGY v9.0 — Arbitraj Strateji Motoru + 134-Byte Calldata + Dinamik Fee
 //
-//  v7.0 Yenilikler:
-//  ✓ 130-byte kompakt calldata (kontrat v8.0 uyumlu)
+//  v9.0 Yenilikler:
+//  ✓ 134-byte kompakt calldata (kontrat v9.0 uyumlu, deadlineBlock dahil)
+//  ✓ Deadline block hesaplama (current_block + config.deadline_blocks)
+//  ✓ Dinamik bribe/priority fee modeli (beklenen kârın %25'i)
+//  ✓ KeyManager entegrasyonu (raw private key yerine şifreli yönetim)
+//
+//  v7.0 (korunuyor):
 //  ✓ owedToken / receivedToken / minProfit hesaplama
 //  ✓ Atomik nonce yönetimi entegrasyonu
 //  ✓ TickBitmap-aware Newton-Raphson optimizasyonu
@@ -168,7 +173,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
     let _revm_result = if let Some(contract_addr) = config.contract_address {
         let amount_wei = U256::from((opportunity.optimal_amount_weth * 1e18) as u128);
 
-        // v7.0 Calldata: 130-byte kompakt payload (kontrat v8.0 uyumlu)
+        // v9.0 Calldata: 134-byte kompakt payload (kontrat v9.0 uyumlu)
         // Yön ve token hesaplama:
         //   buy_pool_idx=0 (UniV3 ucuz): uni=1(oneForZero→WETH al), aero=0(zeroForOne→WETH sat)
         //   buy_pool_idx=1 (Slip ucuz):  uni=0(zeroForOne→USDC al), aero=1(oneForZero→USDC sat)
@@ -180,6 +185,10 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
                 &config.usdc_address,
             );
 
+        // v9.0: Deadline block hesapla
+        let current_block = states[0].read().last_block;
+        let deadline_block = current_block as u32 + config.deadline_blocks;
+
         let calldata = crate::simulator::encode_compact_calldata(
             pools[0].address,  // pool_a (always UniV3)
             pools[1].address,  // pool_b (always Slipstream)
@@ -189,6 +198,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
             uni_dir,
             aero_dir,
             0u128, // REVM simulation — minProfit=0
+            deadline_block,
         );
 
         let caller = config.private_key.as_ref()
@@ -247,7 +257,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         let trade_weth = opportunity.optimal_amount_weth;
         let _buy_price = opportunity.buy_price;
 
-        // v7.0: Yön ve token hesaplama
+        // v9.0: Yön ve token hesaplama
         let (uni_dir, aero_dir, owed_token, received_token) =
             compute_directions_and_tokens(
                 opportunity.buy_pool_idx,
@@ -255,6 +265,16 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
                 &config.weth_address,
                 &config.usdc_address,
             );
+
+        // v9.0: Deadline block hesapla
+        let current_block = states[0].read().last_block;
+        let deadline_block = current_block as u32 + config.deadline_blocks;
+
+        // v9.0: Dinamik bribe/priority fee hesapla
+        // Beklenen kârın bribe_pct yüzdesi builder'a gider
+        let bribe_pct = config.bribe_pct;
+        let expected_profit_wei = (opportunity.expected_profit_usd / opportunity.sell_price * 1e18) as u128;
+        let bribe_wei = ((expected_profit_wei as f64) * bribe_pct) as u128;
 
         // minProfit hesaplama: exact U256 math ile (USD/float YOK)
         let exact_min_profit = {
@@ -298,7 +318,9 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
                 pool_a_addr, pool_b_addr,
                 owed_token, received_token,
                 trade_weth, uni_dir, aero_dir,
-                min_profit, nonce, nm_clone,
+                min_profit, deadline_block,
+                bribe_wei,
+                nonce, nm_clone,
             ).await;
         });
     }
@@ -323,8 +345,8 @@ fn write_shadow_log(
     let buy_pool = &pools[opportunity.buy_pool_idx];
     let sell_pool = &pools[opportunity.sell_pool_idx];
 
-    // Kompakt calldata boyutunu hesapla (130 byte)
-    let payload_bytes = 130;
+    // Kompakt calldata boyutunu hesapla (134 byte)
+    let payload_bytes = 134;
 
     // JSON Lines formatında tek satır
     let log_entry = format!(
@@ -390,7 +412,7 @@ fn write_shadow_log(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Kontrat Tetikleme (Zincir Üzeri) — Kompakt 130-Byte Calldata + Atomik Nonce
+// Kontrat Tetikleme (Zincir Üzeri) — Kompakt 134-Byte Calldata + Dinamik Fee
 // ─────────────────────────────────────────────────────────────────────────────
 
 use alloy::providers::ProviderBuilder;
@@ -398,9 +420,10 @@ use alloy::rpc::types::TransactionRequest;
 
 /// Arbitraj kontratını zincir üzerinde tetikle
 ///
-/// v7.0: 130-byte kompakt payload + atomik nonce:
+/// v9.0: 134-byte kompakt payload + deadline block + dinamik priority fee:
 ///   [PoolA(20)] + [PoolB(20)] + [owedToken(20)] + [receivedToken(20)]
-///   + [Miktar(32)] + [uniDir(1)] + [aeroDir(1)] + [minProfit(16)] = 130 byte
+///   + [Miktar(32)] + [uniDir(1)] + [aeroDir(1)] + [minProfit(16)]
+///   + [deadlineBlock(4)] = 134 byte
 async fn execute_on_chain(
     rpc_url: String,
     private_key: String,
@@ -413,6 +436,8 @@ async fn execute_on_chain(
     uni_direction: u8,
     aero_direction: u8,
     min_profit: u128,
+    deadline_block: u32,
+    bribe_wei: u128,
     nonce: u64,
     nonce_manager: Arc<NonceManager>,
 ) {
@@ -423,7 +448,7 @@ async fn execute_on_chain(
         pool_a, pool_b,
         owed_token, received_token,
         trade_size_weth, uni_direction, aero_direction,
-        min_profit, nonce,
+        min_profit, deadline_block, bribe_wei, nonce,
     ).await {
         Ok(hash) => {
             println!("  {} TX başarılı: {}", "✅".green(), hash.green().bold());
@@ -436,7 +461,7 @@ async fn execute_on_chain(
     }
 }
 
-/// Kontrat tetikleme iç mantığı — 130-byte kompakt calldata + atomik nonce
+/// Kontrat tetikleme iç mantığı — 134-byte kompakt calldata + dinamik priority fee
 async fn execute_inner(
     rpc_url: &str,
     private_key: &str,
@@ -449,6 +474,8 @@ async fn execute_inner(
     uni_direction: u8,
     aero_direction: u8,
     min_profit: u128,
+    deadline_block: u32,
+    bribe_wei: u128,
     nonce: u64,
 ) -> eyre::Result<String> {
     use alloy::providers::WsConnect;
@@ -468,7 +495,7 @@ async fn execute_inner(
 
     let amount_in_wei = U256::from((trade_size_weth * 1e18) as u128);
 
-    // ═══ CALLDATA MÜHENDİSLİĞİ: 130-BYTE KOMPAKT PAYLOAD ═══
+    // ═══ CALLDATA MÜHENDİSLİĞİ: 134-BYTE KOMPAKT PAYLOAD ═══
     let calldata = crate::simulator::encode_compact_calldata(
         pool_a,
         pool_b,
@@ -478,26 +505,52 @@ async fn execute_inner(
         uni_direction,
         aero_direction,
         min_profit,
+        deadline_block,
     );
 
     // Calldata hex logla (debug)
     let calldata_hex = crate::simulator::format_compact_calldata_hex(&calldata);
     println!(
-        "  {} Kompakt calldata (130 byte): {}...{}",
+        "  {} Kompakt calldata (134 byte): {}...{}",
         "🔧".cyan(),
         &calldata_hex[..22], // 0x + ilk 10 byte
         &calldata_hex[calldata_hex.len().saturating_sub(10)..], // son 5 byte
     );
 
-    // ═══ RAW TX GÖNDERİMİ — ATOMIK NONCE ═══
-    let tx = TransactionRequest::default()
+    // ═══ DİNAMİK PRİORİTY FEE HESAPLAMA ═══
+    // Beklenen kârın bribe_pct yüzdesi yüksek priority fee olarak verilir
+    // Base L2 FIFO sequencer: priority fee sıralaması belirler
+    let priority_fee_per_gas = if bribe_wei > 0 {
+        // Tahmini gas: 350K (flash swap + callback)
+        let estimated_gas: u128 = 350_000;
+        let fee = bribe_wei / estimated_gas;
+        let fee = fee.max(1_000_000); // Minimum 1 Gwei
+        println!(
+            "  {} Dinamik Priority Fee: {} Gwei (bribe: {} wei, gas tahmini: {})",
+            "💰".yellow(),
+            fee / 1_000_000_000,
+            bribe_wei,
+            estimated_gas,
+        );
+        Some(fee)
+    } else {
+        None
+    };
+
+    // ═══ RAW TX GÖNDERİMİ — ATOMIK NONCE + DİNAMİK FEE ═══
+    let mut tx = TransactionRequest::default()
         .to(contract_address)
         .input(calldata.into())
         .nonce(nonce);
 
+    // Dinamik priority fee ayarla (varsa)
+    if let Some(pf) = priority_fee_per_gas {
+        tx = tx.max_priority_fee_per_gas(pf);
+    }
+
     println!(
-        "  {} TX gönderiliyor... (miktar: {:.6} WETH, nonce: {}, payload: 130 byte)",
-        "📤".yellow(), trade_size_weth, nonce
+        "  {} TX gönderiliyor... (miktar: {:.6} WETH, nonce: {}, deadline: blok #{}, payload: 134 byte)",
+        "📤".yellow(), trade_size_weth, nonce, deadline_block
     );
     let pending = provider.send_transaction(tx)
         .await

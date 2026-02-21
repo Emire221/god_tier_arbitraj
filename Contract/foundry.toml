@@ -9,7 +9,9 @@ evm_version = "cancun"
 
 # Warning 2394 = EIP-1153 transient storage composability uyarısı.
 # Kontrat tüm tstore slot'larını çağrı sonunda temizliyor (composability-safe).
-ignored_error_codes = [2394]
+# Warning 3860 = Contract initcode size: Test kontratı 49KB'ı aşıyor (production
+# kontrat etkilenmez, Forge test suite'e özgü — mock'lar + helper fonksiyonlar).
+ignored_error_codes = [2394, 3860]
 
 # Optimizer — production-ready settings
 optimizer = true

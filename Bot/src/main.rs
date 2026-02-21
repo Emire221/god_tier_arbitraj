@@ -21,6 +21,7 @@ mod math;
 mod state_sync;
 mod simulator;
 mod strategy;
+mod key_manager;
 
 use types::*;
 use state_sync::*;
@@ -53,7 +54,7 @@ fn print_banner(config: &BotConfig) {
     );
     println!(
         "{}",
-        "║       ARBITRAJ BOTU v6.0 — Kuantum Beyin II                    ║"
+        "║       ARBITRAJ BOTU v9.0 — Kuantum Beyin III                   ║"
             .cyan().bold()
     );
     println!(
@@ -68,17 +69,27 @@ fn print_banner(config: &BotConfig) {
     );
     println!(
         "{}",
-        "║  [v6] Off-Chain TickBitmap + Multi-Tick Derinlik Motoru         ║"
+        "║  [v9] Executor/Admin Rol Ayrımı + Deadline Block               ║"
             .cyan()
     );
     println!(
         "{}",
-        "║  [v6] Multi-Transport (IPC > WSS > HTTP) + Gecikme Ölçümü      ║"
+        "║  [v9] Şifreli Key Management (AES-256-GCM + PBKDF2)            ║"
             .cyan()
     );
     println!(
         "{}",
-        "║  [v5] State Sync + REVM Simülasyon + Newton-Raphson             ║"
+        "║  [v9] Dinamik Bribe/Priority Fee + 134-Byte Calldata           ║"
+            .cyan()
+    );
+    println!(
+        "{}",
+        "║  [v6] TickBitmap + Multi-Tick Derinlik + REVM Simülasyon        ║"
+            .cyan()
+    );
+    println!(
+        "{}",
+        "║  [v5] State Sync + Newton-Raphson + Multi-Transport            ║"
             .cyan()
     );
     println!(
@@ -92,9 +103,9 @@ fn print_banner(config: &BotConfig) {
     println!("  {} Transport      : {}", "▸".cyan(), format!("{:?} (Öncelik: IPC > WSS > HTTP)", config.transport_mode).white());
     println!("  {} Strateji       : {}", "▸".cyan(), "Çapraz-DEX Spread Arbitrajı (Uniswap V3 + Aerodrome)".white());
     println!("  {} Derinlik       : {}", "▸".cyan(), format!("TickBitmap (±{} tick aralığı, max {}blk yaş)", config.tick_bitmap_range, config.tick_bitmap_max_age_blocks).white());
-    println!("  {} Veri Kaynağı   : {}", "▸".cyan(), "Yerel State Sync (Blok bazlı — Event YOK)".white());
-    println!("  {} Simülasyon     : {}", "▸".cyan(), "REVM (Yerel EVM — eth_call YOK)".white());
-    println!("  {} Optimizasyon   : {}", "▸".cyan(), "Newton-Raphson + Multi-Tick Gerçek Derinlik".white());
+    println!("  {} Calldata       : {}", "▸".cyan(), format!("134 byte kompakt (deadline: +{} blok)", config.deadline_blocks).white());
+    println!("  {} Bribe          : {}", "▸".cyan(), format!("Dinamik %{:.0} kâr → priority fee", config.bribe_pct * 100.0).white());
+    println!("  {} Key Yönetimi   : {}", "▸".cyan(), if config.key_manager_active { "Şifreli Keystore (AES-256-GCM)".green().to_string() } else if config.private_key.is_some() { "Env Var (GÜVENSİZ)".yellow().to_string() } else { "Yok".red().to_string() });
     println!("  {} Flash Loan     : {}", "▸".cyan(), format!("Aave V3 (%{:.2} Komisyon)", config.flash_loan_fee_bps / 100.0).white());
     println!("  {} Maks İşlem     : {}", "▸".cyan(), format!("{:.1} WETH", config.max_trade_size_weth).white());
     println!("  {} Min. Net Kâr   : {}", "▸".cyan(), format!("{:.2}$", config.min_net_profit_usd).white());
@@ -215,7 +226,7 @@ fn print_spread_info(pools: &[PoolConfig], states: &[SharedPoolState]) {
 
 fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState]) {
     println!();
-    println!("{}", "  ┌───── OTURUM İSTATİSTİKLERİ (v6.0) ──────────────────────────┐".yellow());
+    println!("{}", "  ┌───── OTURUM İSTATİSTİKLERİ (v9.0) ──────────────────────────┐".yellow());
     println!("  {}  Çalışma Süresi       : {}", "│".yellow(), stats.uptime_str().white().bold());
     println!("  {}  İşlenen Blok         : {}", "│".yellow(), format!("{}", stats.total_blocks_processed).white());
     println!("  {}  Tespit Edilen Fırsat  : {}", "│".yellow(), format!("{}", stats.total_opportunities).white());
@@ -276,11 +287,38 @@ async fn main() -> Result<()> {
     // .env dosyasını yükle
     dotenvy::dotenv().ok();
 
+    // ═══ CLI: --encrypt-key argümanı ile keystore oluşturma ═══
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--encrypt-key") {
+        return key_manager::KeyManager::cli_encrypt_key();
+    }
+
     // Yapılandırmayı oku
-    let config = BotConfig::from_env()?;
+    let mut config = BotConfig::from_env()?;
 
     // Havuz yapılandırmalarını oku
     let pools = load_pool_configs_from_env()?;
+
+    // ═══ v9.0: KEY MANAGER BAŞLATMA ═══
+    // Öncelik: 1) Şifreli keystore → 2) Env var (uyarıyla) → 3) Key yok
+    let key_manager = key_manager::KeyManager::auto_load()?;
+    if key_manager.has_key() {
+        config.key_manager_active = true;
+        // Keystore'dan gelen key'i config.private_key'e de aktar (geriye uyumluluk)
+        if config.private_key.is_none() {
+            config.private_key = key_manager.private_key().map(|k: &str| k.to_string());
+        }
+        println!(
+            "  {} Key Yönetimi: {}",
+            "🔐".green(),
+            key_manager.source()
+        );
+    } else {
+        println!(
+            "  {} Key Yönetimi: Anahtar yüklenmedi (gözlem modu)",
+            "ℹ️".blue()
+        );
+    }
 
     // Banner göster
     print_banner(&config);
@@ -511,7 +549,7 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
     // ══════════════ BLOK BAŞLIĞI ABONELİĞİ ══════════════
     println!();
     println!("{}", "  ════════════════════════════════════════════════════════════════".green());
-    println!("  {}  CANLI YAYIN v6.0 — Yeni bloklar dinleniyor...", "📡".green());
+    println!("  {}  CANLI YAYIN v9.0 — Yeni bloklar dinleniyor...", "📡".green());
     println!("  {}  Döngü: State Sync → TickBitmap → Multi-Tick NR → REVM → Yürüt", "📡".green());
     println!("{}", "  ════════════════════════════════════════════════════════════════".green());
     println!();

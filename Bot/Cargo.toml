@@ -1,6 +1,6 @@
 [package]
 name = "arbitraj_botu"
-version = "6.0.0"
+version = "9.0.0"
 edition = "2021"
 
 [dependencies]
@@ -37,6 +37,16 @@ parking_lot = "0.12"
 
 # ── Hex Literal (Derleme Zamanı Byte Dizileri) ──
 hex-literal = "0.4"
+
+# ── Güvenli Anahtar Yönetimi (Encrypted Key Management) ──
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+rpassword = "5"
+hex = "0.4"
 
 [dev-dependencies]
 # ── Property-Based Testing (Çökme Testi) ──

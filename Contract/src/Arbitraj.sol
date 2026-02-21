@@ -3,38 +3,33 @@ pragma solidity ^0.8.27;
 
 // ══════════════════════════════════════════════════════════════════════════════
 //
-//   ARBITRAJ BOTU v8.0 — "Kuantum Kalkan" Kontratı
+//   ARBITRAJ BOTU v9.0 — "Kuantum Kalkan II" Kontratı
 //   Base Network — Gas-Minimized Flash Swap Arbitrage Engine
 //
-//   v7 → v8 Kritik Yükseltmeler:
+//   v8 → v9 Kritik Güvenlik Yükseltmeleri:
 //
-//   1. SANDVİÇ SALDIRISI KORUMASI (minProfit)
-//      • Bot off-chain hesapladığı kârın toleranslı halini (uint128 minProfit)
-//        calldata içinde gönderir.
-//      • Kontrat, işlem sonunda kârın minProfit'e ulaşıp ulaşmadığını
-//        KESİNLİKLE kontrol eder. Ulaşılmazsa tüm TX revert edilir.
-//      • 1 wei kâr ile işlem kapanması artık İMKANSIZ.
+//   1. EXECUTOR / ADMIN ROL AYRIMI (Tek Nokta Hatası Giderimi)
+//      • Eski: Tek owner hem arbitraj yürütme hem fon çekme yetkisine sahipti.
+//      • Yeni: İki ayrı immutable rol:
+//        - executor: Sadece fallback() çağırabilir (sıcak cüzdan, düşük bakiye)
+//        - admin: Sadece withdrawToken/withdrawETH çağırabilir (soğuk cüzdan/multisig)
+//      • Kâr kontrat içinde birikir, admin periyodik olarak çeker.
+//      • Sunucu hacklenip executor key çalınsa bile sermaye güvende kalır.
 //
-//   2. AERODROME SLİPSTREAM (Concentrated Liquidity) UYUMU
-//      • Eski V2 stil swap (getAmountOut + statik swap) tamamen SİLİNDİ.
-//      • Slipstream = Uniswap V3 fork → V3 callback mekanizması implemente.
-//      • Hem UniV3 hem Slipstream aynı uniswapV3SwapCallback'i kullanır.
-//      • İki farklı callback kaynağı transient storage ile ayırt edilir.
+//   2. İŞLEM BAYATLAMA KORUMASI (Deadline Block)
+//      • Calldata'ya 4-byte deadlineBlock (uint32) eklendi → 134 byte.
+//      • block.number > deadlineBlock ise TX otomatik revert olur.
+//      • Mempool'da takılan stale TX'lerin kötü koşullarda çalışması engellenir.
 //
-//   3. ON-CHAIN I/O ve GAS İSRAFININ ÖNLENMESİ
-//      • token0() ve token1() on-chain okumaları tamamen SİLİNDİ.
-//      • owedToken ve receivedToken adresleri bot tarafından off-chain
-//        belirlenir ve calldata içinde gönderilir.
-//      • İşlem başına ~5000+ gas tasarrufu.
-//
-//   4. GENİŞLETİLMİŞ CALLDATA MİMARİSİ (130 byte)
-//      • Eski 73 byte → yeni 130 byte (hâlâ ABI'den kompakt)
-//      • Eklenen alanlar: owedToken, receivedToken, aeroDirection, minProfit
-//      • Kaldırılan maliyetler: token0(), token1(), getAmountOut() çağrıları
+//   v7 → v8 (korunuyor):
+//   ✓ Sandviç saldırısı koruması (minProfit)
+//   ✓ Aerodrome Slipstream (CL) uyumu
+//   ✓ On-chain I/O eliminasyonu (token0/token1 çağrısı YOK)
+//   ✓ 130-byte kompakt calldata mimarisi (şimdi 134-byte)
 //
 // ══════════════════════════════════════════════════════════════════════════════
 //
-//   KOMPAKT CALLDATA FORMATI (130 byte — ABI kodlama YOK)
+//   KOMPAKT CALLDATA FORMATI (134 byte — ABI kodlama YOK)
 //
 //   Offset   Boyut   Alan
 //   ─────────────────────────────────────────────────────
@@ -46,8 +41,9 @@ pragma solidity ^0.8.27;
 //   0x70      1 B    UniV3 Yön (0x00 = zeroForOne=true, 0x01 = false)
 //   0x71      1 B    Slipstream Yön (0x00 = zeroForOne=true, 0x01 = false)
 //   0x72     16 B    minProfit (uint128, big-endian)
+//   0x82      4 B    deadlineBlock (uint32, big-endian) ← v9.0 YENİ
 //   ─────────────────────────────────────────────────────
-//   TOPLAM  130 B    (Eski: 73 B + on-chain çağrılar → şimdi saf calldata)
+//   TOPLAM  134 B    (v8: 130 B → v9: +4 B deadline koruması)
 //
 // ══════════════════════════════════════════════════════════════════════════════
 //
@@ -87,6 +83,12 @@ error ZeroAmount();
 
 /// @dev ERC20 transfer başarısız
 error TransferFailed();
+
+/// @dev İşlem deadline blok numarasını aştı (stale TX koruması)
+error DeadlineExpired();
+
+/// @dev Sıfır adres (address(0)) kullanılamaz
+error ZeroAddress();
 
 // ── MINIMAL INTERFACES ───────────────────────────────────────────────────────
 
@@ -128,9 +130,16 @@ contract ArbitrajBotu {
     //  IMMUTABLE — bytecode'a gömülü, SLOAD = 0 gas
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// @notice Kontrat sahibi. Constructor'da atanır, değiştirilemez.
-    ///         Bytecode'da saklanır → okuma maliyeti ~3 gas (SLOAD: 2100 gas).
-    address public immutable owner;
+    /// @notice Arbitraj yürütme yetkisi. Sıcak cüzdan — düşük bakiyeli.
+    ///         Sadece fallback() çağırabilir. Fon çekme yetkisi YOKTUR.
+    ///         Bytecode'da saklanır → okuma maliyeti ~3 gas.
+    address public immutable executor;
+
+    /// @notice Fon yönetimi yetkisi. Soğuk cüzdan veya multisig.
+    ///         Sadece withdrawToken/withdrawETH çağırabilir.
+    ///         Arbitraj yürütme yetkisi YOKTUR.
+    ///         Bytecode'da saklanır → okuma maliyeti ~3 gas.
+    address public immutable admin;
 
     // ─────────────────────────────────────────────────────────────────────────
     //  CONSTANTS — Uniswap V3 / Slipstream sqrt price limits
@@ -159,41 +168,46 @@ contract ArbitrajBotu {
     event EmergencyETHWithdraw(uint256 amount, address indexed to);
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  CONSTRUCTOR — owner immutable olarak bytecode'a yazılır
-    // ─────────────────────────────────────────────────────────────────────────
+    //  CONSTRUCTOR — executor ve admin immutable olarak bytecode'a yazılır
+    // ─────────────────────────────────────────────────────────────────────
 
-    constructor() {
-        owner = msg.sender;
+    /// @param _executor Arbitraj yürütme adresi (sıcak cüzdan)
+    /// @param _admin    Fon yönetimi adresi (soğuk cüzdan/multisig)
+    constructor(address _executor, address _admin) {
+        if (_executor == address(0) || _admin == address(0)) revert ZeroAddress();
+        executor = _executor;
+        admin = _admin;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  CORE GİRİŞ NOKTASI — 130-BYTE KOMPAKT CALLDATA (fallback)
+    //  CORE GİRİŞ NOKTASI — 134-BYTE KOMPAKT CALLDATA (fallback)
     // ═════════════════════════════════════════════════════════════════════════
     //
-    //  Rust botu 130 byte sıkıştırılmış veriyi gönderir:
+    //  Rust botu 134 byte sıkıştırılmış veriyi gönderir:
     //    [PoolA:20] + [PoolB:20] + [owedToken:20] + [receivedToken:20]
-    //    + [Miktar:32] + [UniYön:1] + [AeroYön:1] + [minProfit:16]
+    //    + [Miktar:32] + [UniYön:1] + [AeroYön:1] + [minProfit:16] + [deadlineBlock:4]
     //
     //  • Fonksiyon seçici YOK — fallback() devralır
     //  • ABI kodlama YOK — calldataload ile ham byte okuması
     //  • token0()/token1() çağrısı YOK — adresler calldata'dan gelir
     //
     //  Akış:
-    //    1. Owner kontrolü (immutable — bytecode, ~3 gas)
+    //    1. Executor kontrolü (immutable — bytecode, ~3 gas)
     //    2. Reentrancy kilidi (TSTORE — geçici hafıza)
-    //    3. Calldata çözümleme (assembly — 130 byte)
-    //    4. TSTORE callback bağlamı (EIP-1153)
-    //    5. Bakiye oku (ÖNCE)
-    //    6. Flash swap tetikle → UniV3 callback → Slipstream swap → geri öde
-    //    7. Bakiye oku (SONRA)
-    //    8. Sandviç koruması: kâr >= minProfit kontrolü
-    //    9. Kâr varsa ve yeterliyse sahibine gönder, yoksa revert
+    //    3. Calldata çözümleme (assembly — 134 byte)
+    //    4. Deadline kontrolü (block.number <= deadlineBlock)
+    //    5. TSTORE callback bağlamı (EIP-1153)
+    //    6. Bakiye oku (ÖNCE)
+    //    7. Flash swap tetikle → UniV3 callback → Slipstream swap → geri öde
+    //    8. Bakiye oku (SONRA)
+    //    9. Sandviç koruması: kâr >= minProfit kontrolü
+    //   10. Kâr kontrat içinde kalır (admin periyodik çeker)
     //
     // ═════════════════════════════════════════════════════════════════════════
 
     fallback() external {
-        // ── 1. SAHİPLİK KONTROLÜ ─────────────────────────────────────────
-        if (msg.sender != owner) revert Unauthorized();
+        // ── 1. EXECUTOR KONTROLÜ ─────────────────────────────────────────
+        if (msg.sender != executor) revert Unauthorized();
 
         // ── 2. REENTRANCY KİLİDİ (EIP-1153 Transient Storage) ────────────
         uint256 locked;
@@ -201,7 +215,7 @@ contract ArbitrajBotu {
         if (locked != 0) revert Locked();
         assembly { tstore(0xFF, 1) }
 
-        // ── 3. CALLDATA ÇÖZÜMLEME (Assembly — 130 byte saf okuma) ────────
+        // ── 3. CALLDATA ÇÖZÜMLEME (Assembly — 134 byte saf okuma) ────────
         address poolA;
         address poolB;
         address owedToken;
@@ -210,6 +224,7 @@ contract ArbitrajBotu {
         uint256 uniDirection;
         uint256 aeroDirection;
         uint256 minProfit;
+        uint256 deadlineBlock;
 
         assembly {
             poolA         := shr(96,  calldataload(0x00))  // [0..20]    Pool A (UniV3)
@@ -220,9 +235,15 @@ contract ArbitrajBotu {
             uniDirection  := shr(248, calldataload(0x70))  // [112]      UniV3 yön (1 byte)
             aeroDirection := shr(248, calldataload(0x71))  // [113]      Slipstream yön (1 byte)
             minProfit     := shr(128, calldataload(0x72))  // [114..130] minProfit (uint128)
+            deadlineBlock := shr(224, calldataload(0x82))  // [130..134] deadlineBlock (uint32)
         }
 
         if (amount == 0) revert ZeroAmount();
+
+        // ── 3.5. DEADLINE KONTROLÜ (Stale TX koruması) ───────────────────
+        //    Hedeflenen blokta çalışmayan işlem otomatik revert olur.
+        //    Mempool'da takılan TX'lerin kötü koşullarda yürütme riski engellenir.
+        if (block.number > deadlineBlock) revert DeadlineExpired();
 
         bool zeroForOne = (uniDirection == 0);
 
@@ -270,8 +291,10 @@ contract ArbitrajBotu {
         //    Sandviç saldırısında kâr düştüğünde burası revert atar.
         if (profit < minProfit) revert InsufficientProfit();
 
-        // ── 9. KÂRI SAHİBE GÖNDER ───────────────────────────────────────
-        _safeTransfer(owedToken, owner, profit);
+        // ── 9. KÂR KONTRAT İÇİNDE KALIR ───────────────────────────────
+        //    v9.0: Kâr otomatik olarak dışarı gönderilmez.
+        //    Admin (soğuk cüzdan/multisig) withdrawToken ile periyodik çeker.
+        //    Böylece executor key çalınsa bile sermaye güvende kalır.
 
         // ── 10. TRANSIENT STORAGE TEMİZLİĞİ + EVENT ─────────────────────
         assembly {
@@ -395,23 +418,25 @@ contract ArbitrajBotu {
     //  ACİL DURUM — Token ve ETH Kurtarma
     // ═════════════════════════════════════════════════════════════════════════
 
-    /// @notice Kontrattaki tüm token bakiyesini sahibine çek
+    /// @notice Kontrattaki tüm token bakiyesini admin'e çek
+    /// @dev Sadece admin (soğuk cüzdan/multisig) çağırabilir
     function withdrawToken(address token) external {
-        if (msg.sender != owner) revert Unauthorized();
+        if (msg.sender != admin) revert Unauthorized();
         uint256 bal = IERC20(token).balanceOf(address(this));
         if (bal == 0) revert ZeroAmount();
-        _safeTransfer(token, owner, bal);
-        emit EmergencyTokenWithdraw(token, bal, owner);
+        _safeTransfer(token, admin, bal);
+        emit EmergencyTokenWithdraw(token, bal, admin);
     }
 
-    /// @notice Kontrattaki tüm ETH bakiyesini sahibine çek
+    /// @notice Kontrattaki tüm ETH bakiyesini admin'e çek
+    /// @dev Sadece admin (soğuk cüzdan/multisig) çağırabilir
     function withdrawETH() external {
-        if (msg.sender != owner) revert Unauthorized();
+        if (msg.sender != admin) revert Unauthorized();
         uint256 bal = address(this).balance;
         if (bal == 0) revert ZeroAmount();
-        (bool ok, ) = owner.call{value: bal}("");
+        (bool ok, ) = admin.call{value: bal}("");
         if (!ok) revert TransferFailed();
-        emit EmergencyETHWithdraw(bal, owner);
+        emit EmergencyETHWithdraw(bal, admin);
     }
 
     // ═════════════════════════════════════════════════════════════════════════

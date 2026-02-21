@@ -1,8 +1,15 @@
 // ============================================================================
 //  TYPES — Paylaşılan Tipler, Yapılandırma ve İstatistikler
-//  Arbitraj Botu v7.0 — Base Network
+//  Arbitraj Botu v9.0 — Base Network
 //
-//  v7.0 Yenilikler:
+//  v9.0 Yenilikler:
+//  ✓ Executor/Admin rol ayrımı (admin_address)
+//  ✓ Deadline block desteği (deadline_blocks)
+//  ✓ Dinamik bribe/priority fee modeli (bribe_pct)
+//  ✓ Şifreli keystore desteği (keystore_path)
+//  ✓ 134-byte calldata uyumu (deadlineBlock eklendi)
+//
+//  v7.0 (korunuyor):
 //  ✓ NonceManager — AtomicU64 ile atomik nonce yönetimi
 //  ✓ Token adresleri (weth_address, usdc_address) BotConfig'e eklendi
 //  ✓ TickBitmap off-chain derinlik haritası yapıları
@@ -370,6 +377,7 @@ pub struct BotConfig {
     /// Transport modu (IPC > WSS > HTTP)
     pub transport_mode: TransportMode,
     /// Private key (kontrat tetikleme için, opsiyonel)
+    /// v9.0: KeyManager üzerinden yönetilir, ama geriye uyumluluk için saklanır
     pub private_key: Option<String>,
     /// Arbitraj kontrat adresi (opsiyonel)
     pub contract_address: Option<Address>,
@@ -405,6 +413,24 @@ pub struct BotConfig {
     /// Gölge Modu (Shadow Mode): false ise fırsatlar loglanır, TX gönderilmez
     /// .env'deki EXECUTION_ENABLED ile kontrol edilir
     pub execution_enabled_flag: bool,
+
+    // ── v9.0: Yeni Güvenlik ve Performans Alanları ──────────────
+
+    /// Admin adresi — fon çekme yetkisi (soğuk cüzdan / multisig)
+    /// v9.0 kontrat: admin rolü. Boşsa executor adresi kullanılır.
+    #[allow(dead_code)]
+    pub admin_address: Option<Address>,
+    /// Deadline block offset — calldata'ya eklenir, kontrat kontrol eder
+    /// Ör: 2 → mevcut blok + 2 = son geçerli blok
+    pub deadline_blocks: u32,
+    /// Dinamik bribe yüzdesi — beklenen kârın bu oranı builder'a verilir
+    /// Ör: 0.25 = %25, coinbase.transfer veya yüksek priority fee olarak
+    pub bribe_pct: f64,
+    /// Şifreli keystore dosya yolu (v9.0 key management)
+    #[allow(dead_code)]
+    pub keystore_path: Option<String>,
+    /// Key Manager modu aktif mi? (auto_load tarafından ayarlanır)
+    pub key_manager_active: bool,
 }
 
 impl BotConfig {
@@ -505,6 +531,28 @@ impl BotConfig {
             .parse::<bool>()
             .unwrap_or(false);
 
+        // ── v9.0: Yeni Güvenlik ve Performans Ayarları ───────────
+
+        // Admin adresi (fon çekme yetkisi — kontrat v9.0)
+        let admin_address = std::env::var("ADMIN_ADDRESS")
+            .ok()
+            .filter(|addr| !addr.is_empty())
+            .and_then(|addr| addr.parse::<Address>().ok());
+
+        // Deadline block offset (varsayılan: 2 blok)
+        let deadline_blocks = std::env::var("DEADLINE_BLOCKS")
+            .unwrap_or_else(|_| "2".into())
+            .parse::<u32>()
+            .unwrap_or(2);
+
+        // Dinamik bribe yüzdesi (varsayılan: %25)
+        let bribe_pct = Self::parse_env_f64("BRIBE_PCT", 0.25);
+
+        // Şifreli keystore dosya yolu
+        let keystore_path = std::env::var("KEYSTORE_PATH")
+            .ok()
+            .filter(|p| !p.is_empty());
+
         Ok(Self {
             rpc_wss_url,
             rpc_http_url,
@@ -527,17 +575,22 @@ impl BotConfig {
             tick_bitmap_range,
             tick_bitmap_max_age_blocks,
             execution_enabled_flag,
+            admin_address,
+            deadline_blocks,
+            bribe_pct,
+            keystore_path,
+            key_manager_active: false, // main.rs'de KeyManager başlatıldıktan sonra güncellenir
         })
     }
 
     /// Kontrat tetikleme modu aktif mi?
-    /// Üç koşul:
+    /// Koşullar:
     ///   1. EXECUTION_ENABLED=true (.env)
-    ///   2. PRIVATE_KEY tanımlı
+    ///   2. Private key mevcut (keystore VEYA env var)
     ///   3. ARBITRAGE_CONTRACT_ADDRESS tanımlı
     pub fn execution_enabled(&self) -> bool {
         self.execution_enabled_flag
-            && self.private_key.is_some()
+            && (self.private_key.is_some() || self.key_manager_active)
             && self.contract_address.is_some()
     }
 

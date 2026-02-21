@@ -1,7 +1,11 @@
 // ============================================================================
-//  SIMULATOR v6.0 — REVM Tabanlı Yerel EVM Simülasyonu + Multi-Tick Engine
+//  SIMULATOR v9.0 — REVM Tabanlı Yerel EVM Simülasyonu + Multi-Tick Engine
 //
-//  v6.0 Yenilikler:
+//  v9.0 Yenilikler:
+//  ✓ 134-byte calldata (deadlineBlock: uint32 eklendi)
+//  ✓ Kontrat v9.0 uyumu (executor/admin, deadline, kâr kontrat içinde)
+//
+//  v6.0 (korunuyor):
 //  ✓ TickBitmap entegrasyonu — multi-tick swap impact analizi
 //  ✓ Tick geçiş detayları (hangi tick'ler patlatıldı, likidite değişimi)
 //  ✓ Gerçek bitmap yoksa otomatik dampening fallback
@@ -470,10 +474,10 @@ impl SwapImpactResult {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Calldata Payload Mühendisliği — 130 Byte Kompakt Kodlama (v8.0 Kontrat)
+// Calldata Payload Mühendisliği — 134 Byte Kompakt Kodlama (v9.0 Kontrat)
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Kontrat v8.0 ile uyumlu 130-byte calldata formatı:
+// Kontrat v9.0 ile uyumlu 134-byte calldata formatı:
 //
 //   Offset  Boy   Alan
 //   ──────  ────  ─────────────────────────────────
@@ -485,14 +489,15 @@ impl SwapImpactResult {
 //   0x70     1B   UniV3 Yön (0=zeroForOne, 1=oneForZero)
 //   0x71     1B   Slipstream Yön (0=zeroForOne, 1=oneForZero)
 //   0x72    16B   minProfit (uint128, big-endian — sandviç koruması)
+//   0x82     4B   deadlineBlock (uint32, big-endian — blok son kullanma)
 //   ──────  ────  ─────────────────────────────────
-//   Toplam: 130B  (Eski 73B formatına göre +57B, sandviç koruması dahil)
+//   Toplam: 134B  (v8.0: 130B + 4B deadlineBlock)
 //
-// Gas tasarrufu: ABI'nin 260+ byte'ına karşı %50 tasarruf
-// Güvenlik: minProfit ile MEV sandviç saldırısına karşı koruma
+// Gas tasarrufu: ABI'nin 260+ byte'ına karşı ~%48 tasarruf
+// Güvenlik: minProfit + deadlineBlock ile MEV + stale TX koruması
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 130-byte kompakt calldata kodla (kontrat v8.0 uyumlu)
+/// 134-byte kompakt calldata kodla (kontrat v9.0 uyumlu)
 ///
 /// # Parametreler
 /// - `pool_a`: UniV3 havuzu (flash swap kaynağı)
@@ -503,6 +508,7 @@ impl SwapImpactResult {
 /// - `uni_direction`: UniV3 yön (0=zeroForOne, 1=oneForZero)
 /// - `aero_direction`: Slipstream yön (0=zeroForOne, 1=oneForZero)
 /// - `min_profit`: Minimum kâr eşiği (uint128, wei cinsinden)
+/// - `deadline_block`: Son geçerli blok numarası (uint32)
 pub fn encode_compact_calldata(
     pool_a: Address,
     pool_b: Address,
@@ -512,9 +518,10 @@ pub fn encode_compact_calldata(
     uni_direction: u8,
     aero_direction: u8,
     min_profit: u128,
+    deadline_block: u32,
 ) -> Vec<u8> {
-    // Tam 130 byte: 20+20+20+20+32+1+1+16
-    let mut calldata = Vec::with_capacity(130);
+    // Tam 134 byte: 20+20+20+20+32+1+1+16+4
+    let mut calldata = Vec::with_capacity(134);
 
     // [0x00..0x14] Pool A adresi (UniV3) — 20 byte
     calldata.extend_from_slice(pool_a.as_slice());
@@ -540,16 +547,19 @@ pub fn encode_compact_calldata(
     // [0x72..0x82] minProfit — uint128, 16 byte big-endian
     calldata.extend_from_slice(&min_profit.to_be_bytes());
 
-    debug_assert_eq!(calldata.len(), 130, "Kompakt calldata tam 130 byte olmalı");
+    // [0x82..0x86] deadlineBlock — uint32, 4 byte big-endian
+    calldata.extend_from_slice(&deadline_block.to_be_bytes());
+
+    debug_assert_eq!(calldata.len(), 134, "Kompakt calldata tam 134 byte olmalı");
     calldata
 }
 
 /// Kompakt calldata'yı çözümle (test/debug için)
 ///
-/// 130 byte → (pool_a, pool_b, owed_token, received_token, amount, uni_dir, aero_dir, min_profit)
+/// 134 byte → (pool_a, pool_b, owed_token, received_token, amount, uni_dir, aero_dir, min_profit, deadline_block)
 #[allow(dead_code)]
-pub fn decode_compact_calldata(data: &[u8]) -> Option<(Address, Address, Address, Address, U256, u8, u8, u128)> {
-    if data.len() != 130 {
+pub fn decode_compact_calldata(data: &[u8]) -> Option<(Address, Address, Address, Address, U256, u8, u8, u128, u32)> {
+    if data.len() != 134 {
         return None;
     }
 
@@ -561,8 +571,9 @@ pub fn decode_compact_calldata(data: &[u8]) -> Option<(Address, Address, Address
     let uni_direction = data[112];
     let aero_direction = data[113];
     let min_profit = u128::from_be_bytes(data[114..130].try_into().ok()?);
+    let deadline_block = u32::from_be_bytes(data[130..134].try_into().ok()?);
 
-    Some((pool_a, pool_b, owed_token, received_token, amount, uni_direction, aero_direction, min_profit))
+    Some((pool_a, pool_b, owed_token, received_token, amount, uni_direction, aero_direction, min_profit, deadline_block))
 }
 
 /// Kompakt calldata'yı hex string olarak formatla (log/debug)
@@ -571,7 +582,7 @@ pub fn format_compact_calldata_hex(calldata: &[u8]) -> String {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Calldata Testleri (130-byte v8.0 formatı)
+// Calldata Testleri (134-byte v9.0 formatı)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -586,31 +597,32 @@ mod calldata_tests {
     const USDC: Address = address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
 
     #[test]
-    fn test_compact_calldata_is_130_bytes() {
+    fn test_compact_calldata_is_134_bytes() {
         let amount = U256::from(5_000_000_000_000_000_000u128); // 5 WETH
 
         let calldata = encode_compact_calldata(
             POOL_A, POOL_B, WETH, USDC,
-            amount, 0x00, 0x01, 1_000_000u128,
+            amount, 0x00, 0x01, 1_000_000u128, 99_999_999u32,
         );
 
-        assert_eq!(calldata.len(), 130, "Kompakt calldata 130 byte olmalı");
+        assert_eq!(calldata.len(), 134, "Kompakt calldata 134 byte olmalı");
     }
 
     #[test]
     fn test_compact_calldata_encode_decode_roundtrip() {
         let amount = U256::from(25_000_000_000_000_000_000u128); // 25 WETH
         let min_profit: u128 = 50_000_000; // 50 USDC (6 decimal)
+        let deadline: u32 = 12_345_678;
 
         // Kodla
         let calldata = encode_compact_calldata(
             POOL_A, POOL_B, USDC, WETH,
-            amount, 0x01, 0x00, min_profit,
+            amount, 0x01, 0x00, min_profit, deadline,
         );
-        assert_eq!(calldata.len(), 130);
+        assert_eq!(calldata.len(), 134);
 
         // Çözümle (round-trip)
-        let (dec_a, dec_b, dec_owed, dec_recv, dec_amount, dec_uni, dec_aero, dec_profit) =
+        let (dec_a, dec_b, dec_owed, dec_recv, dec_amount, dec_uni, dec_aero, dec_profit, dec_deadline) =
             decode_compact_calldata(&calldata).expect("Decode başarısız");
 
         assert_eq!(dec_a, POOL_A, "Pool A adresi eşleşmeli");
@@ -621,6 +633,7 @@ mod calldata_tests {
         assert_eq!(dec_uni, 0x01, "UniV3 yön eşleşmeli");
         assert_eq!(dec_aero, 0x00, "Slipstream yön eşleşmeli");
         assert_eq!(dec_profit, min_profit, "minProfit eşleşmeli");
+        assert_eq!(dec_deadline, deadline, "deadlineBlock eşleşmeli");
     }
 
     #[test]
@@ -630,8 +643,9 @@ mod calldata_tests {
         let owed = address!("0000000000000000000000000000000000000003");
         let recv = address!("0000000000000000000000000000000000000004");
         let amount = U256::from(1u64);
+        let deadline: u32 = 0x01020304;
 
-        let cd = encode_compact_calldata(pool_a, pool_b, owed, recv, amount, 0x00, 0x01, 0xFF);
+        let cd = encode_compact_calldata(pool_a, pool_b, owed, recv, amount, 0x00, 0x01, 0xFF, deadline);
 
         // [0..20] = pool_a → son byte 0x01
         assert_eq!(cd[19], 0x01, "Pool A son byte = 0x01");
@@ -651,21 +665,26 @@ mod calldata_tests {
         // [114..130] = minProfit (16 byte big-endian, 0xFF = last byte)
         assert_eq!(cd[129], 0xFF, "minProfit son byte = 0xFF");
         assert_eq!(cd[114], 0x00, "minProfit ilk byte = 0x00");
+        // [130..134] = deadlineBlock (4 byte big-endian)
+        assert_eq!(cd[130], 0x01, "deadlineBlock byte 0 = 0x01");
+        assert_eq!(cd[131], 0x02, "deadlineBlock byte 1 = 0x02");
+        assert_eq!(cd[132], 0x03, "deadlineBlock byte 2 = 0x03");
+        assert_eq!(cd[133], 0x04, "deadlineBlock byte 3 = 0x04");
     }
 
     #[test]
     fn test_compact_calldata_invalid_length_rejected() {
-        // 129 byte (eksik) — decode None döndürmeli
-        let short = vec![0u8; 129];
-        assert!(decode_compact_calldata(&short).is_none(), "129 byte reddedilmeli");
+        // 133 byte (eksik) — decode None döndürmeli
+        let short = vec![0u8; 133];
+        assert!(decode_compact_calldata(&short).is_none(), "133 byte reddedilmeli");
 
-        // 131 byte (fazla) — decode None döndürmeli
-        let long = vec![0u8; 131];
-        assert!(decode_compact_calldata(&long).is_none(), "131 byte reddedilmeli");
+        // 135 byte (fazla) — decode None döndürmeli
+        let long = vec![0u8; 135];
+        assert!(decode_compact_calldata(&long).is_none(), "135 byte reddedilmeli");
 
-        // Eski 73 byte — reddedilmeli
-        let old = vec![0u8; 73];
-        assert!(decode_compact_calldata(&old).is_none(), "73 byte eski format reddedilmeli");
+        // Eski 130 byte — reddedilmeli
+        let old = vec![0u8; 130];
+        assert!(decode_compact_calldata(&old).is_none(), "130 byte eski format reddedilmeli");
 
         // Boş veri
         let empty: Vec<u8> = vec![];
@@ -674,23 +693,23 @@ mod calldata_tests {
 
     #[test]
     fn test_compact_vs_abi_size_comparison() {
-        // Eski ABI: 4 (selector) + 32*8 (params) = 260 byte
-        // Yeni kompakt: 20+20+20+20+32+1+1+16 = 130 byte
-        // Tasarruf: 260 - 130 = 130 byte (%50 azalma)
+        // Eski ABI: 4 (selector) + 32*9 (params) = 292 byte
+        // Yeni kompakt: 20+20+20+20+32+1+1+16+4 = 134 byte
+        // Tasarruf: 292 - 134 = 158 byte (~%54 azalma)
         let amount = U256::from(10_000_000_000_000_000_000u128);
 
         let compact = encode_compact_calldata(
             POOL_A, POOL_B, WETH, USDC,
-            amount, 0x00, 0x01, 1_000_000u128,
+            amount, 0x00, 0x01, 1_000_000u128, 99_999_999u32,
         );
-        let abi_size: usize = 4 + 32 * 8; // 8 parametreli ABI
+        let abi_size: usize = 4 + 32 * 9; // 9 parametreli ABI
 
-        assert_eq!(compact.len(), 130);
-        assert_eq!(abi_size, 260);
+        assert_eq!(compact.len(), 134);
+        assert_eq!(abi_size, 292);
         assert!(compact.len() < abi_size, "Kompakt format ABI'den küçük olmalı");
 
         let saved = abi_size - compact.len();
-        assert_eq!(saved, 130, "130 byte tasarruf");
+        assert_eq!(saved, 158, "158 byte tasarruf");
     }
 
     #[test]
@@ -701,13 +720,13 @@ mod calldata_tests {
         let recv = address!("0000000000000000000000000000000000000004");
         let amount = U256::from(0xFFu64);
 
-        let cd = encode_compact_calldata(pool_a, pool_b, owed, recv, amount, 0x00, 0x01, 0);
+        let cd = encode_compact_calldata(pool_a, pool_b, owed, recv, amount, 0x00, 0x01, 0, 100u32);
         let hex_str = format_compact_calldata_hex(&cd);
 
         // "0x" ile başlamalı
         assert!(hex_str.starts_with("0x"), "Hex 0x ile başlamalı");
-        // 130 byte = 260 hex karakter + "0x" = 262 karakter
-        assert_eq!(hex_str.len(), 262, "Hex string 262 karakter olmalı");
+        // 134 byte = 268 hex karakter + "0x" = 270 karakter
+        assert_eq!(hex_str.len(), 270, "Hex string 270 karakter olmalı");
     }
 
     #[test]
@@ -716,13 +735,14 @@ mod calldata_tests {
         let max_profit = u128::MAX;
         let calldata = encode_compact_calldata(
             POOL_A, POOL_B, WETH, USDC,
-            U256::from(1u64), 0x00, 0x01, max_profit,
+            U256::from(1u64), 0x00, 0x01, max_profit, u32::MAX,
         );
-        assert_eq!(calldata.len(), 130);
+        assert_eq!(calldata.len(), 134);
 
-        let (_, _, _, _, _, _, _, decoded_profit) =
+        let (_, _, _, _, _, _, _, decoded_profit, decoded_deadline) =
             decode_compact_calldata(&calldata).expect("Decode başarısız");
         assert_eq!(decoded_profit, max_profit, "u128::MAX minProfit round-trip");
+        assert_eq!(decoded_deadline, u32::MAX, "u32::MAX deadlineBlock round-trip");
     }
 
     #[test]
@@ -734,6 +754,7 @@ mod calldata_tests {
         // receivedToken = USDC (UniV3'den al, Slipstream'e ver)
         let amount = U256::from(1_000_000_000_000_000_000u128); // 1 WETH
         let min_profit = 500_000u128; // 0.5 USDC (6 decimal)
+        let deadline = 20_000_000u32; // Blok ~20M
 
         let calldata = encode_compact_calldata(
             POOL_A, POOL_B,
@@ -743,9 +764,10 @@ mod calldata_tests {
             0x01,   // UniV3: oneForZero (WETH al = zeroForOne=false → direction=1)
             0x00,   // Slipstream: zeroForOne (USDC sat → WETH al)
             min_profit,
+            deadline,
         );
 
-        assert_eq!(calldata.len(), 130);
+        assert_eq!(calldata.len(), 134);
 
         // Round-trip doğrula  
         let decoded = decode_compact_calldata(&calldata).expect("Decode başarısız");
@@ -757,5 +779,6 @@ mod calldata_tests {
         assert_eq!(decoded.5, 0x01);
         assert_eq!(decoded.6, 0x00);
         assert_eq!(decoded.7, min_profit);
+        assert_eq!(decoded.8, deadline);
     }
 }

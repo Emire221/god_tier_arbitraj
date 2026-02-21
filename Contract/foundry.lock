@@ -2,13 +2,13 @@
   "lib\\aave-v3-core": {
     "tag": {
       "name": "v1.19.4",
-      "rev": "b74526a7bc67a3a117a1963fc871b3eb8cea8435"
+      "rev": "bbbfa175c21892841c43589ecf228dfa067302ae"
     }
   },
   "lib\\forge-std": {
     "tag": {
       "name": "v1.14.0",
-      "rev": "1801b0541f4fda118a10798fd3486bb7051c5dd6"
+      "rev": "78f475b0ca1ad6f270269bcb411cc47c73755781"
     }
   }
 }

@@ -579,11 +579,20 @@ async fn execute_inner(
         None
     };
 
-    // ═══ RAW TX GÖNDERİMİ — ATOMIK NONCE + DİNAMİK FEE ═══
+    // ═══ GAS LIMIT: REVM SİMÜLASYONU × 1.10 (%10 GÜVENLİK TAMPONU) ═══
+    // REVM simülasyonundan gelen gas değerine %10 ek marj eklenir.
+    // Sebep: Zincirdeki state, TX'in borsaya ulaşana kadar geçen 2-3ms'de
+    // başka bir küçük swap nedeniyle değişebilir → cold storage access,
+    // state diff vb. ek gas tüketir. Bu tampon "Out of Gas" hatasını önler.
+    let gas_limit_with_buffer = ((simulated_gas as f64) * 1.10) as u64;
+    let gas_limit = gas_limit_with_buffer.max(150_000); // Minimum 150K güvenlik tabanı
+
+    // ═══ RAW TX GÖNDERİMİ — ATOMIK NONCE + DİNAMİK FEE + GAS LIMIT ═══
     let mut tx = TransactionRequest::default()
         .to(contract_address)
         .input(calldata.into())
-        .nonce(nonce);
+        .nonce(nonce)
+        .gas_limit(gas_limit as u128);
 
     // Dinamik priority fee ayarla (varsa)
     if let Some(pf) = priority_fee_per_gas {
@@ -591,8 +600,8 @@ async fn execute_inner(
     }
 
     println!(
-        "  {} TX gönderiliyor... (miktar: {:.6} WETH, nonce: {}, deadline: blok #{}, payload: 134 byte)",
-        "📤".yellow(), trade_size_weth, nonce, deadline_block
+        "  {} TX gönderiliyor... (miktar: {:.6} WETH, nonce: {}, deadline: blok #{}, gas_limit: {} (+10%), payload: 134 byte)",
+        "📤".yellow(), trade_size_weth, nonce, deadline_block, gas_limit
     );
     let pending = provider.send_transaction(tx)
         .await

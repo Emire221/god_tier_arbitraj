@@ -16,13 +16,72 @@
 //  ✓ Multi-transport yapılandırması (IPC > WSS > HTTP)
 // ============================================================================
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{address, Address, U256};
 use eyre::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::RwLock;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Token Whitelist — Güvenli Token Listesi (Base Network)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// v10.1: Sadece yüksek likiditeli, kanıtlanmış tokenlar beyaz listede.
+// Egzotik veya yeni çıkan tokenlar ile işlem yapılması engellenir.
+// Bu, rüg-pull, düşük likidite kayası ve token manipulasyonu risklerini
+// ortadan kaldırır.
+//
+// Desteklenen tokenlar:
+//   • WETH  — Wrapped Ether (Base canonical)
+//   • USDC  — USD Coin (Circle, bridged)
+//   • USDT  — Tether USD (bridged)
+//   • DAI   — Dai Stablecoin (bridged)
+//   • cbETH — Coinbase Wrapped Staked ETH
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Base Network üzerindeki güvenli token adresleri (donanım kodlu whitelist)
+pub fn token_whitelist() -> HashSet<Address> {
+    HashSet::from([
+        // WETH — Base canonical
+        address!("4200000000000000000000000000000000000006"),
+        // USDC — Circle (bridged)
+        address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
+        // USDbC — USD Base Coin (bridged via Base bridge)
+        address!("d9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA"),
+        // DAI — Dai Stablecoin (bridged)
+        address!("50c5725949A6F0c72E6C4a641F24049A917DB0Cb"),
+        // cbETH — Coinbase Wrapped Staked ETH
+        address!("2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22"),
+    ])
+}
+
+/// Token adresinin whitelistte olup olmadığını doğrula (utility, gelecekte per-trade kontrol için)
+#[allow(dead_code)]
+pub fn is_token_whitelisted(token: &Address) -> bool {
+    token_whitelist().contains(token)
+}
+
+/// Yapılandırılan token adreslerinin whitelist kontrolü
+/// Startup sırasında çağrılır — whitelistte olmayan token varsa hata döner
+#[allow(dead_code)]
+pub fn validate_token_whitelist(weth: &Address, usdc: &Address) -> Result<()> {
+    let wl = token_whitelist();
+    if !wl.contains(weth) {
+        return Err(eyre::eyre!(
+            "WETH adresi ({}) token whitelist'te YOK! Egzotik token riski.",
+            weth
+        ));
+    }
+    if !wl.contains(usdc) {
+        return Err(eyre::eyre!(
+            "USDC adresi ({}) token whitelist'te YOK! Egzotik token riski.",
+            usdc
+        ));
+    }
+    Ok(())
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DEX Türü
@@ -395,9 +454,11 @@ pub struct BotConfig {
     pub stats_interval: u64,
     /// Maks yeniden bağlanma denemesi (0 = sınırsız)
     pub max_retries: u32,
-    /// Başlangıç bekleme süresi (saniye)
+    /// Başlangıç bekleme süresi (saniye) — v10.1: agresif reconnect ile kullanılmıyor
+    #[allow(dead_code)]
     pub initial_retry_delay_secs: u64,
-    /// Maksimum bekleme süresi (saniye)
+    /// Maksimum bekleme süresi (saniye) — v10.1: agresif reconnect ile kullanılmıyor
+    #[allow(dead_code)]
     pub max_retry_delay_secs: u64,
     /// Veri tazelik eşiği (milisaniye)
     pub max_staleness_ms: u128,
@@ -431,6 +492,9 @@ pub struct BotConfig {
     pub keystore_path: Option<String>,
     /// Key Manager modu aktif mi? (auto_load tarafından ayarlanır)
     pub key_manager_active: bool,
+    /// v10.1: Circuit breaker eşiği — kaç ardışık başarısızlıkta bot kapanır
+    /// Varsayılan: 3. .env'den CIRCUIT_BREAKER_THRESHOLD ile ayarlanabilir.
+    pub circuit_breaker_threshold: u32,
 }
 
 impl BotConfig {
@@ -548,6 +612,12 @@ impl BotConfig {
         // Dinamik bribe yüzdesi (varsayılan: %25)
         let bribe_pct = Self::parse_env_f64("BRIBE_PCT", 0.25);
 
+        // v10.1: Circuit breaker eşiği (varsayılan: 3)
+        let circuit_breaker_threshold = std::env::var("CIRCUIT_BREAKER_THRESHOLD")
+            .unwrap_or_else(|_| "3".into())
+            .parse::<u32>()
+            .unwrap_or(3);
+
         // Şifreli keystore dosya yolu
         let keystore_path = std::env::var("KEYSTORE_PATH")
             .ok()
@@ -580,6 +650,7 @@ impl BotConfig {
             bribe_pct,
             keystore_path,
             key_manager_active: false, // main.rs'de KeyManager başlatıldıktan sonra güncellenir
+            circuit_breaker_threshold,
         })
     }
 

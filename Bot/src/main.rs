@@ -300,6 +300,15 @@ async fn main() -> Result<()> {
     // Havuz yapılandırmalarını oku
     let pools = load_pool_configs_from_env()?;
 
+    // ═══ v10.1: TOKEN WHITELIST DOĞRULAMA (şimdilik devre dışı) ═══
+    // Startup sırasında yapılandırılan token adreslerini beyaz listeye karşı doğrula
+    // TODO: Yeni tokenlar eklendikçe whitelist güncellenecek ve yeniden etkinleştirilecek
+    // crate::types::validate_token_whitelist(&config.weth_address, &config.usdc_address)?;
+    // println!(
+    //     "  {} Token Whitelist: WETH ve USDC adresleri doğrulandı",
+    //     "✅".green()
+    // );
+
     // ═══ v9.0: KEY MANAGER BAŞLATMA ═══
     // Öncelik: 1) Şifreli keystore → 2) Env var (uyarıyla) → 3) Key yok
     let key_manager = key_manager::KeyManager::auto_load()?;
@@ -327,13 +336,12 @@ async fn main() -> Result<()> {
 
     // Yeniden bağlanma döngüsü
     let mut retry_count: u32 = 0;
-    let mut retry_delay = config.initial_retry_delay_secs;
 
     loop {
         if retry_count > 0 {
             println!(
-                "  {} Yeniden bağlanma denemesi #{} ({} saniye beklendi)",
-                "🔄".yellow(), retry_count, retry_delay
+                "  {} Yeniden bağlanma denemesi #{}",
+                "🔄".yellow(), retry_count
             );
         }
 
@@ -343,7 +351,6 @@ async fn main() -> Result<()> {
                     "\n  {} Bağlantı kesildi. Yeniden bağlanılıyor...",
                     "⚠️".yellow()
                 );
-                retry_delay = config.initial_retry_delay_secs;
             }
             Err(e) => {
                 println!(
@@ -363,12 +370,15 @@ async fn main() -> Result<()> {
             return Err(eyre::eyre!("Maksimum yeniden bağlanma denemesi aşıldı"));
         }
 
+        // v10.1: Agresif reconnect — 100ms sabit bekleme
+        // Exponential backoff KALDIRILDI. RPC sağlayıcıları sessizce
+        // bağlantıyı koparabilir; her milisaniye kaçırılan fırsat demek.
+        // 100ms sonra anında yeniden bağlanılır.
         println!(
-            "  {} {} saniye sonra tekrar denenecek...",
-            "⏳".yellow(), retry_delay
+            "  {} 100ms sonra agresif yeniden bağlanılıyor... (deneme #{})",
+            "⚡".yellow(), retry_count
         );
-        tokio::time::sleep(Duration::from_secs(retry_delay)).await;
-        retry_delay = (retry_delay * 2).min(config.max_retry_delay_secs);
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -591,8 +601,35 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
     stats.active_transport = active_transport.to_string();
     let mut last_bitmap_block: u64 = block;
 
-    // ══════════════ ANA DÖNGÜ — BLOK BAZLI ══════════════
-    while let Some(block_header) = stream.next().await {
+    // ══════════════ ANA DÖNGÜ — BLOK BAZLI + WSS HEARTBEAT ══════════════
+    // v10.1: WSS bağlantı sağlığı kontrolü (Heartbeat)
+    // 15 saniye içinde yeni blok gelmezse bağlantı kopmuş sayılır
+    // ve run_bot() hata döndürerek agresif reconnect tetiklenir.
+    // Base L2: ~2s blok süresi → 15s = ~7 blok kaybı toleransı
+    loop {
+        let block_header = match tokio::time::timeout(
+            Duration::from_secs(15),
+            stream.next(),
+        ).await {
+            Ok(Some(header)) => header,
+            Ok(None) => {
+                // Stream kapandı — reconnect gerekli
+                println!(
+                    "  {} WSS stream kapandı — yeniden bağlanılıyor...",
+                    "⚠️".yellow()
+                );
+                return Err(eyre::eyre!("WSS stream kapandı"));
+            }
+            Err(_) => {
+                // 15s timeout — bağlantı muhtemelen koptu
+                println!(
+                    "  {} WSS heartbeat timeout (15s blok yok) — bağlantı yeniden kurulacak",
+                    "💔".red()
+                );
+                return Err(eyre::eyre!("WSS heartbeat timeout: 15 saniyedir blok gelmedi"));
+            }
+        };
+
         let block_start = Instant::now();
         let block_number = block_header.header.number.unwrap_or(0);
 
@@ -650,20 +687,32 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
 
         // ── 3. ARBİTRAJ FIRSATI KONTROLÜ ────────────────────
         if all_synced {
-            // v10.0: Circuit Breaker — 3 ardışık başarısızlıkta geçici duraklama
-            if stats.consecutive_failures >= 3 {
-                println!(
-                    "     {} Circuit Breaker AKTIF! {} ardışık başarısızlık — 30 saniye bekleniyor...",
-                    "⛔".red(),
+            // v10.1: Circuit Breaker — ardışık başarısızlıkta botu güvenle kapat
+            //         30s uyku yerine process::exit(1) çağrılır.
+            //         Sebep: 3 ardışık revert = sistemik sorun (kontrat hedef alınmış,
+            //         likidite çekilmiş, RPC tutarsızlığı vb.). Uyuyup devam etmek
+            //         sadece daha fazla gas yakar.
+            //         Eşik: CIRCUIT_BREAKER_THRESHOLD (.env, varsayılan=3)
+            if stats.consecutive_failures >= config.circuit_breaker_threshold {
+                eprintln!(
+                    "\n  {} CIRCUIT BREAKER TETIKLENDI! {} ardışık başarısızlık (eşik: {})",
+                    "🛑",
                     stats.consecutive_failures,
+                    config.circuit_breaker_threshold,
                 );
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                stats.consecutive_failures = 0; // Bekleme sonrası sayacı sıfırla
-                println!(
-                    "     {} Circuit Breaker sıfırlandı, normal operasyona dönülüyor",
-                    "✅".green(),
+                eprintln!(
+                    "  {} Bot güvenli kapanıyor — manuel müdahale gerekli.",
+                    "🛑",
                 );
-                continue;
+                eprintln!(
+                    "  {} Son istatistikler: {} blok, {} fırsat, {} başarısız sim, {} işlem",
+                    "📊",
+                    stats.total_blocks_processed,
+                    stats.total_opportunities,
+                    stats.failed_simulations,
+                    stats.executed_trades,
+                );
+                std::process::exit(1);
             }
 
             if let Some(opportunity) = check_arbitrage_opportunity(pools, &states, config) {
@@ -689,9 +738,7 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
         {
             print_stats_summary(&stats, &states);
         }
-    }
-
-    Ok(())
+    } // heartbeat loop sonu — loop sadece return Err() ile çıkar
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

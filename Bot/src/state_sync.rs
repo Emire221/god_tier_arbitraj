@@ -130,6 +130,10 @@ sol! {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Tek bir havuzun durumunu RPC üzerinden oku ve SharedPoolState'e yaz
+///
+/// v10.0: slot0 ve liquidity sorguları artık paralel (tokio::join!)
+///        Eski: 2 sıralı RPC çağrısı (2 RTT)
+///        Yeni: 1 paralel çağrı (1 RTT) — blok başına ~2-5ms kazanç
 pub async fn sync_pool_state<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
     provider: &P,
     pool_config: &PoolConfig,
@@ -139,17 +143,31 @@ pub async fn sync_pool_state<T: Transport + Clone, P: Provider<T, Ethereum> + Sy
     let (sqrt_price_x96, tick, liquidity) = match pool_config.dex {
         DexType::UniswapV3 => {
             let pool = IUniswapV3Pool::new(pool_config.address, provider);
-            let slot0 = pool.slot0().call().await
+            // v10.0: Paralel okuma — slot0 ve liquidity aynı anda (1 RTT)
+            let slot0_call = pool.slot0();
+            let liq_call = pool.liquidity();
+            let (slot0_result, liq_result) = tokio::join!(
+                slot0_call.call(),
+                liq_call.call(),
+            );
+            let slot0 = slot0_result
                 .map_err(|e| eyre::eyre!("[{}] slot0 okuma hatası (V3/7-alan): {}", pool_config.name, e))?;
-            let liq = pool.liquidity().call().await
+            let liq = liq_result
                 .map_err(|e| eyre::eyre!("[{}] liquidity okuma hatası: {}", pool_config.name, e))?;
             (slot0.sqrtPriceX96, slot0.tick, liq._0)
         }
         DexType::Aerodrome => {
             let pool = IAerodromePool::new(pool_config.address, provider);
-            let slot0 = pool.slot0().call().await
+            // v10.0: Paralel okuma — slot0 ve liquidity aynı anda (1 RTT)
+            let slot0_call = pool.slot0();
+            let liq_call = pool.liquidity();
+            let (slot0_result, liq_result) = tokio::join!(
+                slot0_call.call(),
+                liq_call.call(),
+            );
+            let slot0 = slot0_result
                 .map_err(|e| eyre::eyre!("[{}] slot0 okuma hatası (Aero/6-alan): {}", pool_config.name, e))?;
-            let liq = pool.liquidity().call().await
+            let liq = liq_result
                 .map_err(|e| eyre::eyre!("[{}] liquidity okuma hatası: {}", pool_config.name, e))?;
             (slot0.sqrtPriceX96, slot0.tick, liq._0)
         }
@@ -590,21 +608,33 @@ pub async fn optimistic_refresh_pool<T: Transport + Clone, P: Provider<T, Ethere
     current_block: u64,
 ) -> Result<bool> {
     // Havuzun güncel slot0 ve liquidity değerlerini anlık oku
-    // Bu çağrı ~1-3ms sürer (tek RPC round-trip)
+    // v10.0: Paralel okuma (tokio::join!) — tek RTT (~1-3ms)
     let (sqrt_price_x96, tick, liquidity) = match pool_config.dex {
         DexType::UniswapV3 => {
             let pool = IUniswapV3Pool::new(pool_config.address, provider);
-            let slot0 = pool.slot0().call().await
+            let slot0_call = pool.slot0();
+            let liq_call = pool.liquidity();
+            let (slot0_result, liq_result) = tokio::join!(
+                slot0_call.call(),
+                liq_call.call(),
+            );
+            let slot0 = slot0_result
                 .map_err(|e| eyre::eyre!("[OPT:{}] slot0 okuma hatası: {}", pool_config.name, e))?;
-            let liq = pool.liquidity().call().await
+            let liq = liq_result
                 .map_err(|e| eyre::eyre!("[OPT:{}] liquidity okuma hatası: {}", pool_config.name, e))?;
             (slot0.sqrtPriceX96, slot0.tick, liq._0)
         }
         DexType::Aerodrome => {
             let pool = IAerodromePool::new(pool_config.address, provider);
-            let slot0 = pool.slot0().call().await
+            let slot0_call = pool.slot0();
+            let liq_call = pool.liquidity();
+            let (slot0_result, liq_result) = tokio::join!(
+                slot0_call.call(),
+                liq_call.call(),
+            );
+            let slot0 = slot0_result
                 .map_err(|e| eyre::eyre!("[OPT:{}] slot0 okuma hatası: {}", pool_config.name, e))?;
-            let liq = pool.liquidity().call().await
+            let liq = liq_result
                 .map_err(|e| eyre::eyre!("[OPT:{}] liquidity okuma hatası: {}", pool_config.name, e))?;
             (slot0.sqrtPriceX96, slot0.tick, liq._0)
         }

@@ -149,11 +149,16 @@ impl SimulationEngine {
         calldata: Vec<u8>,
         value_wei: U256,
         current_block: u64,
+        block_timestamp: u64,
+        block_base_fee: u64,
     ) -> SimulationResult {
         // 1. Veritabanını oluştur
         let db = self.build_db(pools, states, caller, contract_address);
 
         // 2. EVM'yi yapılandır ve çalıştır
+        // v10.0: Timestamp ve base_fee artık zincir verisinden dinamik olarak gelir.
+        //        Eski: SystemTime::now() → yanlış zaman damgası, base_fee yok
+        //        Yeni: block_header.timestamp ve block_header.base_fee_per_gas
         let mut evm = Evm::builder()
             .with_db(db)
             .with_spec_id(SpecId::CANCUN)
@@ -162,12 +167,8 @@ impl SimulationEngine {
             })
             .modify_block_env(|block| {
                 block.number = RevmU256::from(current_block);
-                block.timestamp = RevmU256::from(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                );
+                block.timestamp = RevmU256::from(block_timestamp);
+                block.basefee = RevmU256::from(block_base_fee);
             })
             .modify_tx_env(|tx| {
                 tx.caller = to_revm_addr(caller);

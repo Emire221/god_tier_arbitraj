@@ -596,6 +596,11 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
         let block_start = Instant::now();
         let block_number = block_header.header.number.unwrap_or(0);
 
+        // v10.0: Dinamik timestamp ve base_fee — zincir verisinden
+        let block_timestamp = block_header.header.timestamp;
+        let block_base_fee = block_header.header.base_fee_per_gas
+            .unwrap_or(0) as u64;
+
         // ── 1. DURUM SENKRONİZASYONU ────────────────────────
         let sync_results = sync_all_pools(&provider, pools, &states, block_number).await;
 
@@ -645,6 +650,22 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
 
         // ── 3. ARBİTRAJ FIRSATI KONTROLÜ ────────────────────
         if all_synced {
+            // v10.0: Circuit Breaker — 3 ardışık başarısızlıkta geçici duraklama
+            if stats.consecutive_failures >= 3 {
+                println!(
+                    "     {} Circuit Breaker AKTIF! {} ardışık başarısızlık — 30 saniye bekleniyor...",
+                    "⛔".red(),
+                    stats.consecutive_failures,
+                );
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                stats.consecutive_failures = 0; // Bekleme sonrası sayacı sıfırla
+                println!(
+                    "     {} Circuit Breaker sıfırlandı, normal operasyona dönülüyor",
+                    "✅".green(),
+                );
+                continue;
+            }
+
             if let Some(opportunity) = check_arbitrage_opportunity(pools, &states, config) {
                 // ── 4. DEĞERLENDİR + SİMÜLE + YÜRÜT ──────────
                 evaluate_and_execute(
@@ -656,6 +677,8 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
                     &sim_engine,
                     &mut stats,
                     &nonce_manager,
+                    block_timestamp,
+                    block_base_fee,
                 ).await;
             }
         }

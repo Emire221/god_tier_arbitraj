@@ -30,6 +30,8 @@ use crate::types::*;
 use crate::math;
 use crate::simulator::SimulationEngine;
 
+use zeroize::Zeroize;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Zaman Damgası
 // ─────────────────────────────────────────────────────────────────────────────
@@ -150,6 +152,8 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
     sim_engine: &SimulationEngine,
     stats: &mut ArbitrageStats,
     nonce_manager: &Arc<NonceManager>,
+    block_timestamp: u64,
+    block_base_fee: u64,
 ) {
     let _buy_pool = &pools[opportunity.buy_pool_idx];
     let _sell_pool = &pools[opportunity.sell_pool_idx];
@@ -214,6 +218,8 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
             calldata,
             U256::ZERO,
             current_block as u64,
+            block_timestamp,
+            block_base_fee,
         )
     } else {
         sim_result.clone()
@@ -225,9 +231,14 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
     // Simülasyon başarısız → işlemi atla
     if !sim_result.success {
         stats.failed_simulations += 1;
+        // v10.0: Circuit breaker — ardışık başarısızlık sayacını artır
+        stats.consecutive_failures += 1;
         print_simulation_failure(opportunity, &sim_result, pools);
         return;
     }
+
+    // Simülasyon başarılı → ardışık başarısızlık sayacını sıfırla
+    stats.consecutive_failures = 0;
 
     // ─── KÂRLI FIRSAT RAPORU ─────────────────────────────────
     stats.profitable_opportunities += 1;
@@ -305,7 +316,14 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
             );
             exact_profit
         };
-        let min_profit = compute_min_profit_exact(exact_min_profit);
+
+        // v10.0: Varlık bazlı dinamik slippage
+        let slippage_bps = {
+            let buy_state = states[opportunity.buy_pool_idx].read();
+            let sell_state = states[opportunity.sell_pool_idx].read();
+            determine_slippage_factor_bps(buy_state.liquidity, sell_state.liquidity)
+        };
+        let min_profit = compute_min_profit_exact(exact_min_profit, slippage_bps);
 
         // Atomik nonce al
         let nonce = nonce_manager.get_and_increment();
@@ -452,13 +470,21 @@ async fn execute_on_chain(
 ) {
     println!("\n  {} {}", "🚀".yellow(), "KONTRAT TETİKLEME BAŞLATILDI".yellow().bold());
 
-    match execute_inner(
-        &rpc_url, &private_key, contract_address,
+    // v10.0: Private key güvenli bellek yönetimi
+    // İmza sonrası private_key RAM'den silinir (zeroize)
+    let mut pk_owned = private_key;
+    let result = execute_inner(
+        &rpc_url, &pk_owned, contract_address,
         pool_a, pool_b,
         owed_token, received_token,
         trade_size_weth, uni_direction, aero_direction,
         min_profit, deadline_block, bribe_wei, simulated_gas, nonce,
-    ).await {
+    ).await;
+
+    // İmza tamamlandı — private key bellekten güvenle silinir
+    pk_owned.zeroize();
+
+    match result {
         Ok(hash) => {
             println!("  {} TX başarılı: {}", "✅".green(), hash.green().bold());
         }
@@ -533,14 +559,19 @@ async fn execute_inner(
     // Gas değeri: REVM simülasyonundan gelen kesin değer (sabit 350K DEĞİL)
     let priority_fee_per_gas = if bribe_wei > 0 {
         // REVM'den gelen gerçek gas kullanımı (minimum 100K güvenlik tabanı)
-        let actual_gas: u128 = (simulated_gas as u128).max(100_000);
+        // v10.0: %10 güvenlik tamponu — REVM simülasyonu bazen %5-10 düşük tahmin eder
+        //        Gerçek zincirde state diff, cold storage access vb. ek gas tüketebilir.
+        //        Bu tampon bribe hesabının güvenli kalmasını sağlar.
+        let gas_with_buffer = ((simulated_gas as f64) * 1.10) as u128;
+        let actual_gas: u128 = gas_with_buffer.max(100_000);
         let fee = bribe_wei / actual_gas;
         let fee = fee.max(1_000_000); // Minimum 1 Gwei
         println!(
-            "  {} Dinamik Priority Fee: {} Gwei (bribe: {} wei, REVM gas: {})",
+            "  {} Dinamik Priority Fee: {} Gwei (bribe: {} wei, REVM gas: {} (+10% buffer → {}))",
             "💰".yellow(),
             fee / 1_000_000_000,
             bribe_wei,
+            simulated_gas,
             actual_gas,
         );
         Some(fee)
@@ -625,21 +656,47 @@ fn compute_directions_and_tokens(
 /// minProfit hesapla (owedToken cinsinden, uint128 wei)
 ///
 /// math::exact::compute_exact_arbitrage_profit ile hesaplanan
-/// exact_profit_wei değerinin %95'ini minProfit olarak ayarla.
-/// Kalan %5 güvenlik marjı — slippage, yuvarlama hataları vb.
+/// exact_profit_wei değerinin dinamik bir yüzdesini minProfit olarak ayarla.
+///
+/// v10.0: Varlık bazlı dinamik slippage:
+///   - Derin likidite (>1e18): %99.9 (sadece 10 bps tolerans)
+///   - Orta likidite (>1e16): %99.5 (50 bps tolerans)
+///   - Sığ likidite:          %95   (500 bps tolerans, güvenli)
 ///
 /// ÖNEMLİ: Float ve USD çevirisi YOKTUR. Tamamen U256 tam sayı matematik.
-/// NOT: Eski %10 tolerans MEV botlarına sandwich fırsatı veriyordu.
-///      %5 marj ile bu boşluk daraltıldı.
-fn compute_min_profit_exact(exact_profit_wei: U256) -> u128 {
-    // %95 güvenlik faktörü: (profit * 95) / 100
-    let min_profit_u256 = (exact_profit_wei * U256::from(95)) / U256::from(100);
+fn compute_min_profit_exact(exact_profit_wei: U256, slippage_factor_bps: u64) -> u128 {
+    // slippage_factor_bps: 9990 = %99.9, 9950 = %99.5, 9500 = %95
+    let min_profit_u256 = (exact_profit_wei * U256::from(slippage_factor_bps)) / U256::from(10_000u64);
 
     // u128'e sığdır (kontrat uint128 bekler). Overflow durumunda u128::MAX kullan.
     if min_profit_u256 > U256::from(u128::MAX) {
         u128::MAX
     } else {
         min_profit_u256.to::<u128>()
+    }
+}
+
+/// Havuz likidite derinliğine göre slippage faktörü hesapla (bps cinsinden)
+///
+/// Mantık:
+///   - Derin havuzlar (WETH/USDC, likidite > 1e18) → %99.9 (9990 bps)
+///     MEV sandwich fırsatı minimuma iner
+///   - Orta derinlik (likidite > 1e16) → %99.5 (9950 bps)
+///     Makul güvenlik marjı
+///   - Sığ havuzlar (altcoin'ler, düşük likidite) → %95 (9500 bps)
+///     Yüksek slippage riski, konservatif yaklaşım
+fn determine_slippage_factor_bps(buy_liquidity: u128, sell_liquidity: u128) -> u64 {
+    let min_liquidity = buy_liquidity.min(sell_liquidity);
+
+    if min_liquidity >= 1_000_000_000_000_000_000 {
+        // >= 1e18 aktif likidite → derin havuz
+        9990 // %99.9
+    } else if min_liquidity >= 10_000_000_000_000_000 {
+        // >= 1e16 aktif likidite → orta derinlik
+        9950 // %99.5
+    } else {
+        // Sığ havuz — konservatif
+        9500 // %95
     }
 }
 

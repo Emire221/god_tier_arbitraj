@@ -732,6 +732,9 @@ pub struct ArbitrageStats {
     pub min_block_latency_ms: f64,
     /// Toplam tick bitmap senkronizasyon sayısı
     pub tick_bitmap_syncs: u64,
+    /// v10.0: Ardışık başarısızlık sayacı (circuit breaker için)
+    /// 3 ardışık simülasyon/TX başarısızlığında bot geçici olarak durur
+    pub consecutive_failures: u32,
 }
 
 impl ArbitrageStats {
@@ -750,6 +753,7 @@ impl ArbitrageStats {
             avg_block_latency_ms: 0.0,
             min_block_latency_ms: f64::MAX,
             tick_bitmap_syncs: 0,
+            consecutive_failures: 0,
         }
     }
 

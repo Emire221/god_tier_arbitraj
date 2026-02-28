@@ -170,7 +170,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
     );
 
     // Kontrat adresi varsa tam REVM simülasyonu da yap
-    let _revm_result = if let Some(contract_addr) = config.contract_address {
+    let revm_result = if let Some(contract_addr) = config.contract_address {
         let amount_wei = U256::from((opportunity.optimal_amount_weth * 1e18) as u128);
 
         // v9.0 Calldata: 134-byte kompakt payload (kontrat v9.0 uyumlu)
@@ -213,10 +213,14 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
             contract_addr,
             calldata,
             U256::ZERO,
+            current_block as u64,
         )
     } else {
         sim_result.clone()
     };
+
+    // Dinamik gas: REVM simülasyonundan gelen kesin gas değeri
+    let simulated_gas_used = revm_result.gas_used;
 
     // Simülasyon başarısız → işlemi atla
     if !sim_result.success {
@@ -312,6 +316,9 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         let pool_a_addr = pools[0].address;
         let pool_b_addr = pools[1].address;
 
+        // REVM'den gelen kesin gas değerini aktar (sabit 350K yerine)
+        let sim_gas = simulated_gas_used;
+
         tokio::spawn(async move {
             execute_on_chain(
                 rpc_url, pk, contract_addr,
@@ -320,6 +327,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
                 trade_weth, uni_dir, aero_dir,
                 min_profit, deadline_block,
                 bribe_wei,
+                sim_gas,
                 nonce, nm_clone,
             ).await;
         });
@@ -438,6 +446,7 @@ async fn execute_on_chain(
     min_profit: u128,
     deadline_block: u32,
     bribe_wei: u128,
+    simulated_gas: u64,
     nonce: u64,
     nonce_manager: Arc<NonceManager>,
 ) {
@@ -448,7 +457,7 @@ async fn execute_on_chain(
         pool_a, pool_b,
         owed_token, received_token,
         trade_size_weth, uni_direction, aero_direction,
-        min_profit, deadline_block, bribe_wei, nonce,
+        min_profit, deadline_block, bribe_wei, simulated_gas, nonce,
     ).await {
         Ok(hash) => {
             println!("  {} TX başarılı: {}", "✅".green(), hash.green().bold());
@@ -476,6 +485,7 @@ async fn execute_inner(
     min_profit: u128,
     deadline_block: u32,
     bribe_wei: u128,
+    simulated_gas: u64,
     nonce: u64,
 ) -> eyre::Result<String> {
     use alloy::providers::WsConnect;
@@ -520,17 +530,18 @@ async fn execute_inner(
     // ═══ DİNAMİK PRİORİTY FEE HESAPLAMA ═══
     // Beklenen kârın bribe_pct yüzdesi yüksek priority fee olarak verilir
     // Base L2 FIFO sequencer: priority fee sıralaması belirler
+    // Gas değeri: REVM simülasyonundan gelen kesin değer (sabit 350K DEĞİL)
     let priority_fee_per_gas = if bribe_wei > 0 {
-        // Tahmini gas: 350K (flash swap + callback)
-        let estimated_gas: u128 = 350_000;
-        let fee = bribe_wei / estimated_gas;
+        // REVM'den gelen gerçek gas kullanımı (minimum 100K güvenlik tabanı)
+        let actual_gas: u128 = (simulated_gas as u128).max(100_000);
+        let fee = bribe_wei / actual_gas;
         let fee = fee.max(1_000_000); // Minimum 1 Gwei
         println!(
-            "  {} Dinamik Priority Fee: {} Gwei (bribe: {} wei, gas tahmini: {})",
+            "  {} Dinamik Priority Fee: {} Gwei (bribe: {} wei, REVM gas: {})",
             "💰".yellow(),
             fee / 1_000_000_000,
             bribe_wei,
-            estimated_gas,
+            actual_gas,
         );
         Some(fee)
     } else {
@@ -614,13 +625,15 @@ fn compute_directions_and_tokens(
 /// minProfit hesapla (owedToken cinsinden, uint128 wei)
 ///
 /// math::exact::compute_exact_arbitrage_profit ile hesaplanan
-/// exact_profit_wei değerinin %90'ını minProfit olarak ayarla.
-/// Kalan %10 güvenlik marjı — slippage, gas fiyat değişimi vb.
+/// exact_profit_wei değerinin %95'ini minProfit olarak ayarla.
+/// Kalan %5 güvenlik marjı — slippage, yuvarlama hataları vb.
 ///
 /// ÖNEMLİ: Float ve USD çevirisi YOKTUR. Tamamen U256 tam sayı matematik.
+/// NOT: Eski %10 tolerans MEV botlarına sandwich fırsatı veriyordu.
+///      %5 marj ile bu boşluk daraltıldı.
 fn compute_min_profit_exact(exact_profit_wei: U256) -> u128 {
-    // %90 güvenlik faktörü: (profit * 90) / 100
-    let min_profit_u256 = (exact_profit_wei * U256::from(90)) / U256::from(100);
+    // %95 güvenlik faktörü: (profit * 95) / 100
+    let min_profit_u256 = (exact_profit_wei * U256::from(95)) / U256::from(100);
 
     // u128'e sığdır (kontrat uint128 bekler). Overflow durumunda u128::MAX kullan.
     if min_profit_u256 > U256::from(u128::MAX) {

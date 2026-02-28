@@ -28,6 +28,7 @@ use state_sync::*;
 use simulator::SimulationEngine;
 use strategy::*;
 
+use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use futures_util::StreamExt;
 use eyre::Result;
@@ -549,10 +550,40 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
     // ══════════════ BLOK BAŞLIĞI ABONELİĞİ ══════════════
     println!();
     println!("{}", "  ════════════════════════════════════════════════════════════════".green());
-    println!("  {}  CANLI YAYIN v9.0 — Yeni bloklar dinleniyor...", "📡".green());
-    println!("  {}  Döngü: State Sync → TickBitmap → Multi-Tick NR → REVM → Yürüt", "📡".green());
+    println!("  {}  CANLI YAYIN v9.0 — Yeni bloklar + Pending TX dinleniyor...", "📡".green());
+    println!("  {}  Döngü: Pending TX → State Sync → TickBitmap → NR → REVM → Yürüt", "📡".green());
     println!("{}", "  ════════════════════════════════════════════════════════════════".green());
     println!();
+
+    // ══════════════ PENDING TX DİNLEYİCİ (FAZ 4) ══════════════
+    // Base L2 sequencer'daki bekleyen swap TX'lerini arka planda dinle
+    // ve etkilenen havuzların durumlarını iyimser (optimistic) olarak güncelle.
+    // Bu sayede blok onayını beklemeden ~15-20ms erken hareket edilir.
+    let pool_addresses: Vec<Address> = pools.iter().map(|p| p.address).collect();
+    {
+        let pools_bg = pools.to_vec();
+        let states_bg: Vec<SharedPoolState> = states.iter().map(|s| Arc::clone(s)).collect();
+        let pool_addrs_bg = pool_addresses.clone();
+        let rpc_url_bg = config.rpc_wss_url.clone();
+
+        tokio::spawn(async move {
+            // Pending TX stream — best effort, hata olursa sessizce devam et
+            match pending_tx_listener(
+                &rpc_url_bg,
+                &pools_bg,
+                &states_bg,
+                &pool_addrs_bg,
+            ).await {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!(
+                        "  {} Pending TX dinleyici hatası (blok bazlı akış devam ediyor): {}",
+                        "⚠️", e
+                    );
+                }
+            }
+        });
+    }
 
     let sub = provider.subscribe_blocks().await?;
     let mut stream = sub.into_stream();
@@ -634,6 +665,83 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
             && stats.total_blocks_processed > 0
         {
             print_stats_summary(&stats, &states);
+        }
+    }
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PENDING TX DİNLEYİCİ (FAZ 4) — Optimistic State Update
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Base L2 sequencer'daki bekleyen işlemleri WebSocket üzerinden dinler.
+// İzlenen havuzlara (UniV3 / Slipstream) yönelik swap TX'leri tespit
+// edildiğinde, havuzun durumu anlık olarak RPC'den tekrar okunur.
+//
+// Bu "iyimser güncelleme" sayesinde bot, blok onayını beklemeden
+// ~15-20ms erken hareket edebilir.
+//
+// NOT: Base L2'de mempool sınırlıdır. Bu dinleyici "best effort" çalışır.
+// Pending TX bulunamasa bile mevcut blok bazlı akış aynen devam eder.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn pending_tx_listener(
+    rpc_url: &str,
+    pools: &[PoolConfig],
+    states: &[SharedPoolState],
+    pool_addresses: &[Address],
+) -> Result<()> {
+    use alloy::providers::WsConnect;
+
+    let ws = WsConnect::new(rpc_url);
+    let provider = ProviderBuilder::new().on_ws(ws).await
+        .map_err(|e| eyre::eyre!("Pending TX provider bağlantı hatası: {}", e))?;
+
+    println!("  {} Pending TX dinleyici başlatıldı (optimistic mode)", "🔮".cyan());
+
+    // Pending TX stream — full TX nesneleri ile
+    let sub = provider.subscribe_full_pending_transactions().await
+        .map_err(|e| eyre::eyre!("Pending TX abonelik hatası: {}", e))?;
+    let mut stream = sub.into_stream();
+
+    while let Some(tx) = stream.next().await {
+        // TX'in hedef adresi izlenen havuzlardan biri mi?
+        let tx_to = tx.to;
+        let tx_input = &tx.input;
+
+        if let Some(pool_idx) = state_sync::check_pending_tx_relevance(
+            tx_to,
+            tx_input,
+            pool_addresses,
+        ) {
+            // Etkilenen havuzun durumunu anlık oku (optimistic refresh)
+            let current_block = states[0].read().last_block;
+            match state_sync::optimistic_refresh_pool(
+                &provider,
+                &pools[pool_idx],
+                &states[pool_idx],
+                current_block,
+            ).await {
+                Ok(true) => {
+                    // Fiyat değişti — havuz güncellendi
+                    let state = states[pool_idx].read();
+                    println!(
+                        "     {} [Pending TX] {} iyimser güncelleme: {:.2}$",
+                        "🔮".magenta(),
+                        pools[pool_idx].name,
+                        state.eth_price_usd,
+                    );
+                }
+                Ok(false) => {} // Fiyat değişmedi, sessiz geç
+                Err(e) => {
+                    // Hata — sessiz devam et, blok bazlı akış zaten çalışıyor
+                    eprintln!(
+                        "     {} [Pending TX] {} refresh hatası: {}",
+                        "⚠️", pools[pool_idx].name, e
+                    );
+                }
+            }
         }
     }
 

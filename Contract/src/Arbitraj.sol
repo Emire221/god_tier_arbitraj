@@ -296,15 +296,10 @@ contract ArbitrajBotu {
         //    Admin (soğuk cüzdan/multisig) withdrawToken ile periyodik çeker.
         //    Böylece executor key çalınsa bile sermaye güvende kalır.
 
-        // ── 10. TRANSIENT STORAGE TEMİZLİĞİ + EVENT ─────────────────────
-        assembly {
-            tstore(0x00, 0)  // expectedPool
-            tstore(0x01, 0)  // aeroPool
-            tstore(0x02, 0)  // aeroDirection
-            tstore(0x03, 0)  // owedToken
-            tstore(0x04, 0)  // receivedToken
-            tstore(0xFF, 0)  // reentrancy kilidi
-        }
+        // ── 10. EVENT ──────────────────────────────────────────────────
+        //    EIP-1153: Transient storage TX sonunda otomatik silinir.
+        //    Manuel temizlik (tstore(slot, 0)) gereksiz gas harcar.
+        //    Reentrancy kilidi (0xFF) dahil tüm slot'lar otomatik temiz.
 
         emit ArbitrageExecuted(poolA, poolB, amount, profit);
     }

@@ -148,6 +148,7 @@ impl SimulationEngine {
         contract_address: Address,
         calldata: Vec<u8>,
         value_wei: U256,
+        current_block: u64,
     ) -> SimulationResult {
         // 1. Veritabanını oluştur
         let db = self.build_db(pools, states, caller, contract_address);
@@ -160,7 +161,7 @@ impl SimulationEngine {
                 cfg.chain_id = 8453; // Base
             })
             .modify_block_env(|block| {
-                block.number = RevmU256::from(99_999_999u64);
+                block.number = RevmU256::from(current_block);
                 block.timestamp = RevmU256::from(
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -292,7 +293,7 @@ impl SimulationEngine {
         // Tüm kontroller geçti
         SimulationResult {
             success: true,
-            gas_used: 350_000, // Tahmini gas (Uniswap V3 swap ~200k, flash loan ~150k)
+            gas_used: 350_000, // Fallback tahmini gas — tam REVM simülasyonu varsa o değer kullanılır
             error: None,
         }
     }

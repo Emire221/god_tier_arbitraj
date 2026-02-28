@@ -90,6 +90,9 @@ error DeadlineExpired();
 /// @dev Sıfır adres (address(0)) kullanılamaz
 error ZeroAddress();
 
+/// @dev Havuz adresi beyaz listede değil (arbitrary execution engeli)
+error PoolNotWhitelisted();
+
 // ── MINIMAL INTERFACES ───────────────────────────────────────────────────────
 
 interface IERC20 {
@@ -166,9 +169,20 @@ contract ArbitrajBotu {
         address indexed token, uint256 amount, address indexed to
     );
     event EmergencyETHWithdraw(uint256 amount, address indexed to);
+    event PoolWhitelistUpdated(address indexed pool, bool status);
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  CONSTRUCTOR — executor ve admin immutable olarak bytecode'a yazılır
+    // ─────────────────────────────────────────────────────────────────────────    //  STORAGE — Pool Beyaz Listesi (v10.0)
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// @notice Onaylanmış havuz adresleri kayıt defteri.
+    ///         Sadece admin tarafından güncellenebilir.
+    ///         fallback() bu listeyi kontrol eder — listede olmayan
+    ///         havuzlara swap emri gönderilemez.
+    ///         Executor key sızması durumunda saldırganın sahte havuz
+    ///         adresi göndermesini engeller.
+    mapping(address => bool) public whitelistedPools;
+
+    // ───────────────────────────────────────────────────────────────────────    //  CONSTRUCTOR — executor ve admin immutable olarak bytecode'a yazılır
     // ─────────────────────────────────────────────────────────────────────
 
     /// @param _executor Arbitraj yürütme adresi (sıcak cüzdan)
@@ -240,7 +254,15 @@ contract ArbitrajBotu {
 
         if (amount == 0) revert ZeroAmount();
 
-        // ── 3.5. DEADLINE KONTROLÜ (Stale TX koruması) ───────────────────
+        // ── 3.5. POOL WHITELIST KONTROLÜ (v10.0 — Arbitrary Execution Engeli) ─
+        //    Sadece admin tarafından onaylanmış havuzlarda işlem yapılabilir.
+        //    Executor key sızması durumunda saldırgan sahte havuz adresi
+        //    gönderemez — listede yoksa anında revert.
+        //    Gas maliyeti: ~2100 gas (2x SLOAD cold) — güvenlik karşılığı makul.
+        if (!whitelistedPools[poolA]) revert PoolNotWhitelisted();
+        if (!whitelistedPools[poolB]) revert PoolNotWhitelisted();
+
+        // ── 3.6. DEADLINE KONTROLÜ (Stale TX koruması) ───────────────────
         //    Hedeflenen blokta çalışmayan işlem otomatik revert olur.
         //    Mempool'da takılan TX'lerin kötü koşullarda yürütme riski engellenir.
         if (block.number > deadlineBlock) revert DeadlineExpired();
@@ -409,7 +431,36 @@ contract ArbitrajBotu {
         }
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════════════════
+    //  POOL WHITELIST YÖNETİMİ (v10.0) — Admin-Only
+    // ═════════════════════════════════════════════════════════════════════════════
+
+    /// @notice Tek havuz adresini beyaz listeye ekle veya çıkar
+    /// @dev Sadece admin çağırabilir. Canlıya geçmeden önce UniV3 ve Slipstream
+    ///      havuzları bu fonksiyonla kaydedilir.
+    /// @param pool Havuz kontrat adresi
+    /// @param status true = beyaz listeye ekle, false = çıkar
+    function setPoolWhitelist(address pool, bool status) external {
+        if (msg.sender != admin) revert Unauthorized();
+        if (pool == address(0)) revert ZeroAddress();
+        whitelistedPools[pool] = status;
+        emit PoolWhitelistUpdated(pool, status);
+    }
+
+    /// @notice Birden fazla havuzu toplu olarak beyaz listeye ekle veya çıkar
+    /// @dev Sadece admin çağırabilir. Deploy sonrası ilk kurulumda kullanılır.
+    /// @param pools Havuz kontrat adresleri dizisi
+    /// @param status true = ekle, false = çıkar (tümüne uygulanır)
+    function batchSetPoolWhitelist(address[] calldata pools, bool status) external {
+        if (msg.sender != admin) revert Unauthorized();
+        for (uint256 i = 0; i < pools.length; i++) {
+            if (pools[i] == address(0)) revert ZeroAddress();
+            whitelistedPools[pools[i]] = status;
+            emit PoolWhitelistUpdated(pools[i], status);
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════════
     //  ACİL DURUM — Token ve ETH Kurtarma
     // ═════════════════════════════════════════════════════════════════════════
 

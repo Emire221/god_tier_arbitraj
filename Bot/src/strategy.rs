@@ -54,6 +54,7 @@ pub fn check_arbitrage_opportunity(
     pools: &[PoolConfig],
     states: &[SharedPoolState],
     config: &BotConfig,
+    block_base_fee: u64,
 ) -> Option<ArbitrageOpportunity> {
     if pools.len() < 2 || states.len() < 2 {
         return None;
@@ -102,6 +103,19 @@ pub fn check_arbitrage_opportunity(
     let sell_bitmap = sell_state.tick_bitmap.as_ref();
     let buy_bitmap = buy_state.tick_bitmap.as_ref();
 
+    // ─── Dinamik Gas Cost (v10.0) ─────────────────────────────────
+    // Formül: gas_cost = (GAS_ESTIMATE * base_fee) / 1e18 * eth_price
+    // Base_fee 0 ise (pre-EIP1559 veya hata) fallback: config.gas_cost_usd
+    let dynamic_gas_cost_usd = if block_base_fee > 0 {
+        let gas_estimate: u64 = 350_000;
+        let gas_cost_eth = (gas_estimate as f64 * block_base_fee as f64) / 1e18;
+        let cost = gas_cost_eth * eth_price_ref;
+        // Minimum floor: 0.001 USD (sıfır gas cost'u engellemek için)
+        cost.max(0.001)
+    } else {
+        config.gas_cost_usd
+    };
+
     // ─── Newton-Raphson Optimal Miktar Hesaplama ──────────────────
     // v6.0: TickBitmap varsa multi-tick hassasiyetinde, yoksa dampening
     let nr_result = math::find_optimal_amount_with_bitmap(
@@ -109,7 +123,7 @@ pub fn check_arbitrage_opportunity(
         pools[sell_idx].fee_fraction,
         buy_state,
         pools[buy_idx].fee_fraction,
-        config.gas_cost_usd,
+        dynamic_gas_cost_usd,
         config.flash_loan_fee_bps,
         eth_price_ref,
         config.max_trade_size_weth,

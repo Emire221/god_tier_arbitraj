@@ -369,7 +369,6 @@ impl NonceManager {
     }
 
     /// Nonce'u belirli bir değere zorla ayarla (RPC senkronizasyonu için)
-    #[allow(dead_code)]
     pub fn force_set(&self, nonce: u64) {
         self.current_nonce.store(nonce, Ordering::SeqCst);
     }

@@ -517,25 +517,34 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
     // ══════════════ REVM SİMÜLASYON MOTORU ══════════════
     let mut sim_engine = SimulationEngine::new();
     sim_engine.cache_bytecodes(pools, &states);
-    println!("\n  {} REVM simülasyon motoru hazır", "✅".green());
+
+    // v10.0: Singleton base_db — bytecode bir kez yüklenir, sonra her blokta klonlanır
+    {
+        let caller_addr = config.private_key.as_ref()
+            .and_then(|pk| pk.parse::<alloy::signers::local::PrivateKeySigner>().ok())
+            .map(|signer| signer.address())
+            .unwrap_or_default();
+        let contract_addr = config.contract_address.unwrap_or_default();
+        sim_engine.initialize_base_db(pools, &states, caller_addr, contract_addr);
+        println!("\n  {} REVM simülasyon motoru hazır (Singleton base_db)", "✅".green());
+    }
 
     // ══════════════ ATOMİK NONCE YÖNETİCİSİ ══════════════
-    let nonce_manager = if let Some(ref pk) = config.private_key {
-        if let Ok(signer) = pk.parse::<alloy::signers::local::PrivateKeySigner>() {
-            let address = signer.address();
-            println!("  {} Nonce okunuyor ({})...", "🔢".yellow(), address);
-            match provider.get_transaction_count(address).await {
-                Ok(nonce) => {
-                    println!("  {} Başlangıç nonce: {} (RPC'den)", "✅".green(), nonce);
-                    Arc::new(NonceManager::new(nonce))
-                }
-                Err(e) => {
-                    println!("  {} Nonce okunamadı, 0'dan başlanıyor: {}", "⚠️".yellow(), e);
-                    Arc::new(NonceManager::new(0))
-                }
+    let executor_address: Option<Address> = config.private_key.as_ref()
+        .and_then(|pk| pk.parse::<alloy::signers::local::PrivateKeySigner>().ok())
+        .map(|signer| signer.address());
+
+    let nonce_manager = if let Some(address) = executor_address {
+        println!("  {} Nonce okunuyor ({})...", "🔢".yellow(), address);
+        match provider.get_transaction_count(address).await {
+            Ok(nonce) => {
+                println!("  {} Başlangıç nonce: {} (RPC'den)", "✅".green(), nonce);
+                Arc::new(NonceManager::new(nonce))
             }
-        } else {
-            Arc::new(NonceManager::new(0))
+            Err(e) => {
+                println!("  {} Nonce okunamadı, 0'dan başlanıyor: {}", "⚠️".yellow(), e);
+                Arc::new(NonceManager::new(0))
+            }
         }
     } else {
         Arc::new(NonceManager::new(0))
@@ -715,7 +724,7 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
                 std::process::exit(1);
             }
 
-            if let Some(opportunity) = check_arbitrage_opportunity(pools, &states, config) {
+            if let Some(opportunity) = check_arbitrage_opportunity(pools, &states, config, block_base_fee) {
                 // ── 4. DEĞERLENDİR + SİMÜLE + YÜRÜT ──────────
                 evaluate_and_execute(
                     &provider,
@@ -737,6 +746,31 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
             && stats.total_blocks_processed > 0
         {
             print_stats_summary(&stats, &states);
+        }
+
+        // ── 6. PERİYODİK NONCE SENKRONİZASYONU (v10.0) ──────
+        // Her 50 blokta bir zincirdeki gerçek nonce ile lokal nonce'u karşılaştır.
+        // Uyumsuzluk varsa zincir değeri ile düzelt (TX kayıpları veya dış müdahale).
+        if stats.total_blocks_processed % 50 == 0
+            && stats.total_blocks_processed > 0
+        {
+            if let Some(addr) = executor_address {
+                match provider.get_transaction_count(addr).await {
+                    Ok(onchain_nonce) => {
+                        let local_nonce = nonce_manager.current();
+                        if local_nonce != onchain_nonce {
+                            println!(
+                                "  {} Nonce uyumsuzluğu tespit edildi: lokal={} zincir={} → düzeltiliyor",
+                                "🔄".yellow(), local_nonce, onchain_nonce
+                            );
+                            nonce_manager.force_set(onchain_nonce);
+                        }
+                    }
+                    Err(e) => {
+                        println!("  {} Nonce sync başarısız: {}", "⚠️".yellow(), e);
+                    }
+                }
+            }
         }
     } // heartbeat loop sonu — loop sadece return Err() ile çıkar
 }

@@ -27,6 +27,7 @@ use alloy::network::Ethereum;
 use alloy::sol;
 use alloy::sol_types::SolCall;
 use eyre::Result;
+use futures_util::StreamExt;
 use std::time::Instant;
 use futures_util::future::join_all;
 
@@ -674,4 +675,199 @@ pub async fn optimistic_refresh_pool<T: Transport + Clone, P: Provider<T, Ethere
     } else {
         Ok(false)
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EVENT-DRIVEN STATE SYNC — Swap Event Dinleyici (v11.0)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Polling yerine eth_subscribe("logs") ile Swap eventlerini dinler.
+// Swap eventi doğrudan sqrtPriceX96, liquidity ve tick bilgisi içerir —
+// ek slot0/liquidity RPC çağrısına gerek kalmaz (zero-latency).
+//
+// Uniswap V3 / Aerodrome Swap Event:
+//   event Swap(
+//     address indexed sender,
+//     address indexed recipient,
+//     int256 amount0,
+//     int256 amount1,
+//     uint160 sqrtPriceX96,
+//     uint128 liquidity,
+//     int24 tick
+//   )
+// Topic0: 0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67
+//
+// Sync Event (likidite değişimi):
+//   Mint/Burn eventleri de dinlenebilir, ancak Swap yeterlidir çünkü
+//   her swap sonrası liquidity ve sqrtPrice günceldir.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Uniswap V3 / Aerodrome Swap event topic0
+/// keccak256("Swap(address,address,int256,int256,uint160,uint128,int24)")
+const SWAP_EVENT_TOPIC: [u8; 32] = [
+    0xc4, 0x20, 0x79, 0xf9, 0x4a, 0x63, 0x50, 0xd7,
+    0xe6, 0x23, 0x5f, 0x29, 0x17, 0x49, 0x24, 0xf9,
+    0x28, 0xcc, 0x2a, 0xc8, 0x18, 0xeb, 0x64, 0xfe,
+    0xd8, 0x00, 0x4e, 0x11, 0x5f, 0xbc, 0xca, 0x67,
+];
+
+/// Swap event log verisinden havuz durumunu çıkar ve güncelle.
+///
+/// Log Data formatı (non-indexed parametreler, ABI-encoded):
+///   [0..32]    int256  amount0
+///   [32..64]   int256  amount1
+///   [64..96]   uint160 sqrtPriceX96 (sağ hizalı, 32 byte padded)
+///   [96..128]  uint128 liquidity (sağ hizalı, 32 byte padded)
+///   [128..160] int24   tick (sağ hizalı, 32 byte padded, sign-extended)
+///
+/// # Dönüş
+/// Ok(true) → durum güncellendi, Ok(false) → güncelleme gerekmedi
+pub fn process_swap_event_log(
+    log_data: &[u8],
+    log_address: Address,
+    log_block_number: u64,
+    pools: &[PoolConfig],
+    states: &[SharedPoolState],
+) -> Result<bool> {
+    // Log adresi hangi havuza ait?
+    let pool_idx = pools.iter()
+        .position(|p| p.address == log_address);
+
+    let pool_idx = match pool_idx {
+        Some(idx) => idx,
+        None => return Ok(false), // Bilinmeyen havuz, atla
+    };
+
+    // Log data en az 160 byte olmalı (5 × 32 byte)
+    if log_data.len() < 160 {
+        return Ok(false);
+    }
+
+    // sqrtPriceX96 çıkar (offset 64..96, uint160)
+    let sqrt_price_x96 = U256::from_be_slice(&log_data[64..96]);
+
+    // liquidity çıkar (offset 96..128, uint128)
+    let liquidity_bytes = &log_data[112..128]; // Son 16 byte = uint128
+    let liquidity = u128::from_be_bytes(liquidity_bytes.try_into().unwrap_or([0u8; 16]));
+
+    // tick çıkar (offset 128..160, int24 olarak sign-extended int256)
+    // Son 4 byte'ı int32 olarak oku, sonra -887272..887272 aralığına sınırla
+    let tick_bytes = &log_data[156..160]; // Son 4 byte
+    let tick_raw = i32::from_be_bytes(tick_bytes.try_into().unwrap_or([0u8; 4]));
+    let tick = tick_raw.clamp(-887272, 887272);
+
+    let config = &pools[pool_idx];
+
+    // f64 dönüşümleri
+    let sqrt_price_f64: f64 = {
+        let s = sqrt_price_x96.to_string();
+        s.parse::<f64>().unwrap_or(0.0)
+    };
+    let liquidity_f64: f64 = liquidity as f64;
+
+    // ETH fiyatı hesapla
+    let eth_price = compute_eth_price(
+        sqrt_price_f64,
+        tick,
+        config.token0_decimals,
+        config.token1_decimals,
+        config.token0_is_weth,
+    );
+
+    // State güncelle
+    {
+        let mut state = states[pool_idx].write();
+        state.sqrt_price_x96 = sqrt_price_x96;
+        state.sqrt_price_f64 = sqrt_price_f64;
+        state.tick = tick;
+        state.liquidity = liquidity;
+        state.liquidity_f64 = liquidity_f64;
+        state.eth_price_usd = eth_price;
+        state.last_block = log_block_number;
+        state.last_update = Instant::now();
+        state.is_initialized = true;
+    }
+
+    Ok(true)
+}
+
+/// Event-driven Swap dinleyici başlat.
+///
+/// Havuz adreslerindeki Swap eventlerini WebSocket/IPC üzerinden dinler.
+/// Her Swap eventi geldiğinde havuz state'ini anlık günceller.
+/// Polling'e göre avantaj: Sıfır gecikme, ek RPC çağrısı yok.
+///
+/// # Parametreler
+/// - `rpc_url`: WebSocket/IPC RPC adresi
+/// - `pools`: İzlenen havuz yapılandırmaları
+/// - `states`: Paylaşımlı havuz durumları
+///
+/// # Dönüş
+/// Bu fonksiyon sonsuz döngüde çalışır. Bağlantı koparsa Err döner.
+pub async fn start_swap_event_listener<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
+    provider: &P,
+    pools: &[PoolConfig],
+    states: &[SharedPoolState],
+) -> Result<()> {
+    use alloy::rpc::types::Filter;
+
+    // Havuz adreslerini filtre olarak ayarla
+    let pool_addresses: Vec<Address> = pools.iter().map(|p| p.address).collect();
+
+    // Swap event topic0
+    let swap_topic = alloy::primitives::B256::from(SWAP_EVENT_TOPIC);
+
+    // Log filtresi: Sadece izlenen havuzlardan gelen Swap eventleri
+    let filter = Filter::new()
+        .address(pool_addresses)
+        .event_signature(swap_topic);
+
+    // Log subscription başlat
+    let sub = provider.subscribe_logs(&filter).await
+        .map_err(|e| eyre::eyre!("Swap event abonelik hatası: {}", e))?;
+    let mut stream = sub.into_stream();
+
+    println!(
+        "  {} Event-driven Swap dinleyici aktif ({} havuz)",
+        "⚡", pools.len()
+    );
+
+    while let Some(log) = stream.next().await {
+        // Log adresini al (Deref through inner)
+        let log_address = log.inner.address;
+
+        // Blok numarasını al
+        let block_number = log.block_number.unwrap_or(0);
+
+        // Swap event log verisini işle
+        let log_data: &[u8] = log.inner.data.data.as_ref();
+
+        match process_swap_event_log(
+            log_data,
+            log_address,
+            block_number,
+            pools,
+            states,
+        ) {
+            Ok(true) => {
+                // State güncellendi — havuz bilgisini logla
+                if let Some(idx) = pools.iter().position(|p| p.address == log_address) {
+                    let state = states[idx].read();
+                    eprintln!(
+                        "     ⚡ [Event] {} → {:.2}$ | Tick: {} | Blok: #{}",
+                        pools[idx].name,
+                        state.eth_price_usd,
+                        state.tick,
+                        block_number,
+                    );
+                }
+            }
+            Ok(false) => {} // Güncelleme gerekmedi
+            Err(e) => {
+                eprintln!("     ⚠️ [Event] Swap log işleme hatası: {}", e);
+            }
+        }
+    }
+
+    Err(eyre::eyre!("Swap event stream kapandı"))
 }

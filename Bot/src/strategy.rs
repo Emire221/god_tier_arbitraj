@@ -107,7 +107,11 @@ pub fn check_arbitrage_opportunity(
     // Formül: gas_cost = (GAS_ESTIMATE * base_fee) / 1e18 * eth_price
     // Base_fee 0 ise (pre-EIP1559 veya hata) fallback: config.gas_cost_usd
     let dynamic_gas_cost_usd = if block_base_fee > 0 {
-        let gas_estimate: u64 = 350_000;
+        // v12.0: 350K → 150K — kompakt calldata + EIP-1153 optimizasyonu
+        // ile gerçek gas tüketimi ~120-150K aralığına inmiştir.
+        // Eski 350K değeri bot'un küçük kârlı fırsatları "kârsız" diye
+        // atlmasına neden oluyordu (dynamic_gas_cost_usd yüksek çıkıyordu).
+        let gas_estimate: u64 = 150_000;
         let gas_cost_eth = (gas_estimate as f64 * block_base_fee as f64) / 1e18;
         let cost = gas_cost_eth * eth_price_ref;
         // Minimum floor: 0.001 USD (sıfır gas cost'u engellemek için)
@@ -172,6 +176,18 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
     let _buy_pool = &pools[opportunity.buy_pool_idx];
     let _sell_pool = &pools[opportunity.sell_pool_idx];
 
+    // ─── v12.0: Sıfıra Bölünme / NaN / Infinity Koruması ─────────────
+    // RPC kopukluğu veya sıfır sqrtPriceX96 durumunda fiyatlar 0.0 olabilir.
+    // Float bölüm sonucu Infinity → u128'e cast'te Rust panic! verir.
+    // Bu kontrol thread çökmesini önler ve döngüyü sessizce atlar.
+    if opportunity.sell_price <= 0.0
+        || opportunity.buy_price <= 0.0
+        || opportunity.optimal_amount_weth <= 0.0
+        || !opportunity.expected_profit_usd.is_finite()
+    {
+        return;
+    }
+
     // ─── İstatistik Güncelle ─────────────────────────────────────
     stats.total_opportunities += 1;
     if opportunity.spread_pct > stats.max_spread_pct {
@@ -189,10 +205,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
 
     // Kontrat adresi varsa tam REVM simülasyonu da yap
     let revm_result = if let Some(contract_addr) = config.contract_address {
-        let amount_wei = U256::from((opportunity.optimal_amount_weth * 1e18) as u128);
-
-        // v9.0 Calldata: 134-byte kompakt payload (kontrat v9.0 uyumlu)
-        // Yön ve token hesaplama:
+        // v11.0 Calldata: Yön ve token hesaplama
         //   buy_pool_idx=0 (UniV3 ucuz): uni=1(oneForZero→WETH al), aero=0(zeroForOne→WETH sat)
         //   buy_pool_idx=1 (Slip ucuz):  uni=0(zeroForOne→USDC al), aero=1(oneForZero→USDC sat)
         let (uni_dir, aero_dir, owed_token, received_token) =
@@ -203,9 +216,22 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
                 &config.usdc_address,
             );
 
-        // v9.0: Deadline block hesapla
+        // ═══ v11.0: DİNAMİK DECIMAL AMOUNT HESAPLAMA ═══
+        // Kritik düzeltme: Input tokeni WETH mi USDC mi?
+        //   - WETH input → amount * 10^18
+        //   - USDC input → amount * eth_price * 10^6
+        // Eski hata: Her zaman 10^18 kullanılıyordu → USDC input'ta
+        //            "5 trilyon USDC" hatası oluşuyordu.
+        let weth_input = crate::types::is_weth_input(uni_dir, pools[0].token0_is_weth);
+        let amount_wei = crate::types::weth_amount_to_input_wei(
+            opportunity.optimal_amount_weth,
+            weth_input,
+            (opportunity.buy_price + opportunity.sell_price) / 2.0,
+        );
+
+        // v9.0: Deadline block hesapla (v11.0: minimum +3 tolerans)
         let current_block = states[0].read().last_block;
-        let deadline_block = current_block as u32 + config.deadline_blocks;
+        let deadline_block = current_block as u32 + config.deadline_blocks.max(3);
 
         let calldata = crate::simulator::encode_compact_calldata(
             pools[0].address,  // pool_a (always UniV3)
@@ -286,7 +312,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         let trade_weth = opportunity.optimal_amount_weth;
         let _buy_price = opportunity.buy_price;
 
-        // v9.0: Yön ve token hesaplama
+        // v11.0: Yön ve token hesaplama
         let (uni_dir, aero_dir, owed_token, received_token) =
             compute_directions_and_tokens(
                 opportunity.buy_pool_idx,
@@ -295,40 +321,115 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
                 &config.usdc_address,
             );
 
-        // v9.0: Deadline block hesapla
+        // v11.0: Deadline block hesapla (minimum +3 tolerans)
         let current_block = states[0].read().last_block;
-        let deadline_block = current_block as u32 + config.deadline_blocks;
+        let deadline_block = current_block as u32 + config.deadline_blocks.max(3);
 
-        // v9.0: Dinamik bribe/priority fee hesapla
-        // Beklenen kârın bribe_pct yüzdesi builder'a gider
-        let bribe_pct = config.bribe_pct;
+        // ═══ v12.0: DİNAMİK MEV BRIBE MÜZAYEDESİ ═══
+        //
+        // Eski yaklaşım: Sabit %25 kâr → builder'a.
+        // Problem: Rakip %30 bırakırsa FIFO'da elenirsiniz.
+        //
+        // Yeni yaklaşım: Adaptatif bribe algoritması
+        //   1. Kâr marjını hesapla (profit / gas_cost oranı)
+        //   2. Marj yüksekse(%300+) → düşük bribe (%25) yeterli
+        //   3. Marj düşükse(<%150) → agresif bribe (%80-99) gerekli
+        //   4. Minimum: 1 Gwei priority fee (sıfır bribe olsa bile sıraya gir)
+        //   5. Maksimum: Kârın %99'u (1 dolar kazanmak 0 dolardan iyidir)
+        //
+        // Base L2 FIFO: Priority fee sıralaması belirler.
+        // Daha yüksek priority fee = daha önce işlenme = rakipleri geçme.
         let expected_profit_wei = (opportunity.expected_profit_usd / opportunity.sell_price * 1e18) as u128;
-        let bribe_wei = ((expected_profit_wei as f64) * bribe_pct) as u128;
 
-        // minProfit hesaplama: exact U256 math ile (USD/float YOK)
-        let exact_min_profit = {
-            let buy_state = states[opportunity.buy_pool_idx].read();
-            let sell_state = states[opportunity.sell_pool_idx].read();
-            let amount_wei = U256::from((opportunity.optimal_amount_weth * 1e18) as u128);
-            let sell_fee_pips = pools[opportunity.sell_pool_idx].fee_bps * 100;
-            let buy_fee_pips = pools[opportunity.buy_pool_idx].fee_bps * 100;
-            let (exact_profit, _) = math::exact::compute_exact_arbitrage_profit(
-                sell_state.sqrt_price_x96,
-                sell_state.liquidity,
-                sell_state.tick,
-                sell_fee_pips,
-                pools[opportunity.sell_pool_idx].tick_spacing,
-                sell_state.tick_bitmap.as_ref(),
-                buy_state.sqrt_price_x96,
-                buy_state.liquidity,
-                buy_state.tick,
-                buy_fee_pips,
-                pools[opportunity.buy_pool_idx].tick_spacing,
-                buy_state.tick_bitmap.as_ref(),
-                amount_wei,
-                pools[0].token0_is_weth,
+        let bribe_wei = {
+            // Gas maliyeti USD hesapla
+            let gas_cost_usd = {
+                let gas_est = 150_000u64;
+                let gas_cost_eth = (gas_est as f64 * block_base_fee as f64) / 1e18;
+                gas_cost_eth * ((opportunity.buy_price + opportunity.sell_price) / 2.0)
+            };
+
+            // Kâr/Gas oranı (profit margin ratio)
+            let profit_margin_ratio = if gas_cost_usd > 0.001 {
+                opportunity.expected_profit_usd / gas_cost_usd
+            } else {
+                10.0 // Gas ücretsiz → marj çok yüksek
+            };
+
+            // Adaptatif bribe yüzdesi:
+            //   margin >= 5x  → %25 (sınırlı rekabet, konservatif)
+            //   margin 3-5x   → %40 (orta rekabet)
+            //   margin 2-3x   → %60 (yüksek rekabet)
+            //   margin 1.5-2x → %80 (çok yüksek rekabet)
+            //   margin < 1.5x → %95 (minimum kâr, maximum agresiflik)
+            let dynamic_bribe_pct: f64 = if profit_margin_ratio >= 5.0 {
+                config.bribe_pct.max(0.25)  // En az %25, config daha yüksekse onu kullan
+            } else if profit_margin_ratio >= 3.0 {
+                0.40
+            } else if profit_margin_ratio >= 2.0 {
+                0.60
+            } else if profit_margin_ratio >= 1.5 {
+                0.80
+            } else {
+                // Margin çok dar — kârın neredeyse tamamını bribe yap
+                // 1 dolar kazanmak 0 dolardan iyidir
+                0.95
+            };
+
+            let bribe = ((expected_profit_wei as f64) * dynamic_bribe_pct) as u128;
+
+            eprintln!(
+                "     {} Bribe: {:.0}% (marj: {:.1}x, profit: {:.4}$, gas: {:.4}$)",
+                "💰", dynamic_bribe_pct * 100.0,
+                profit_margin_ratio,
+                opportunity.expected_profit_usd,
+                gas_cost_usd,
             );
-            exact_profit
+
+            bribe
+        };
+
+        // ═══ v11.0: YÖN-BAZLI EXACT minProfit HESAPLAMA ═══
+        // Kritik düzeltme: Eski sistem her zaman WETH cinsinden profit hesaplıyordu.
+        // Ancak kontrat balAfter(owedToken) - balBefore(owedToken) hesabı yapar.
+        // owedToken=USDC ise kâr USDC cinsinden ölçülür → minProfit 6 decimal olmalı.
+        //
+        // Yeni sistem: Flash swap akışını birebir modelleyen
+        // compute_exact_directional_profit kullanılır.
+        // Bu fonksiyon doğrudan owedToken cinsinden kâr döndürür.
+        let exact_min_profit = {
+            let pool_a_state = states[0].read();
+            let pool_b_state = states[1].read();
+            let pool_a_fee_pips = pools[0].fee_bps * 100;
+            let pool_b_fee_pips = pools[1].fee_bps * 100;
+
+            let weth_input = crate::types::is_weth_input(uni_dir, pools[0].token0_is_weth);
+            let sim_amount_wei = crate::types::weth_amount_to_input_wei(
+                opportunity.optimal_amount_weth,
+                weth_input,
+                (opportunity.buy_price + opportunity.sell_price) / 2.0,
+            );
+
+            let uni_zero_for_one = uni_dir == 0;
+            let aero_zero_for_one = aero_dir == 0;
+
+            math::exact::compute_exact_directional_profit(
+                pool_a_state.sqrt_price_x96,
+                pool_a_state.liquidity,
+                pool_a_state.tick,
+                pool_a_fee_pips,
+                pools[0].tick_spacing,
+                pool_a_state.tick_bitmap.as_ref(),
+                pool_b_state.sqrt_price_x96,
+                pool_b_state.liquidity,
+                pool_b_state.tick,
+                pool_b_fee_pips,
+                pools[1].tick_spacing,
+                pool_b_state.tick_bitmap.as_ref(),
+                sim_amount_wei,
+                uni_zero_for_one,
+                aero_zero_for_one,
+            )
         };
 
         // v10.0: Varlık bazlı dinamik slippage
@@ -351,6 +452,10 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         // REVM'den gelen kesin gas değerini aktar (sabit 350K yerine)
         let sim_gas = simulated_gas_used;
 
+        // v11.0: ETH fiyatı ve token sırası bilgisini execute_on_chain'e aktar
+        let eth_price_for_exec = (opportunity.buy_price + opportunity.sell_price) / 2.0;
+        let t0_is_weth = pools[0].token0_is_weth;
+
         tokio::spawn(async move {
             execute_on_chain(
                 rpc_url, pk, contract_addr,
@@ -361,6 +466,8 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
                 bribe_wei,
                 sim_gas,
                 nonce, nm_clone,
+                eth_price_for_exec,
+                t0_is_weth,
             ).await;
         });
     }
@@ -481,6 +588,8 @@ async fn execute_on_chain(
     simulated_gas: u64,
     nonce: u64,
     nonce_manager: Arc<NonceManager>,
+    eth_price_usd: f64,
+    token0_is_weth: bool,
 ) {
     println!("\n  {} {}", "🚀".yellow(), "KONTRAT TETİKLEME BAŞLATILDI".yellow().bold());
 
@@ -493,6 +602,7 @@ async fn execute_on_chain(
         owed_token, received_token,
         trade_size_weth, uni_direction, aero_direction,
         min_profit, deadline_block, bribe_wei, simulated_gas, nonce,
+        eth_price_usd, token0_is_weth,
     ).await;
 
     // İmza tamamlandı — private key bellekten güvenle silinir
@@ -527,6 +637,8 @@ async fn execute_inner(
     bribe_wei: u128,
     simulated_gas: u64,
     nonce: u64,
+    eth_price_usd: f64,
+    token0_is_weth: bool,
 ) -> eyre::Result<String> {
     use alloy::providers::WsConnect;
 
@@ -543,7 +655,14 @@ async fn execute_inner(
         .await
         .map_err(|e| eyre::eyre!("TX provider bağlantı hatası: {}", e))?;
 
-    let amount_in_wei = U256::from((trade_size_weth * 1e18) as u128);
+    // ═══ v11.0: DİNAMİK DECIMAL AMOUNT HESAPLAMA ═══
+    // Input tokeni WETH mi USDC mi? Decimal buna göre belirlenir.
+    let weth_input = crate::types::is_weth_input(uni_direction, token0_is_weth);
+    let amount_in_wei = crate::types::weth_amount_to_input_wei(
+        trade_size_weth,
+        weth_input,
+        eth_price_usd,
+    );
 
     // ═══ CALLDATA MÜHENDİSLİĞİ: 134-BYTE KOMPAKT PAYLOAD ═══
     let calldata = crate::simulator::encode_compact_calldata(

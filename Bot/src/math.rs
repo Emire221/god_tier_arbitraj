@@ -2346,6 +2346,84 @@ pub mod exact {
         }
     }
 
+    // ── Yön-Bazlı Exact Kâr Hesaplama (Flash Swap Akışı Birebir Model) ─────
+
+    /// Flash swap akışını birebir modelleyerek kârı hesapla.
+    ///
+    /// Kontrat akışı:
+    ///   1. UniV3(PoolA): amount_wei input → received_amount output
+    ///   2. Slipstream(PoolB): received_amount input → owed_output
+    ///   3. profit = owed_output - amount_wei (owedToken cinsinden, wei)
+    ///
+    /// Bu fonksiyon hem WETH-ödeme hem USDC-ödeme senaryolarını doğru hesaplar.
+    /// minProfit calldata değeri bu fonksiyonun çıktısından türetilir.
+    ///
+    /// # Dönüş
+    /// Kâr U256 (owedToken cinsinden, wei). Kâr yoksa U256::ZERO.
+    pub fn compute_exact_directional_profit(
+        // Pool A (UniV3 — flash swap kaynağı)
+        pool_a_sqrt_price: U256,
+        pool_a_liquidity: u128,
+        pool_a_tick: i32,
+        pool_a_fee_pips: u32,
+        pool_a_tick_spacing: i32,
+        pool_a_bitmap: Option<&TickBitmapData>,
+        // Pool B (Slipstream — satış hedefi)
+        pool_b_sqrt_price: U256,
+        pool_b_liquidity: u128,
+        pool_b_tick: i32,
+        pool_b_fee_pips: u32,
+        pool_b_tick_spacing: i32,
+        pool_b_bitmap: Option<&TickBitmapData>,
+        // Swap parametreleri
+        amount_wei: U256,
+        uni_zero_for_one: bool,
+        aero_zero_for_one: bool,
+    ) -> U256 {
+        if amount_wei.is_zero() {
+            return U256::ZERO;
+        }
+
+        // Adım 1: UniV3 flash swap
+        // amount_wei input → received tokens output
+        let univ3_result = compute_exact_swap(
+            pool_a_sqrt_price,
+            pool_a_liquidity,
+            pool_a_tick,
+            amount_wei,
+            uni_zero_for_one,
+            pool_a_fee_pips,
+            pool_a_tick_spacing,
+            pool_a_bitmap,
+        );
+
+        if univ3_result.amount_out.is_zero() {
+            return U256::ZERO;
+        }
+
+        // Adım 2: Slipstream swap
+        // UniV3'ten alınan tokenlar → owedToken geri alınır
+        let slipstream_result = compute_exact_swap(
+            pool_b_sqrt_price,
+            pool_b_liquidity,
+            pool_b_tick,
+            univ3_result.amount_out,
+            aero_zero_for_one,
+            pool_b_fee_pips,
+            pool_b_tick_spacing,
+            pool_b_bitmap,
+        );
+
+        // Adım 3: Kâr = Slipstream çıktısı - UniV3'e borç
+        // Kontrat akışı: balAfter(owedToken) - balBefore(owedToken)
+        // owed_output (Slipstream'den) - amount_wei (UniV3'e ödeme)
+        if slipstream_result.amount_out > amount_wei {
+            slipstream_result.amount_out - amount_wei
+        } else {
+            U256::ZERO
+        }
+    }
+
     // ── Test ─────────────────────────────────────────────────────────────────
 
     #[cfg(test)]

@@ -604,6 +604,44 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
         });
     }
 
+    // ══════════════ SWAP EVENT DİNLEYİCİ (v11.0) ══════════════
+    // Havuz swap eventlerini eth_subscribe("logs") ile dinle.
+    // Swap eventi sqrtPriceX96, liquidity, tick bilgisini doğrudan içerir —
+    // ek RPC çağrısı olmadan state güncellenir (zero-latency).
+    {
+        let pools_ev = pools.to_vec();
+        let states_ev: Vec<SharedPoolState> = states.iter().map(|s| Arc::clone(s)).collect();
+        let rpc_url_ev = config.rpc_wss_url.clone();
+
+        tokio::spawn(async move {
+            // WebSocket bağlantısı kur
+            let ws = WsConnect::new(&rpc_url_ev);
+            match ProviderBuilder::new().on_ws(ws).await {
+                Ok(ws_provider) => {
+                    match state_sync::start_swap_event_listener(
+                        &ws_provider,
+                        &pools_ev,
+                        &states_ev,
+                    ).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!(
+                                "  {} Swap event dinleyici hatası (blok bazlı akış devam ediyor): {}",
+                                "⚠️", e
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  {} Swap event WS bağlantı hatası: {}",
+                        "⚠️", e
+                    );
+                }
+            }
+        });
+    }
+
     let sub = provider.subscribe_blocks().await?;
     let mut stream = sub.into_stream();
     let mut stats = ArbitrageStats::new();

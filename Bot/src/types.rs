@@ -63,6 +63,97 @@ pub fn is_token_whitelisted(token: &Address) -> bool {
     token_whitelist().contains(token)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Token Decimal Yardımcıları — Dinamik Birim Çözümleme
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[allow(dead_code)]
+/// WETH decimals sabiti
+pub const WETH_DECIMALS_U8: u8 = 18;
+#[allow(dead_code)]
+/// USDC/USDT vb. stablecoin decimals sabiti
+pub const STABLECOIN_DECIMALS_U8: u8 = 6;
+
+#[allow(dead_code)]
+/// Token adresine göre decimal sayısını döndür.
+/// WETH → 18, diğer tüm tokenlar (USDC, USDT, DAI vb.) → 6
+pub fn get_token_decimals(token: &Address, weth_address: &Address) -> u8 {
+    if token == weth_address {
+        WETH_DECIMALS_U8 // 18
+    } else {
+        STABLECOIN_DECIMALS_U8 // 6 (USDC, USDT, USDbC)
+    }
+}
+
+/// Flash swap input tokeninin WETH olup olmadığını belirle.
+///
+/// uni_direction=0 → zeroForOne=true  → token0 input
+/// uni_direction=1 → zeroForOne=false → token1 input
+///
+/// token0_is_weth=true:
+///   - uni_dir=0 → token0(WETH) input → true
+///   - uni_dir=1 → token1(USDC) input → false
+///
+/// token0_is_weth=false:
+///   - uni_dir=0 → token0(USDC) input → false
+///   - uni_dir=1 → token1(WETH) input → true
+pub fn is_weth_input(uni_direction: u8, token0_is_weth: bool) -> bool {
+    if uni_direction == 0 {
+        // zeroForOne=true → token0 is input
+        token0_is_weth
+    } else {
+        // zeroForOne=false → token1 is input
+        !token0_is_weth
+    }
+}
+
+/// Flash swap input tokeninin decimal sayısını döndür.
+///
+/// Doğru decimal seçimi kritiktir:
+///   - WETH input → amount * 10^18
+///   - USDC input → amount * 10^6
+///
+/// Yanlış decimal kullanmak "trilyon dolarlık" hatalara yol açar.
+#[allow(dead_code)]
+pub fn get_input_token_decimals(uni_direction: u8, token0_is_weth: bool) -> u8 {
+    if is_weth_input(uni_direction, token0_is_weth) {
+        WETH_DECIMALS_U8
+    } else {
+        STABLECOIN_DECIMALS_U8
+    }
+}
+
+/// Owed (borçlu) tokeninin decimal sayısını döndür.
+///
+/// owedToken = flash swap'a geri ödenen token = input token
+/// minProfit hesabı bu tokende yapılır.
+#[allow(dead_code)]
+pub fn get_owed_token_decimals(owed_token: &Address, weth_address: &Address) -> u8 {
+    get_token_decimals(owed_token, weth_address)
+}
+
+/// WETH miktarını hedef token miktarına çevir (human-readable → wei).
+///
+/// - Hedef WETH ise: amount_weth * 10^18
+/// - Hedef USDC ise: amount_weth * eth_price_usd * 10^6
+///
+/// Bu fonksiyon calldata'ya yazılacak amount değerini üretir.
+pub fn weth_amount_to_input_wei(
+    optimal_amount_weth: f64,
+    is_weth_input: bool,
+    eth_price_usd: f64,
+) -> U256 {
+    if is_weth_input {
+        // Input WETH → 18 decimals
+        U256::from((optimal_amount_weth * 1e18) as u128)
+    } else {
+        // Input USDC → 6 decimals
+        // WETH cinsinden miktar × ETH fiyatı × 10^6
+        let usdc_amount = optimal_amount_weth * eth_price_usd * 1e6;
+        U256::from(usdc_amount as u128)
+    }
+}
+
 /// Yapılandırılan token adreslerinin whitelist kontrolü
 /// Startup sırasında çağrılır — whitelistte olmayan token varsa hata döner
 #[allow(dead_code)]

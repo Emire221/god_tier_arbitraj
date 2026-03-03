@@ -1,11 +1,19 @@
 // ============================================================================
-//  MATH v6.0 — Multi-Tick CL Swap Motoru + TickBitmap Derinlik Simülasyonu
+//  MATH v7.0 — U256 Exact-Math Stabilizasyon + Multi-Tick CL Swap Motoru
 //
-//  v6.0 Yenilikler:
-//  ✓ GERÇEK multi-tick swap: TickBitmap verisinden sıralı tick geçişi
+//  v7.0 Yenilikler (Faz 1 — Stabilizasyon):
+//  ✓ compute_arbitrage_profit_with_bitmap → U256 exact::compute_exact_swap
+//  ✓ find_optimal_amount_with_bitmap → U256 liq cap (max_safe_swap_amount_u256)
+//  ✓ swap_weth_to_usdc_exact / swap_usdc_to_weth_exact — U256 public API
+//  ✓ max_safe_swap_amount → U256 delegasyonu
+//  ✓ Uniswap V3 FullMath/SqrtPriceMath/SwapMath birebir Rust U256 port'u
+//  ✓ Newton-Raphson optimizer artık U256 swap ile profit değerlendirmesi yapar
+//  ✓ On-chain sonuçla wei bazında eşleşen deterministik kesinlik
+//
+//  v6.0 (korunuyor):
+//  ✓ GERÇEK multi-tick swap: TickBitmap verisinden sıralı tick geçişi (legacy f64)
 //  ✓ "50 ETH satarsam hangi 3 tick'i patlatırım?" → mikrosaniye cevap
 //  ✓ Her tick sınırında liquidityNet ile aktif likidite güncelleme
-//  ✓ Dampening yerine gerçek CL matematiği
 //  ✓ Fallback: TickBitmap yoksa eski dampening moduna geç
 //
 //  v5.1 (korunuyor):
@@ -38,6 +46,8 @@ const TICK_CROSS_DAMPENING: f64 = 0.997;
 
 /// Likidite güvenlik marjı — swap miktarı, havuz kapasitesinin
 /// bu oranını aşmamalı (tick-çapraz hataları önlemek için)
+/// ⚠️ LEGACY: U256 path exact::max_safe_swap_amount_u256 kullanır.
+#[allow(dead_code)]
 const MAX_LIQUIDITY_USAGE_RATIO: f64 = 0.15;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -222,10 +232,125 @@ pub struct TickCrossing {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GERÇEK Multi-Tick Swap Motoru (TickBitmap Tabanlı)
+// U256 Multi-Tick Swap — Public API (v7.0)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// WETH → USDC swap (U256 exact math, PoolState doğrudan).
+///
+/// Uniswap V3'ün on-chain swap() fonksiyonunu birebir taklit eder.
+/// Sonuç f64'e dönüştürülür (human-readable USDC).
+pub fn swap_weth_to_usdc_exact(
+    pool: &PoolState,
+    amount_in_weth: f64,
+    fee_fraction: f64,
+    token0_is_weth: bool,
+    tick_spacing: i32,
+    tick_bitmap: Option<&TickBitmapData>,
+) -> MultiTickSwapResult {
+    if amount_in_weth <= 0.0 || pool.liquidity == 0 || pool.sqrt_price_x96.is_zero() {
+        return MultiTickSwapResult {
+            total_output: 0.0,
+            effective_price: 0.0,
+            tick_crossings: vec![],
+            final_tick: pool.tick,
+            final_sqrt_price_x96: pool.sqrt_price_f64,
+            final_liquidity: pool.liquidity as f64,
+            used_real_bitmap: false,
+        };
+    }
+
+    let amount_in_wei = alloy::primitives::U256::from(
+        crate::types::safe_f64_to_u128(amount_in_weth * 1e18)
+    );
+    let fee_pips = exact::fee_fraction_to_pips(fee_fraction);
+    let zero_for_one = token0_is_weth;
+
+    let result = exact::compute_exact_swap(
+        pool.sqrt_price_x96,
+        pool.liquidity,
+        pool.tick,
+        amount_in_wei,
+        zero_for_one,
+        fee_pips,
+        tick_spacing,
+        tick_bitmap,
+    );
+
+    // U256 → f64 dönüşümü (USDC: / 1e6)
+    let total_usdc = exact::u256_to_f64(result.amount_out) / USDC_DECIMALS;
+    let effective_price = if amount_in_weth > 0.0 { total_usdc / amount_in_weth } else { 0.0 };
+
+    MultiTickSwapResult {
+        total_output: sanitize_f64(total_usdc),
+        effective_price: sanitize_f64(effective_price),
+        tick_crossings: vec![], // U256 path detaylı tick log tutmaz
+        final_tick: pool.tick,
+        final_sqrt_price_x96: exact::u256_to_f64(result.final_sqrt_price_x96),
+        final_liquidity: result.final_liquidity as f64,
+        used_real_bitmap: tick_bitmap.is_some(),
+    }
+}
+
+/// USDC → WETH swap (U256 exact math, PoolState doğrudan).
+#[allow(dead_code)]
+pub fn swap_usdc_to_weth_exact(
+    pool: &PoolState,
+    amount_in_usdc: f64,
+    fee_fraction: f64,
+    token0_is_weth: bool,
+    tick_spacing: i32,
+    tick_bitmap: Option<&TickBitmapData>,
+) -> MultiTickSwapResult {
+    if amount_in_usdc <= 0.0 || pool.liquidity == 0 || pool.sqrt_price_x96.is_zero() {
+        return MultiTickSwapResult {
+            total_output: 0.0,
+            effective_price: 0.0,
+            tick_crossings: vec![],
+            final_tick: pool.tick,
+            final_sqrt_price_x96: pool.sqrt_price_f64,
+            final_liquidity: pool.liquidity as f64,
+            used_real_bitmap: false,
+        };
+    }
+
+    let amount_in_wei = alloy::primitives::U256::from(
+        crate::types::safe_f64_to_u128(amount_in_usdc * 1e6)
+    );
+    let fee_pips = exact::fee_fraction_to_pips(fee_fraction);
+    let zero_for_one = !token0_is_weth; // USDC girdi yönü
+
+    let result = exact::compute_exact_swap(
+        pool.sqrt_price_x96,
+        pool.liquidity,
+        pool.tick,
+        amount_in_wei,
+        zero_for_one,
+        fee_pips,
+        tick_spacing,
+        tick_bitmap,
+    );
+
+    // U256 → f64 dönüşümü (WETH: / 1e18)
+    let total_weth = exact::u256_to_f64(result.amount_out) / WETH_DECIMALS;
+    let effective_price = if total_weth > 0.0 { amount_in_usdc / total_weth } else { 0.0 };
+
+    MultiTickSwapResult {
+        total_output: sanitize_f64(total_weth),
+        effective_price: sanitize_f64(effective_price),
+        tick_crossings: vec![],
+        final_tick: pool.tick,
+        final_sqrt_price_x96: exact::u256_to_f64(result.final_sqrt_price_x96),
+        final_liquidity: result.final_liquidity as f64,
+        used_real_bitmap: tick_bitmap.is_some(),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LEGACY Multi-Tick Swap Motoru (f64 — Geriye Uyumluluk)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// WETH → USDC multi-tick swap (TickBitmap ile gerçek tick geçişi).
+/// ⚠️ LEGACY: f64 tabanlı. Yeni kod `swap_weth_to_usdc_exact` kullanmalıdır.
 ///
 /// Algoritma:
 ///   1. Mevcut tick'teki kalan likiditeyle olabildiğince swap yap
@@ -824,6 +949,10 @@ pub fn swap_usdc_to_weth(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Havuzun aktif likiditesine göre güvenli maksimum swap miktarını hesapla.
+///
+/// v7.0: f64 imzası geriye uyumluluk için korunuyor ama
+/// yeni çağrılar `exact::max_safe_swap_amount_u256` kullanmalıdır.
+#[allow(dead_code)]
 pub fn max_safe_swap_amount(
     sqrt_price_f64: f64,
     liquidity: f64,
@@ -835,14 +964,18 @@ pub fn max_safe_swap_amount(
     {
         return 0.0;
     }
-    let sqrt_price = sqrt_price_f64 / Q96;
-
-    let result = if token0_is_weth {
-        if sqrt_price <= 1e-30 { return 0.0; }
-        liquidity * MAX_LIQUIDITY_USAGE_RATIO / (sqrt_price * WETH_DECIMALS)
+    // f64 değerlerden U256 yaklaşık dönüşüm
+    let sqrt_price_u256 = alloy::primitives::U256::from(
+        crate::types::safe_f64_to_u128(sqrt_price_f64)
+    );
+    let liquidity_u128 = if liquidity >= u128::MAX as f64 {
+        u128::MAX
+    } else if liquidity < 0.0 {
+        0u128
     } else {
-        liquidity * sqrt_price * MAX_LIQUIDITY_USAGE_RATIO / WETH_DECIMALS
+        liquidity as u128
     };
+    let result = exact::max_safe_swap_amount_u256(sqrt_price_u256, liquidity_u128, token0_is_weth);
     sanitize_f64(result)
 }
 
@@ -877,6 +1010,19 @@ pub fn compute_arbitrage_profit(
 }
 
 /// İki havuz arasında arbitraj kârını hesapla (TickBitmap destekli).
+///
+/// v7.0 (U256 Stabilizasyon): Tüm swap hesaplamaları artık
+/// `exact::compute_exact_swap` üzerinden yapılır — Uniswap V3'ün
+/// FullMath/SqrtPriceMath/SwapMath kütüphanelerinin birebir U256 portu.
+///
+/// Akış:
+///   1. f64 WETH miktarı → U256 wei dönüşümü
+///   2. Pahalı havuzda exact U256 swap (WETH → USDC)
+///   3. Ucuz havuzda exact U256 swap (USDC → WETH)
+///   4. Flash loan geri ödeme (U256)
+///   5. Net kâr → f64 USD (optimizer'a geri dönüş)
+///
+/// Bu sayede off-chain hesaplama, on-chain sonuçla wei bazında eşleşir.
 pub fn compute_arbitrage_profit_with_bitmap(
     amount_in_weth: f64,
     sell_pool: &PoolState,
@@ -896,47 +1042,71 @@ pub fn compute_arbitrage_profit_with_bitmap(
         return f64::NEG_INFINITY;
     }
 
-    // 1. WETH'i pahalı havuzda sat → USDC al
-    let sell_result = swap_weth_to_usdc_multitick(
-        sell_pool.sqrt_price_f64,
-        sell_pool.liquidity_f64,
+    // ═══ U256 EXACT MATH — On-Chain Deterministik Kesinlik ═══
+
+    // f64 → U256 wei dönüşümü
+    let amount_in_wei = alloy::primitives::U256::from(
+        crate::types::safe_f64_to_u128(amount_in_weth * 1e18)
+    );
+    if amount_in_wei.is_zero() {
+        return f64::NEG_INFINITY;
+    }
+
+    // Fee fraction → pips (1e6 bazında: 0.0005 → 500)
+    let sell_fee_pips = exact::fee_fraction_to_pips(sell_fee_fraction);
+    let buy_fee_pips = exact::fee_fraction_to_pips(buy_fee_fraction);
+
+    // 1. WETH'i pahalı havuzda sat → USDC al (exact U256 swap)
+    let sell_zero_for_one = token0_is_weth;
+    let sell_result = exact::compute_exact_swap(
+        sell_pool.sqrt_price_x96,
+        sell_pool.liquidity,
         sell_pool.tick,
-        amount_in_weth,
-        sell_fee_fraction,
-        token0_is_weth,
+        amount_in_wei,
+        sell_zero_for_one,
+        sell_fee_pips,
         sell_tick_spacing,
         sell_bitmap,
     );
 
-    let usdc_received = sell_result.total_output;
-    if usdc_received <= 0.0 {
+    if sell_result.amount_out.is_zero() {
         return f64::NEG_INFINITY;
     }
 
-    // 2. USDC → WETH geri al
-    let buy_result = swap_usdc_to_weth_multitick(
-        buy_pool.sqrt_price_f64,
-        buy_pool.liquidity_f64,
+    // 2. USDC → WETH geri al (exact U256 swap)
+    let buy_zero_for_one = !token0_is_weth;
+    let buy_result = exact::compute_exact_swap(
+        buy_pool.sqrt_price_x96,
+        buy_pool.liquidity,
         buy_pool.tick,
-        usdc_received,
-        buy_fee_fraction,
-        token0_is_weth,
+        sell_result.amount_out,
+        buy_zero_for_one,
+        buy_fee_pips,
         buy_tick_spacing,
         buy_bitmap,
     );
 
-    let weth_received = buy_result.total_output;
-    if weth_received <= 0.0 {
+    if buy_result.amount_out.is_zero() {
         return f64::NEG_INFINITY;
     }
 
-    // 3. Flash loan geri ödeme
+    // 3. Flash loan geri ödeme (U256 hassasiyetinde)
     let flash_loan_fee_rate = flash_loan_fee_bps / 10_000.0;
-    let flash_loan_repay = amount_in_weth * (1.0 + flash_loan_fee_rate);
+    let flash_loan_fee_wei = alloy::primitives::U256::from(
+        crate::types::safe_f64_to_u128(amount_in_weth * flash_loan_fee_rate * 1e18)
+    );
+    let repay_amount = amount_in_wei + flash_loan_fee_wei;
 
-    // 4. Net WETH kârı → USD
-    let weth_profit = weth_received - flash_loan_repay;
-    weth_profit * eth_price_usd - gas_cost_usd
+    // 4. Net kâr → USD (optimizer için f64'e geri dönüş)
+    if buy_result.amount_out > repay_amount {
+        let profit_wei = buy_result.amount_out - repay_amount;
+        let profit_weth = exact::u256_to_f64(profit_wei) / 1e18;
+        profit_weth * eth_price_usd - gas_cost_usd
+    } else {
+        let loss_wei = repay_amount - buy_result.amount_out;
+        let loss_weth = exact::u256_to_f64(loss_wei) / 1e18;
+        -(loss_weth * eth_price_usd) - gas_cost_usd
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1071,12 +1241,12 @@ pub fn find_optimal_amount_with_bitmap(
     let tolerance = 1e-8;
     let min_amount = 0.0001;
 
-    // ── Likidite tabanlı üst sınır ────────────────────────────────
-    let liq_cap_sell = max_safe_swap_amount(
-        sell_pool.sqrt_price_f64, sell_pool.liquidity_f64, token0_is_weth,
+    // ── Likidite tabanlı üst sınır (U256 hassasiyetinde) ────────
+    let liq_cap_sell = exact::max_safe_swap_amount_u256(
+        sell_pool.sqrt_price_x96, sell_pool.liquidity, token0_is_weth,
     );
-    let liq_cap_buy = max_safe_swap_amount(
-        buy_pool.sqrt_price_f64, buy_pool.liquidity_f64, token0_is_weth,
+    let liq_cap_buy = exact::max_safe_swap_amount_u256(
+        buy_pool.sqrt_price_x96, buy_pool.liquidity, token0_is_weth,
     );
     let effective_max = max_amount_weth
         .min(liq_cap_sell.max(0.001))
@@ -1190,12 +1360,12 @@ pub fn find_optimal_amount_with_bitmap(
 mod tests {
     use super::*;
     use crate::types::TickInfo;
-    use alloy::primitives::U256;
     use std::collections::HashMap;
     use std::time::Instant;
     use proptest::prelude::*;
 
     /// Test havuz durumu oluştur (Base Network gerçekçi değerler).
+    /// v7.0: sqrt_price_x96 artık doğru U256 olarak hesaplanır (exact::get_sqrt_ratio_at_tick).
     fn make_test_pool(eth_price: f64) -> PoolState {
         let price_ratio = eth_price * 1e-12;
         let sqrt_price = price_ratio.sqrt();
@@ -1203,8 +1373,11 @@ mod tests {
         let tick = (price_ratio.ln() / LOG_TICK_BASE).floor() as i32;
         let liquidity: u128 = 50_000_000_000_000_000_000; // 5e19
 
+        // U256 sqrtPriceX96'yı tick'ten exact hesapla (deterministik)
+        let sqrt_price_x96_u256 = crate::math::exact::get_sqrt_ratio_at_tick(tick);
+
         PoolState {
-            sqrt_price_x96: U256::ZERO,
+            sqrt_price_x96: sqrt_price_x96_u256,
             sqrt_price_f64: sqrt_price_x96,
             tick,
             liquidity,
@@ -2421,6 +2594,59 @@ pub mod exact {
             slipstream_result.amount_out - amount_wei
         } else {
             U256::ZERO
+        }
+    }
+
+    // ── Dönüşüm Yardımcıları ────────────────────────────────────────────────
+
+    /// U256'yı f64'e güvenli dönüştür.
+    /// Newton-Raphson optimizer'ın USD karşılaştırması için yeterli hassasiyet.
+    /// Not: 2^53 üstü değerlerde düşük bitler kaybolur ama WETH/USD
+    /// aralığındaki wei değerleri için sorun oluşturmaz.
+    pub fn u256_to_f64(val: U256) -> f64 {
+        if val.is_zero() {
+            return 0.0;
+        }
+        let s = val.to_string();
+        s.parse::<f64>().unwrap_or(0.0)
+    }
+
+    /// Fee fraction (ör: 0.0005) → fee pips (ör: 500, 1e6 bazında).
+    /// Uniswap V3 fee_pips: 500 = %0.05, 3000 = %0.30, 10000 = %1.00
+    #[inline]
+    pub fn fee_fraction_to_pips(fee_fraction: f64) -> u32 {
+        (fee_fraction * 1_000_000.0).round() as u32
+    }
+
+    /// U256-tabanlı güvenli maksimum swap miktarı (f64 WETH döndürür).
+    /// Mevcut tick aralığındaki likidite kapasitesinin %15'ini hesaplar.
+    ///
+    /// Uniswap V3 SqrtPriceMath formülleri ile:
+    ///   token0: capacity = L × Q96 / sqrtPriceX96
+    ///   token1: capacity = L × sqrtPriceX96 / Q96
+    /// Güvenli sınır = capacity × 15 / 100, sonuç WETH olarak / 1e18
+    pub fn max_safe_swap_amount_u256(
+        sqrt_price_x96: U256,
+        liquidity: u128,
+        token0_is_weth: bool,
+    ) -> f64 {
+        if sqrt_price_x96.is_zero() || liquidity == 0 {
+            return 0.0;
+        }
+        let liq = U256::from(liquidity);
+        let usage_num = U256::from(15u64);
+        let usage_den = U256::from(100u64);
+
+        if token0_is_weth {
+            // token0(WETH) kapasitesi: L × Q96 / sqrtPriceX96 → raw token0 wei
+            let capacity_raw = mul_div(liq, Q96, sqrt_price_x96);
+            let safe_raw = mul_div(capacity_raw, usage_num, usage_den);
+            u256_to_f64(safe_raw) / 1e18
+        } else {
+            // token1(WETH) kapasitesi: L × sqrtPriceX96 / Q96 → raw token1 wei
+            let capacity_raw = mul_div(liq, sqrt_price_x96, Q96);
+            let safe_raw = mul_div(capacity_raw, usage_num, usage_den);
+            u256_to_f64(safe_raw) / 1e18
         }
     }
 

@@ -402,24 +402,20 @@ impl SimulationEngine {
             true
         };
 
-        // ── 2. Multi-Tick Swap Impact Hesabı (TickBitmap destekli) ───
+        // ── 2. Multi-Tick Swap Impact Hesabı (U256 Exact Math) ───
         let current_tick = state.tick;
-        let sqrt_price_f64 = state.sqrt_price_f64;
-        let liquidity = state.liquidity_f64;
 
-        // Güvenli maksimum swap miktarı
-        let max_safe = math::max_safe_swap_amount(
-            sqrt_price_f64, liquidity, config.token0_is_weth,
+        // Güvenli maksimum swap miktarı (U256 tabanlı)
+        let max_safe = math::exact::max_safe_swap_amount_u256(
+            state.sqrt_price_x96, state.liquidity, config.token0_is_weth,
         );
 
         // TickBitmap referansı al
         let bitmap_ref = state.tick_bitmap.as_ref();
 
-        // Multi-tick swap (TickBitmap varsa gerçek, yoksa dampening)
-        let swap_result = math::swap_weth_to_usdc_multitick(
-            sqrt_price_f64,
-            liquidity,
-            current_tick,
+        // U256 exact swap (on-chain deterministik kesinlik)
+        let swap_result = math::swap_weth_to_usdc_exact(
+            &state,
             amount_weth,
             config.fee_fraction,
             config.token0_is_weth,

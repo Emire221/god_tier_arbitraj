@@ -976,7 +976,7 @@ fn print_opportunity_report(
 #[cfg(test)]
 mod gas_spike_tests {
     use super::*;
-    use alloy::primitives::{address, Address, U256};
+    use alloy::primitives::{address, Address};
     use std::sync::Arc;
     use parking_lot::RwLock;
     use std::time::Instant;
@@ -1052,8 +1052,10 @@ mod gas_spike_tests {
         let sqrt_price_f64 = sqrt_price * (1u128 << 96) as f64;
         // Tick'i sqrtPriceX96'dan doğru hesapla (dampening tutarlılığı için)
         let tick = math::sqrt_price_x96_to_tick(sqrt_price_f64);
+        // v7.0: U256 sqrtPriceX96 artık exact tick-bazlı hesaplanır
+        let sqrt_price_x96_u256 = math::exact::get_sqrt_ratio_at_tick(tick);
         Arc::new(RwLock::new(PoolState {
-            sqrt_price_x96: U256::from(sqrt_price_f64 as u128),
+            sqrt_price_x96: sqrt_price_x96_u256,
             sqrt_price_f64,
             tick,
             liquidity: liq,

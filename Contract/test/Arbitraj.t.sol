@@ -14,7 +14,8 @@ import {
     ZeroAmount,
     TransferFailed,
     DeadlineExpired,
-    ZeroAddress
+    ZeroAddress,
+    InvalidCalldataLength
 } from "../src/Arbitraj.sol";
 
 // ══════════════════════════════════════════════════════════════════════════════

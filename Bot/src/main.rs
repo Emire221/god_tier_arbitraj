@@ -300,14 +300,14 @@ async fn main() -> Result<()> {
     // Havuz yapılandırmalarını oku
     let pools = load_pool_configs_from_env()?;
 
-    // ═══ v10.1: TOKEN WHITELIST DOĞRULAMA (şimdilik devre dışı) ═══
+    // ═══ v10.1: TOKEN WHITELIST DOĞRULAMA ═══
     // Startup sırasında yapılandırılan token adreslerini beyaz listeye karşı doğrula
-    // TODO: Yeni tokenlar eklendikçe whitelist güncellenecek ve yeniden etkinleştirilecek
-    // crate::types::validate_token_whitelist(&config.weth_address, &config.usdc_address)?;
-    // println!(
-    //     "  {} Token Whitelist: WETH ve USDC adresleri doğrulandı",
-    //     "✅".green()
-    // );
+    // v13.0: Aktif edildi — sahte token adresi ile başlatmayı engeller
+    crate::types::validate_token_whitelist(&config.weth_address, &config.usdc_address)?;
+    println!(
+        "  {} Token Whitelist: WETH ve USDC adresleri doğrulandı",
+        "✅".green()
+    );
 
     // ═══ v9.0: KEY MANAGER BAŞLATMA ═══
     // Öncelik: 1) Şifreli keystore → 2) Env var (uyarıyla) → 3) Key yok
@@ -370,15 +370,20 @@ async fn main() -> Result<()> {
             return Err(eyre::eyre!("Maksimum yeniden bağlanma denemesi aşıldı"));
         }
 
-        // v10.1: Agresif reconnect — 100ms sabit bekleme
-        // Exponential backoff KALDIRILDI. RPC sağlayıcıları sessizce
-        // bağlantıyı koparabilir; her milisaniye kaçırılan fırsat demek.
-        // 100ms sonra anında yeniden bağlanılır.
+        // v13.0: Akıllı reconnect — ilk 3 deneme hızlı, sonra exponential backoff
+        // İlk kopmalarda hızlı geri dönüş, uzun süren kesintilerde rate-limit koruması.
+        let delay_ms = if retry_count <= 3 {
+            100u64 // İlk 3 deneme: 100ms (agresif)
+        } else {
+            // Exponential backoff: 200ms → 400ms → 800ms → ... → max 10s
+            let exp_delay = 100u64 * (1u64 << (retry_count - 3).min(6));
+            exp_delay.min(10_000) // Üst sınır: 10 saniye
+        };
         println!(
-            "  {} 100ms sonra agresif yeniden bağlanılıyor... (deneme #{})",
-            "⚡".yellow(), retry_count
+            "  {} {}ms sonra yeniden bağlanılıyor... (deneme #{})",
+            "⚡".yellow(), delay_ms, retry_count
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
     }
 }
 
@@ -556,7 +561,8 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
             "  {} Kontrat tetikleme: {} (Adres: {})",
             "🚀".green(),
             "AKTİF".green().bold(),
-            config.contract_address.unwrap()
+            config.contract_address
+                .expect("BUG: execution_enabled() true ama contract_address None")
         );
     } else {
         println!(
@@ -759,7 +765,14 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
                     stats.failed_simulations,
                     stats.executed_trades,
                 );
-                std::process::exit(1);
+                // v13.0: Graceful shutdown — process::exit(1) yerine return Err
+                // Tokio runtime temizce kapatılır, WS bağlantıları düzgün kesilir,
+                // zeroize drop handler çalışır, nonce state korunur.
+                return Err(eyre::eyre!(
+                    "Circuit breaker tetiklendi: {} ardışık başarısızlık (eşik: {})",
+                    stats.consecutive_failures,
+                    config.circuit_breaker_threshold
+                ));
             }
 
             if let Some(opportunity) = check_arbitrage_opportunity(pools, &states, config, block_base_fee) {

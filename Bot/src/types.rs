@@ -145,12 +145,28 @@ pub fn weth_amount_to_input_wei(
 ) -> U256 {
     if is_weth_input {
         // Input WETH → 18 decimals
-        U256::from((optimal_amount_weth * 1e18) as u128)
+        U256::from(safe_f64_to_u128(optimal_amount_weth * 1e18))
     } else {
         // Input USDC → 6 decimals
         // WETH cinsinden miktar × ETH fiyatı × 10^6
         let usdc_amount = optimal_amount_weth * eth_price_usd * 1e6;
-        U256::from(usdc_amount as u128)
+        U256::from(safe_f64_to_u128(usdc_amount))
+    }
+}
+
+/// f64 → u128 güvenli dönüşüm (saturating).
+///
+/// NaN, Infinity, negatif veya u128::MAX üstü değerler için
+/// Rust panic VERMEZ — yerine 0 veya u128::MAX döner.
+/// MEV-kritik sistemlerde thread çökmesini önleyen savunma katmanı.
+#[inline]
+pub fn safe_f64_to_u128(val: f64) -> u128 {
+    if val.is_nan() || val.is_infinite() || val < 0.0 {
+        0
+    } else if val >= u128::MAX as f64 {
+        u128::MAX
+    } else {
+        val as u128
     }
 }
 

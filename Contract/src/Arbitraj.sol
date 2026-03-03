@@ -90,6 +90,10 @@ error DeadlineExpired();
 /// @dev Sıfır adres (address(0)) kullanılamaz
 error ZeroAddress();
 
+/// @dev Calldata uzunluğu geçersiz (tam 134 byte olmalı)
+/// @dev v13.0: ZeroAmount yerine semantik olarak doğru hata
+error InvalidCalldataLength();
+
 // (v12.0: PoolNotWhitelisted kaldırıldı — off-chain doğrulama)
 
 // ── MINIMAL INTERFACES ───────────────────────────────────────────────────────
@@ -222,7 +226,7 @@ contract ArbitrajBotu {
         //    134 byte'dan farklı veri gelirse (eksik/fazla) anında revert.
         //    Eksik veri EVM tarafından 0 ile doldurulur → minProfit=0, deadlineBlock=0
         //    Bu, MEV botlarına sandviç fırsatı verir. Bu satır o riski kapatır.
-        if (msg.data.length != 134) revert ZeroAmount();
+        if (msg.data.length != 134) revert InvalidCalldataLength();
 
         // ── 2. REENTRANCY KİLİDİ (EIP-1153 Transient Storage) ────────────
         uint256 locked;

@@ -361,7 +361,7 @@ impl SimulationEngine {
         // Tüm kontroller geçti
         SimulationResult {
             success: true,
-            gas_used: 350_000, // Fallback tahmini gas — tam REVM simülasyonu varsa o değer kullanılır
+            gas_used: 150_000, // v13.0: 350K → 150K — kompakt calldata + EIP-1153 gerçek gas ~120-150K
             error: None,
         }
     }

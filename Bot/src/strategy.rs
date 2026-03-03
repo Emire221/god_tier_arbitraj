@@ -307,8 +307,10 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         );
     } else if config.execution_enabled() {
         let rpc_url = config.rpc_wss_url.clone();
-        let pk = config.private_key.clone().unwrap();
-        let contract_addr = config.contract_address.unwrap();
+        let pk = config.private_key.clone()
+            .expect("BUG: execution_enabled() true ama private_key None");
+        let contract_addr = config.contract_address
+            .expect("BUG: execution_enabled() true ama contract_address None");
         let trade_weth = opportunity.optimal_amount_weth;
         let _buy_price = opportunity.buy_price;
 
@@ -339,7 +341,9 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         //
         // Base L2 FIFO: Priority fee sıralaması belirler.
         // Daha yüksek priority fee = daha önce işlenme = rakipleri geçme.
-        let expected_profit_wei = (opportunity.expected_profit_usd / opportunity.sell_price * 1e18) as u128;
+        let expected_profit_wei = crate::types::safe_f64_to_u128(
+            opportunity.expected_profit_usd / opportunity.sell_price * 1e18
+        );
 
         let bribe_wei = {
             // Gas maliyeti USD hesapla
@@ -376,7 +380,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
                 0.95
             };
 
-            let bribe = ((expected_profit_wei as f64) * dynamic_bribe_pct) as u128;
+            let bribe = crate::types::safe_f64_to_u128((expected_profit_wei as f64) * dynamic_bribe_pct);
 
             eprintln!(
                 "     {} Bribe: {:.0}% (marj: {:.1}x, profit: {:.4}$, gas: {:.4}$)",
@@ -456,6 +460,9 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         let eth_price_for_exec = (opportunity.buy_price + opportunity.sell_price) / 2.0;
         let t0_is_weth = pools[0].token0_is_weth;
 
+        // v13.0: block_base_fee'yi execute'a aktar (max_fee_per_gas hesabı için)
+        let base_fee_for_exec = block_base_fee;
+
         tokio::spawn(async move {
             execute_on_chain(
                 rpc_url, pk, contract_addr,
@@ -468,6 +475,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
                 nonce, nm_clone,
                 eth_price_for_exec,
                 t0_is_weth,
+                base_fee_for_exec,
             ).await;
         });
     }
@@ -590,6 +598,7 @@ async fn execute_on_chain(
     nonce_manager: Arc<NonceManager>,
     eth_price_usd: f64,
     token0_is_weth: bool,
+    block_base_fee: u64,
 ) {
     println!("\n  {} {}", "🚀".yellow(), "KONTRAT TETİKLEME BAŞLATILDI".yellow().bold());
 
@@ -602,7 +611,7 @@ async fn execute_on_chain(
         owed_token, received_token,
         trade_size_weth, uni_direction, aero_direction,
         min_profit, deadline_block, bribe_wei, simulated_gas, nonce,
-        eth_price_usd, token0_is_weth,
+        eth_price_usd, token0_is_weth, block_base_fee,
     ).await;
 
     // İmza tamamlandı — private key bellekten güvenle silinir
@@ -639,6 +648,7 @@ async fn execute_inner(
     nonce: u64,
     eth_price_usd: f64,
     token0_is_weth: bool,
+    block_base_fee: u64,
 ) -> eyre::Result<String> {
     use alloy::providers::WsConnect;
 
@@ -695,7 +705,7 @@ async fn execute_inner(
         // v10.0: %10 güvenlik tamponu — REVM simülasyonu bazen %5-10 düşük tahmin eder
         //        Gerçek zincirde state diff, cold storage access vb. ek gas tüketebilir.
         //        Bu tampon bribe hesabının güvenli kalmasını sağlar.
-        let gas_with_buffer = ((simulated_gas as f64) * 1.10) as u128;
+        let gas_with_buffer = crate::types::safe_f64_to_u128((simulated_gas as f64) * 1.10);
         let actual_gas: u128 = gas_with_buffer.max(100_000);
         let fee = bribe_wei / actual_gas;
         let fee = fee.max(1_000_000); // Minimum 1 Gwei
@@ -726,6 +736,18 @@ async fn execute_inner(
         .input(calldata.into())
         .nonce(nonce)
         .gas_limit(gas_limit as u128);
+
+    // v13.0: max_fee_per_gas — base_fee spike koruması
+    // max_fee = (base_fee × 2) + priority_fee
+    // Base L2 genelde sabit base_fee kullanır ama spike ihtimaline karşı
+    // 2× marj eklenir. Bu olmadan TX "max fee less than block base fee" ile düşer.
+    let max_fee = {
+        let base_component = (block_base_fee as u128).saturating_mul(2);
+        let priority_component = priority_fee_per_gas.unwrap_or(0);
+        let fee = base_component.saturating_add(priority_component);
+        fee.max(1_000_000_000) // Minimum 1 Gwei
+    };
+    tx = tx.max_fee_per_gas(max_fee);
 
     // Dinamik priority fee ayarla (varsa)
     if let Some(pf) = priority_fee_per_gas {

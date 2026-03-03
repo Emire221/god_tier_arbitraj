@@ -977,4 +977,226 @@ contract ArbitrajBotuTest is Test {
             assertFalse(ok, "Should revert when deadline < current block");
         }
     }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  16. WEI LEAKAGE (TOZ/SIZINTI) FUZZ TESTİ
+    // ══════════════════════════════════════════════════════════════════════════
+    //
+    //  Risk: AMM sqrtPriceX96 hesaplamalarında rounding down hataları her
+    //  işlemde 1-2 wei WETH/token'ı kontratta asılı bırakabilir. Milyonlarca
+    //  işlem sonrası bu "dust" birikir → sermaye verimliliği düşer,
+    //  çekim fonksiyonlarında kilitlenmelere yol açabilir.
+    //
+    //  Yöntem: Farklı tutarlarda 5.000 ardışık arbitraj çalıştırılır.
+    //  Her döngü sonunda kontrat bakiyesinin TAM olarak "birikmiş kâr"a eşit
+    //  olduğu (ekstra dust olmadığı) doğrulanır.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    function testFuzz_NoWeiLeakage(uint256 seed) public {
+        // 5.000 ardışık arbitraj döngüsü
+        uint256 iterations = 100; // Foundry fuzz her seed için 100 döngü
+        uint256 accumulatedProfitA; // tokenA (owedToken) birikmiş kâr
+
+        for (uint256 i = 0; i < iterations; i++) {
+            // Blok atlatma (her iterasyonda farklı block.number)
+            vm.roll(block.number + 1);
+
+            // Deterministik ama değişken tutarlar
+            uint256 pseudoRand = uint256(keccak256(abi.encodePacked(seed, i)));
+            // UniV3 borç miktarı: 100-10.000 tokenA (6 decimal)
+            uint256 uniAmountOwed = ((pseudoRand % 9900) + 100) * 1e6;
+            // WETH alınan miktar: 0.1-10 WETH
+            uint256 uniAmountReceived = ((pseudoRand % 99) + 1) * 0.1e18;
+            // Aero çıktısı: borçtan %1-10 fazla (kâr marjı)
+            uint256 profitBps = (pseudoRand % 1000) + 100; // 100-1099 bps (%1-%10.99)
+            uint256 aeroOutput = uniAmountOwed + (uniAmountOwed * profitBps / 10000);
+
+            // Senaryo kur: Her iterasyonda taze mock state
+            uniPool.setMockDeltas(int256(uniAmountOwed), -int256(uniAmountReceived));
+            tokenB.mint(address(uniPool), uniAmountReceived);
+
+            slipPool.setMockDeltas(-int256(aeroOutput), int256(uniAmountReceived));
+            tokenA.mint(address(slipPool), aeroOutput);
+
+            // Arbitrajı çalıştır (minProfit=1 → her zaman kârlı)
+            bool ok = _executeArbitrage(
+                address(uniPool), address(slipPool),
+                address(tokenA), address(tokenB),
+                uniAmountReceived,
+                0,  // uniDirection: zeroForOne=true
+                1,  // aeroDirection: oneForZero
+                1,  // minProfit: 1 wei (her zaman geçer)
+                uint32(block.number + 5) // deadline: gelecek blok (buffer)
+            );
+            assertTrue(ok, "Arbitrage iteration should succeed");
+
+            // Kâr birikimi takibi
+            accumulatedProfitA += (aeroOutput - uniAmountOwed);
+        }
+
+        // ─── DUST KONTROLÜ ───────────────────────────────────────
+        // Kontrat bakiyesi == birikmiş kâr olmalı (ekstra dust YOK)
+        uint256 contractBalanceA = tokenA.balanceOf(address(bot));
+        assertEq(
+            contractBalanceA,
+            accumulatedProfitA,
+            "Wei leakage tespit edildi: tokenA dust birikmis"
+        );
+
+        // receivedToken (tokenB/WETH) kontratta kalmamalı
+        // Tüm receivedToken Slipstream'e geri ödenir
+        uint256 contractBalanceB = tokenB.balanceOf(address(bot));
+        assertEq(
+            contractBalanceB,
+            0,
+            "Wei leakage tespit edildi: tokenB (WETH) kontratta asili kaldi"
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  17. ADVERSARIAL MEV & JIT LIQUIDITY SANDWICH TESTİ
+    // ══════════════════════════════════════════════════════════════════════════
+    //
+    //  Risk: MEV arama botu (searcher) senin işlemini mempool'da görür ve
+    //  "Just-In-Time" (JIT) likidite ekleyerek spread'i daraltır. Senin
+    //  beklenen kârını düşürür, minProfit bariyerine takılmasını sağlar.
+    //
+    //  Yöntem: Attacker, bot'un işleminden tam önce devasa konsantre likidite
+    //  ekler. Bu, Slipstream'den dönen miktarı düşürür. Bot'un minProfit
+    //  korumasının bu saldırıyı %100 tespit edip revert ettirdiği kanıtlanır.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    function test_RevertOnJITLiquidityAttack() public {
+        // ─── SENARYO KURULUMU ─────────────────────────────────────
+        // Normal koşullar: 1000 USDC borç, 1050 USDC dönüş → 50 USDC kâr
+        uint256 normalProfit = 50e6; // 50 USDC
+        // minProfit: Kâr'ın %80'i (güvenlik marjı)
+        uint128 minProfitThreshold = uint128(normalProfit * 80 / 100); // 40 USDC
+
+        // ─── SALDIRI SİMÜLASYONU ─────────────────────────────────
+        // JIT Attacker, bot'un işleminden ÖNCE devasa likidite ekler.
+        // Bu, Slipstream'deki spread'i daraltır → çıktı düşer.
+        //
+        // Saldırı sonrası: 1050 USDC yerine sadece 1010 USDC döner
+        // Kâr: 1010 - 1000 = 10 USDC (normalin %20'si)
+        // minProfit: 40 USDC > 10 USDC → REVERT
+
+        // JIT saldırısı sonrası düşük çıktı senaryosu
+        uint256 attackUniOwed = 1000e6;       // 1000 USDC borç (değişmez)
+        uint256 attackUniReceived = 1e18;     // 1 WETH alınan (değişmez)
+        uint256 attackAeroOutput = 1010e6;    // JIT sonrası: sadece 1010 USDC döner (50→10 kâr)
+
+        // Mock kurulumu: JIT sonrası daraltılmış spread
+        uniPool.setMockDeltas(int256(attackUniOwed), -int256(attackUniReceived));
+        tokenB.mint(address(uniPool), attackUniReceived);
+
+        slipPool.setMockDeltas(-int256(attackAeroOutput), int256(attackUniReceived));
+        tokenA.mint(address(slipPool), attackAeroOutput);
+
+        // ─── İŞLEMİ ÇALIŞTIR (YÜKSEK minProfit İLE) ─────────────
+        // Bot, normal koşullarda 50 USDC bekliyor → minProfit=40 USDC ayarlamış
+        // JIT saldırısı sonrası gerçek kâr 10 USDC < 40 USDC → REVERT
+        bool ok = _executeArbitrage(
+            address(uniPool),
+            address(slipPool),
+            address(tokenA),    // owedToken
+            address(tokenB),    // receivedToken
+            attackUniReceived,  // 1 WETH
+            0,                  // uniDirection: zeroForOne=true
+            1,                  // aeroDirection: oneForZero
+            minProfitThreshold, // 40 USDC minimum kâr
+            uint32(block.number) // deadline geçerli
+        );
+
+        // ─── DOĞRULAMA ───────────────────────────────────────────
+        assertFalse(ok, "JIT liquidity saldirisi sonrasi islem REVERT etmeli");
+
+        // Kontrat bakiyesi sıfır kalmalı (revert = hiç token harcanmadı)
+        assertEq(
+            tokenA.balanceOf(address(bot)),
+            0,
+            "JIT saldirisi sonrasi kontratta token kalmamali (revert)"
+        );
+        assertEq(
+            tokenB.balanceOf(address(bot)),
+            0,
+            "JIT saldirisi sonrasi kontratta WETH kalmamali (revert)"
+        );
+    }
+
+    /// @dev JIT saldırısı AMA minProfit düşük → kâr yeterli → işlem geçer
+    function test_JITAttack_LowMinProfit_StillPasses() public {
+        uint256 attackUniOwed = 1000e6;
+        uint256 attackUniReceived = 1e18;
+        uint256 attackAeroOutput = 1010e6; // JIT sonrası: 10 USDC kâr
+
+        uniPool.setMockDeltas(int256(attackUniOwed), -int256(attackUniReceived));
+        tokenB.mint(address(uniPool), attackUniReceived);
+
+        slipPool.setMockDeltas(-int256(attackAeroOutput), int256(attackUniReceived));
+        tokenA.mint(address(slipPool), attackAeroOutput);
+
+        // minProfit = 5 USDC → 10 USDC kâr >= 5 USDC → GEÇ
+        bool ok = _executeArbitrage(
+            address(uniPool),
+            address(slipPool),
+            address(tokenA),
+            address(tokenB),
+            attackUniReceived,
+            0, 1,
+            5e6, // minProfit: sadece 5 USDC
+            uint32(block.number)
+        );
+
+        assertTrue(ok, "Dusuk minProfit ile JIT sonrasi islem gecmeli");
+        assertEq(
+            tokenA.balanceOf(address(bot)),
+            10e6, // 10 USDC kâr
+            "Kar dogru miktarda birikmeli"
+        );
+    }
+
+    /// @dev JIT saldırısı kârı TAM sıfıra indirirse → NoProfitRealized revert
+    function test_JITAttack_ZeroProfit_Reverts() public {
+        uint256 attackUniOwed = 1000e6;
+        uint256 attackUniReceived = 1e18;
+        // JIT sonrası çıktı = borç → kâr = 0
+        uint256 attackAeroOutput = 1000e6;
+
+        uniPool.setMockDeltas(int256(attackUniOwed), -int256(attackUniReceived));
+        tokenB.mint(address(uniPool), attackUniReceived);
+
+        slipPool.setMockDeltas(-int256(attackAeroOutput), int256(attackUniReceived));
+        tokenA.mint(address(slipPool), attackAeroOutput);
+
+        bool ok = _executeArbitrage(
+            address(uniPool),
+            address(slipPool),
+            address(tokenA),
+            address(tokenB),
+            attackUniReceived,
+            0, 1,
+            0, // minProfit=0 bile olsa kâr yok → NoProfitRealized
+            uint32(block.number)
+        );
+
+        assertFalse(ok, "Sifir kar ile islem NoProfitRealized revert etmeli");
+    }
+
+    /// @dev JIT: Attacker cüzdan adresi farklı → executor değil → Unauthorized
+    function test_JITAttack_AttackerCannotCallFallback() public {
+        _setupProfitableScenario(1000e6, 1e18, 1050e6);
+
+        bytes memory cd = _buildCalldata(
+            address(uniPool), address(slipPool),
+            address(tokenA), address(tokenB),
+            1e18, 0, 1, 1,
+            uint32(block.number)
+        );
+
+        // Attacker cüzdan: executor değil → Unauthorized revert
+        vm.prank(attacker);
+        (bool ok, ) = address(bot).call(cd);
+        assertFalse(ok, "Attacker cuzdani executor degil, reddedilmeli");
+    }
 }

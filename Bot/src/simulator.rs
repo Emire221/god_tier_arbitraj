@@ -854,3 +854,225 @@ mod calldata_tests {
         assert_eq!(decoded.8, deadline);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// L2 Sequencer Reorg & Stale State Testleri
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Base, tekil sequencer kullanan bir L2'dir. Sequencer yoğunluk anlarında
+// reorg yapabilir — iyimser (optimistic) state güncellemesi yapılmışsa
+// bot "hayalet fırsat" üzerine işlem gönderebilir. Bu test modülü,
+// validate_mathematical fonksiyonunun bayat (stale) veya tutarsız state'leri
+// doğru şekilde reddettiğini kanıtlar.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod sequencer_reorg_tests {
+    use super::*;
+    use alloy::primitives::{Address, U256, address};
+    use std::sync::Arc;
+    use parking_lot::RwLock;
+    use std::time::{Instant, Duration};
+    use crate::types::*;
+
+    const POOL_A: Address = address!("d0b53D9277642d899DF5C87A3966A349A798F224");
+    const POOL_B: Address = address!("cDAC0d6c6C59727a65F871236188350531885C43");
+
+    fn make_pool_configs() -> Vec<PoolConfig> {
+        vec![
+            PoolConfig {
+                address: POOL_A,
+                name: "UniV3-test".into(),
+                fee_bps: 5,
+                fee_fraction: 0.0005,
+                token0_decimals: 18,
+                token1_decimals: 6,
+                dex: DexType::UniswapV3,
+                token0_is_weth: true,
+                tick_spacing: 10,
+            },
+            PoolConfig {
+                address: POOL_B,
+                name: "Aero-test".into(),
+                fee_bps: 100,
+                fee_fraction: 0.01,
+                token0_decimals: 18,
+                token1_decimals: 6,
+                dex: DexType::Aerodrome,
+                token0_is_weth: true,
+                tick_spacing: 1,
+            },
+        ]
+    }
+
+    fn make_active_state(eth_price: f64, liquidity: u128, block: u64) -> SharedPoolState {
+        Arc::new(RwLock::new(PoolState {
+            sqrt_price_x96: U256::from(1u64) << 96,
+            sqrt_price_f64: 1.0,
+            tick: 0,
+            liquidity,
+            liquidity_f64: liquidity as f64,
+            eth_price_usd: eth_price,
+            last_block: block,
+            last_update: Instant::now(),
+            is_initialized: true,
+            bytecode: None,
+            tick_bitmap: None,
+        }))
+    }
+
+    /// L2 Sequencer Reorg Testi: Bayat state reddedilmeli.
+    ///
+    /// Senaryo: Bot pending TX'den iyimser state güncellemesi yaptı.
+    /// Sequencer bu TX'i düşürdü (dropped). State artık bayat.
+    /// validate_mathematical() 5000ms staleness eşiğini aşan veriyi reddetmeli.
+    #[test]
+    fn test_sequencer_reorg_handling() {
+        let pools = make_pool_configs();
+        let sim = SimulationEngine::new();
+
+        // Havuz A: taze state (henüz güncel)
+        let state_a = make_active_state(2500.0, 10_000_000_000_000_000_000, 100);
+
+        // Havuz B: bayat state (pending TX düşürüldü → state güncellenmedi)
+        // Son güncelleme 6 saniye önceydi → staleness_ms() > 5000
+        let state_b = Arc::new(RwLock::new(PoolState {
+            sqrt_price_x96: U256::from(1u64) << 96,
+            sqrt_price_f64: 1.0,
+            tick: 0,
+            liquidity: 10_000_000_000_000_000_000,
+            liquidity_f64: 10_000_000_000_000_000_000.0,
+            eth_price_usd: 2510.0,
+            last_block: 98, // 2 blok geride — reorg sonrası
+            last_update: Instant::now() - Duration::from_secs(6), // 6s bayat
+            is_initialized: true,
+            bytecode: None,
+            tick_bitmap: None,
+        }));
+
+        let states: Vec<SharedPoolState> = vec![state_a, state_b];
+
+        // Simülasyon: bayat state'li havuz → BAŞARISIZ olmalı
+        let result = sim.validate_mathematical(&pools, &states, 0, 1, 1.0);
+        assert!(!result.success, "Bayat (stale) state ile simülasyon reddedilmeli");
+        assert!(
+            result.error.as_deref().unwrap_or("").contains("Bayat"),
+            "Hata mesajı 'Bayat' içermeli, aldığımız: {:?}",
+            result.error
+        );
+    }
+
+    /// "Hayalet fırsat" testleri: Sequencer reorg sonrası geçersiz fiyatlar.
+    ///
+    /// Senaryo: Pending TX'den alınan fiyat 2500$, ancak TX düşürüldüğünde
+    /// gerçek fiyat 0$ (veri yok/sıfırlandı). validate_mathematical bunu
+    /// "Havuz aktif değil" olarak reddetmeli.
+    #[test]
+    fn test_sequencer_reorg_phantom_opportunity() {
+        let pools = make_pool_configs();
+        let sim = SimulationEngine::new();
+
+        // İyimser state: pending TX'den alınan fiyat ($2500)
+        let state_a = make_active_state(2500.0, 10_000_000_000_000_000_000, 100);
+
+        // Reorg sonrası havuz B: fiyat sıfırlandı (dropped TX)
+        let state_b = Arc::new(RwLock::new(PoolState {
+            sqrt_price_x96: U256::ZERO,
+            sqrt_price_f64: 0.0,
+            tick: 0,
+            liquidity: 0, // Likidite de sıfır
+            liquidity_f64: 0.0,
+            eth_price_usd: 0.0,
+            last_block: 100,
+            last_update: Instant::now(),
+            is_initialized: false, // Havuz başlatılmamış gibi
+            bytecode: None,
+            tick_bitmap: None,
+        }));
+
+        let states: Vec<SharedPoolState> = vec![state_a, state_b];
+
+        let result = sim.validate_mathematical(&pools, &states, 0, 1, 1.0);
+        assert!(!result.success, "Hayalet fırsat (phantom opportunity) reddedilmeli");
+        assert!(
+            result.error.as_deref().unwrap_or("").contains("aktif değil"),
+            "Hata mesajı 'aktif değil' içermeli: {:?}",
+            result.error
+        );
+    }
+
+    /// Çift bayat state testi: Her iki havuz da stale.
+    ///
+    /// Senaryo: Sequencer tam kesintide, hiçbir güncelleme gelmiyor.
+    /// Tüm havuzlar 10+ saniye bayat → simülasyon kesinlikle reddedilmeli.
+    #[test]
+    fn test_sequencer_full_outage_both_pools_stale() {
+        let pools = make_pool_configs();
+        let sim = SimulationEngine::new();
+
+        let stale_state = |price: f64| -> SharedPoolState {
+            Arc::new(RwLock::new(PoolState {
+                sqrt_price_x96: U256::from(1u64) << 96,
+                sqrt_price_f64: 1.0,
+                tick: 0,
+                liquidity: 10_000_000_000_000_000_000,
+                liquidity_f64: 10_000_000_000_000_000_000.0,
+                eth_price_usd: price,
+                last_block: 95,
+                last_update: Instant::now() - Duration::from_secs(10), // 10s bayat
+                is_initialized: true,
+                bytecode: None,
+                tick_bitmap: None,
+            }))
+        };
+
+        let states: Vec<SharedPoolState> = vec![stale_state(2500.0), stale_state(2520.0)];
+
+        let result = sim.validate_mathematical(&pools, &states, 0, 1, 0.5);
+        assert!(!result.success, "Tam kesintide her iki bayat havuz reddedilmeli");
+        assert!(
+            result.error.as_deref().unwrap_or("").contains("Bayat"),
+            "Hata 'Bayat' içermeli: {:?}",
+            result.error
+        );
+    }
+
+    /// Taze state → simülasyon başarılı olmalı (pozitif kontrol).
+    #[test]
+    fn test_fresh_state_passes_validation() {
+        let pools = make_pool_configs();
+        let sim = SimulationEngine::new();
+
+        let states: Vec<SharedPoolState> = vec![
+            make_active_state(2500.0, 10_000_000_000_000_000_000, 100),
+            make_active_state(2520.0, 10_000_000_000_000_000_000, 100),
+        ];
+
+        let result = sim.validate_mathematical(&pools, &states, 0, 1, 1.0);
+        assert!(result.success, "Taze state ile simülasyon başarılı olmalı");
+        assert!(result.error.is_none(), "Hata mesajı olmamalı");
+    }
+
+    /// Anormal fiyat testi: Reorg sonrası havuz fiyatı saçma değere ulaşmış.
+    #[test]
+    fn test_sequencer_reorg_abnormal_price() {
+        let pools = make_pool_configs();
+        let sim = SimulationEngine::new();
+
+        // Normal havuz
+        let state_a = make_active_state(2500.0, 10_000_000_000_000_000_000, 100);
+        // Reorg sonrası absürd fiyat — flash loan manipülasyonu veya veri bozulması
+        let state_b = make_active_state(999_999.0, 10_000_000_000_000_000_000, 100);
+
+        let states: Vec<SharedPoolState> = vec![state_a, state_b];
+
+        let result = sim.validate_mathematical(&pools, &states, 0, 1, 1.0);
+        // 999,999 < 100,000 sınırı aşılıyor → anormal fiyat reddedilmeli
+        assert!(!result.success, "Anormal fiyat ($999,999) reddedilmeli");
+        assert!(
+            result.error.as_deref().unwrap_or("").contains("Anormal fiyat"),
+            "Hata 'Anormal fiyat' içermeli: {:?}",
+            result.error
+        );
+    }
+}

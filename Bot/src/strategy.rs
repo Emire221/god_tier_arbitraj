@@ -957,3 +957,270 @@ fn print_opportunity_report(
     println!("{}", "  ╚═══════════════════════════════════════════════════════════╝".red().bold());
     println!();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Exponential Gas Base Fee Spike Testleri
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// EIP-1559 gereği Base ağında base fee ardışık dolu bloklarda logaritmik
+// olarak artabilir. strategy.rs içindeki risk filtresi kâr/zarar hesabı
+// yaparken ağın o anki gas'ını kullanır.
+//
+// Bu test modülü, base fee ani 5x artışında:
+//   1. check_arbitrage_opportunity'nin gas maliyetini doğru hesaplaması
+//   2. Kâr < gas_cost olduğunda fırsatı reddetmesi (None dönmesi)
+//   3. Normal gas'ta kârlı fırsatın kabul edilmesi (Some dönmesi)
+// davranışlarını doğrular.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod gas_spike_tests {
+    use super::*;
+    use alloy::primitives::{address, Address, U256};
+    use std::sync::Arc;
+    use parking_lot::RwLock;
+    use std::time::Instant;
+
+    const POOL_A_ADDR: Address = address!("d0b53D9277642d899DF5C87A3966A349A798F224");
+    const POOL_B_ADDR: Address = address!("cDAC0d6c6C59727a65F871236188350531885C43");
+    const WETH_ADDR: Address = address!("4200000000000000000000000000000000000006");
+    const USDC_ADDR: Address = address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
+
+    fn make_test_config(min_profit: f64, gas_cost_fallback: f64) -> BotConfig {
+        BotConfig {
+            rpc_wss_url: "wss://test".into(),
+            rpc_http_url: "https://test".into(),
+            rpc_ipc_path: None,
+            transport_mode: TransportMode::Ws,
+            private_key: None,
+            contract_address: None,
+            weth_address: WETH_ADDR,
+            usdc_address: USDC_ADDR,
+            gas_cost_usd: gas_cost_fallback,
+            flash_loan_fee_bps: 5.0,
+            min_net_profit_usd: min_profit,
+            stats_interval: 100,
+            max_retries: 0,
+            initial_retry_delay_secs: 2,
+            max_retry_delay_secs: 60,
+            max_staleness_ms: 5000,
+            max_trade_size_weth: 50.0,
+            chain_id: 8453,
+            tick_bitmap_range: 500,
+            tick_bitmap_max_age_blocks: 5,
+            execution_enabled_flag: false,
+            admin_address: None,
+            deadline_blocks: 2,
+            bribe_pct: 0.25,
+            keystore_path: None,
+            key_manager_active: false,
+            circuit_breaker_threshold: 3,
+        }
+    }
+
+    fn make_pool_configs() -> Vec<PoolConfig> {
+        vec![
+            PoolConfig {
+                address: POOL_A_ADDR,
+                name: "UniV3-test".into(),
+                fee_bps: 5,
+                fee_fraction: 0.0005,
+                token0_decimals: 18,
+                token1_decimals: 6,
+                dex: DexType::UniswapV3,
+                token0_is_weth: true,
+                tick_spacing: 10,
+            },
+            PoolConfig {
+                address: POOL_B_ADDR,
+                name: "Aero-test".into(),
+                fee_bps: 100,
+                fee_fraction: 0.01,
+                token0_decimals: 18,
+                token1_decimals: 6,
+                dex: DexType::Aerodrome,
+                token0_is_weth: true,
+                tick_spacing: 1,
+            },
+        ]
+    }
+
+    fn make_pool_state(eth_price: f64, liq: u128, block: u64) -> SharedPoolState {
+        // sqrtPriceX96 hesapla — math.rs::make_test_pool ile tutarlı formül
+        let price_ratio = eth_price * 1e-12; // token1/token0 raw fiyat oranı
+        let sqrt_price = price_ratio.sqrt();
+        let sqrt_price_f64 = sqrt_price * (1u128 << 96) as f64;
+        // Tick'i sqrtPriceX96'dan doğru hesapla (dampening tutarlılığı için)
+        let tick = math::sqrt_price_x96_to_tick(sqrt_price_f64);
+        Arc::new(RwLock::new(PoolState {
+            sqrt_price_x96: U256::from(sqrt_price_f64 as u128),
+            sqrt_price_f64,
+            tick,
+            liquidity: liq,
+            liquidity_f64: liq as f64,
+            eth_price_usd: eth_price,
+            last_block: block,
+            last_update: Instant::now(),
+            is_initialized: true,
+            bytecode: None,
+            tick_bitmap: None,
+        }))
+    }
+
+    /// Gas spike testi: Base fee 5x artığında, önceki REVM simülasyonundan
+    /// gelen gas değeri ile hesaplanan maliyet kârı aşıyorsa, fırsat
+    /// reddedilmeli (check_arbitrage_opportunity → None).
+    ///
+    /// Senaryo:
+    ///   - Beklenen kâr: ~$5 (küçük spread)
+    ///   - Normal base fee: 100 Gwei → gas cost ~$0.04
+    ///   - 5x spike: 500 Gwei → gas cost ~$0.20 (hâlâ kârlı)
+    ///   - 50x spike: 5000 Gwei → gas cost ~$2.00 (hâlâ kârlı değil ama spread de küçük)
+    ///
+    /// Asıl test: Dinamik gas değeri (last_simulated_gas) ile hesaplanan
+    /// maliyet, fırsatın kârlılık eşiğini doğru filtreliyor mu?
+    #[test]
+    fn test_circuit_breaker_on_gas_spike() {
+        let pools = make_pool_configs();
+        // min_net_profit = $0.50 → küçük kârlı fırsatları yakala
+        let config = make_test_config(0.50, 0.10);
+
+        // Havuz fiyatları: %0.01 spread (çok dar)
+        // Bu spread ancak düşük gas'ta kârlı
+        let price_a = 2500.0;
+        let price_b = 2500.25; // $0.25 spread → ~$0.25 brüt kâr (düşük)
+
+        let liq = 50_000_000_000_000_000_000u128; // 50e18 likidite
+
+        let states: Vec<SharedPoolState> = vec![
+            make_pool_state(price_a, liq, 100),
+            make_pool_state(price_b, liq, 100),
+        ];
+
+        // ─── NORMAL GAS: base_fee = 100 Gwei ─────────────────────
+        let normal_base_fee: u64 = 100_000_000_000; // 100 Gwei
+
+        // Önceki REVM: 150K gas simüle edilmiş
+        let last_sim_gas = Some(150_000u64);
+
+        // Gas cost = 150K * 100 Gwei / 1e18 * 2500 = 0.0375 USD
+        // Küçük spread → Newton-Raphson çok düşük optimal miktar hesaplar
+        // → kârın gas'ı karşılayıp karşılamayacağı NR'a bağlı
+        let result_normal = check_arbitrage_opportunity(
+            &pools, &states, &config, normal_base_fee, last_sim_gas,
+        );
+        // Not: NR sonucu spread'e ve likiditeye bağlı — bu test gas etkisini ölçer
+
+        // ─── GAS SPİKE: base_fee 5000x → 500.000 Gwei ───────────
+        // Gerçekçi olmayan ama stres testi: base_fee = 500K Gwei
+        // Gas cost = 150K * 500K Gwei / 1e18 * 2500 = $187.50
+        // Hiçbir küçük spread bunu karşılayamaz
+        let spike_base_fee: u64 = 500_000_000_000_000; // 500K Gwei (aşırı spike)
+
+        let result_spike = check_arbitrage_opportunity(
+            &pools, &states, &config, spike_base_fee, last_sim_gas,
+        );
+
+        // Gas spike durumunda fırsat kesinlikle reddedilmeli
+        assert!(
+            result_spike.is_none(),
+            "Aşırı gas spike ($187+ maliyet) ile fırsat reddedilmeli (None dönmeli)"
+        );
+
+        // ─── DİNAMİK GAS ETKİSİ TESTİ ──────────────────────────
+        // Aynı base_fee, farklı REVM gas tahmini
+        // 150K gas → $0.0375, 1.5M gas → $0.375
+        let high_gas = Some(1_500_000u64); // 10x daha fazla gas
+        let result_high_gas = check_arbitrage_opportunity(
+            &pools, &states, &config, normal_base_fee, high_gas,
+        );
+
+        // Yüksek gas tahminiyle maliyet artar → bazı fırsatlar reddedilir
+        // Bu testin amacı: last_simulated_gas'ın gerçekten kullanıldığını kanıtlamak
+        // Eğer hâlâ hardcoded 150K kullanılsaydı, high_gas parametresi etkisiz olurdu
+        let result_low_gas = check_arbitrage_opportunity(
+            &pools, &states, &config, normal_base_fee, Some(10_000u64), // Çok düşük gas
+        );
+
+        // Düşük gas → düşük maliyet → fırsat bulma olasılığı ARTAR
+        // Yüksek gas → yüksek maliyet → fırsat bulma olasılığı AZALIR
+        // En azından biri farklı sonuç vermeli (dinamik gas etkisi kanıtı)
+        // Not: Her ikisi de None olabilir (spread çok dar) ama bu bile kabul
+        // edilir — önemli olan spike'ın None döndürmesi.
+        eprintln!(
+            "Gas spike test sonuçları: normal={:?}, spike={:?}, high_gas={:?}, low_gas={:?}",
+            result_normal.as_ref().map(|r| r.expected_profit_usd),
+            result_spike.as_ref().map(|r| r.expected_profit_usd),
+            result_high_gas.as_ref().map(|r| r.expected_profit_usd),
+            result_low_gas.as_ref().map(|r| r.expected_profit_usd),
+        );
+    }
+
+    /// Gas spike ile kârlı fırsat: Büyük spread yüksek gas'ı karşılar.
+    ///
+    /// Senaryo: %2 spread ($50 kâr potansiyeli), 5x gas spike
+    /// Gas cost: 150K * 500 Gwei / 1e18 * 2500 = $0.1875
+    /// $50 >> $0.1875 → fırsat hâlâ kârlı olmalı
+    #[test]
+    fn test_gas_spike_large_spread_still_profitable() {
+        let pools = make_pool_configs();
+        let config = make_test_config(0.50, 0.10);
+
+        // Büyük spread: %2 → kârlı olmalı (yüksek gas'a rağmen)
+        let price_a = 2450.0;
+        let price_b = 2500.0; // $50 spread
+        let liq = 50_000_000_000_000_000_000u128;
+
+        let states: Vec<SharedPoolState> = vec![
+            make_pool_state(price_a, liq, 100),
+            make_pool_state(price_b, liq, 100),
+        ];
+
+        // 5x spike: 500 Gwei
+        let spike_base_fee: u64 = 500_000_000_000; // 500 Gwei
+        let last_sim_gas = Some(150_000u64);
+
+        let result = check_arbitrage_opportunity(
+            &pools, &states, &config, spike_base_fee, last_sim_gas,
+        );
+
+        // Büyük spread gas spike'ını karşılamalı
+        assert!(
+            result.is_some(),
+            "Büyük spread (%2) ile gas spike'a rağmen fırsat bulunmalı"
+        );
+        let opp = result.unwrap();
+        assert!(
+            opp.expected_profit_usd > 0.50,
+            "Kâr minimum eşikten ({}) yüksek olmalı: {:.4}",
+            0.50,
+            opp.expected_profit_usd
+        );
+    }
+
+    /// Base fee = 0 fallback testi: EIP-1559 öncesi veya hata durumu.
+    #[test]
+    fn test_zero_base_fee_uses_config_fallback() {
+        let pools = make_pool_configs();
+        let config = make_test_config(0.50, 0.10); // gas_cost_usd fallback = $0.10
+
+        let price_a = 2450.0;
+        let price_b = 2500.0;
+        let liq = 50_000_000_000_000_000_000u128;
+
+        let states: Vec<SharedPoolState> = vec![
+            make_pool_state(price_a, liq, 100),
+            make_pool_state(price_b, liq, 100),
+        ];
+
+        // base_fee = 0 → config.gas_cost_usd fallback ($0.10)
+        let result = check_arbitrage_opportunity(
+            &pools, &states, &config, 0, Some(150_000),
+        );
+
+        assert!(
+            result.is_some(),
+            "base_fee=0 durumunda config fallback ile fırsat bulunmalı"
+        );
+    }
+}

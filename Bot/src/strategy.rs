@@ -55,6 +55,7 @@ pub fn check_arbitrage_opportunity(
     states: &[SharedPoolState],
     config: &BotConfig,
     block_base_fee: u64,
+    last_simulated_gas: Option<u64>,
 ) -> Option<ArbitrageOpportunity> {
     if pools.len() < 2 || states.len() < 2 {
         return None;
@@ -103,15 +104,15 @@ pub fn check_arbitrage_opportunity(
     let sell_bitmap = sell_state.tick_bitmap.as_ref();
     let buy_bitmap = buy_state.tick_bitmap.as_ref();
 
-    // ─── Dinamik Gas Cost (v10.0) ─────────────────────────────────
-    // Formül: gas_cost = (GAS_ESTIMATE * base_fee) / 1e18 * eth_price
+    // ─── Dinamik Gas Cost (v14.0) ─────────────────────────────────
+    // Formül: gas_cost = (gas_estimate * base_fee) / 1e18 * eth_price
     // Base_fee 0 ise (pre-EIP1559 veya hata) fallback: config.gas_cost_usd
+    //
+    // v14.0: Hardcoded 150K kaldırıldı — önceki REVM simülasyonundan
+    // dönen gerçek gas değeri kullanılır. İlk blokta (henüz simülasyon
+    // yapılmamışken) 150K fallback korunur.
     let dynamic_gas_cost_usd = if block_base_fee > 0 {
-        // v12.0: 350K → 150K — kompakt calldata + EIP-1153 optimizasyonu
-        // ile gerçek gas tüketimi ~120-150K aralığına inmiştir.
-        // Eski 350K değeri bot'un küçük kârlı fırsatları "kârsız" diye
-        // atlmasına neden oluyordu (dynamic_gas_cost_usd yüksek çıkıyordu).
-        let gas_estimate: u64 = 150_000;
+        let gas_estimate: u64 = last_simulated_gas.unwrap_or(150_000);
         let gas_cost_eth = (gas_estimate as f64 * block_base_fee as f64) / 1e18;
         let cost = gas_cost_eth * eth_price_ref;
         // Minimum floor: 0.001 USD (sıfır gas cost'u engellemek için)
@@ -161,6 +162,9 @@ pub fn check_arbitrage_opportunity(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Bulunan arbitraj fırsatını değerlendir, simüle et ve gerekirse yürüt
+///
+/// Dönüş: REVM simülasyonundan gelen gerçek gas kullanımı (sonraki bloklarda
+/// `check_arbitrage_opportunity`'e beslenir → dinamik gas maliyet hesaplaması).
 pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
     _provider: &P,
     config: &BotConfig,
@@ -172,7 +176,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
     nonce_manager: &Arc<NonceManager>,
     block_timestamp: u64,
     block_base_fee: u64,
-) {
+) -> Option<u64> {
     let _buy_pool = &pools[opportunity.buy_pool_idx];
     let _sell_pool = &pools[opportunity.sell_pool_idx];
 
@@ -185,7 +189,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         || opportunity.optimal_amount_weth <= 0.0
         || !opportunity.expected_profit_usd.is_finite()
     {
-        return;
+        return None;
     }
 
     // ─── İstatistik Güncelle ─────────────────────────────────────
@@ -274,7 +278,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         // v10.0: Circuit breaker — ardışık başarısızlık sayacını artır
         stats.consecutive_failures += 1;
         print_simulation_failure(opportunity, &sim_result, pools);
-        return;
+        return None;
     }
 
     // Simülasyon başarılı → ardışık başarısızlık sayacını sıfırla
@@ -346,10 +350,9 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         );
 
         let bribe_wei = {
-            // Gas maliyeti USD hesapla
+            // v14.0: Gas maliyeti USD — REVM simülasyonundan gelen dinamik gas kullanılır
             let gas_cost_usd = {
-                let gas_est = 150_000u64;
-                let gas_cost_eth = (gas_est as f64 * block_base_fee as f64) / 1e18;
+                let gas_cost_eth = (simulated_gas_used as f64 * block_base_fee as f64) / 1e18;
                 gas_cost_eth * ((opportunity.buy_price + opportunity.sell_price) / 2.0)
             };
 
@@ -479,6 +482,10 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
             ).await;
         });
     }
+
+    // v14.0: REVM'den gelen gerçek gas değerini döndür
+    // Bir sonraki blokta check_arbitrage_opportunity'ye beslenir
+    Some(simulated_gas_used)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -728,7 +735,9 @@ async fn execute_inner(
     // başka bir küçük swap nedeniyle değişebilir → cold storage access,
     // state diff vb. ek gas tüketir. Bu tampon "Out of Gas" hatasını önler.
     let gas_limit_with_buffer = ((simulated_gas as f64) * 1.10) as u64;
-    let gas_limit = gas_limit_with_buffer.max(150_000); // Minimum 150K güvenlik tabanı
+    // v14.0: Minimum taban — REVM simulate() zaten gerçek gas döndürür,
+    // bu floor yalnızca aşırı düşük gas raporlarına karşı güvenlik ağıdır.
+    let gas_limit = gas_limit_with_buffer.max(100_000);
 
     // ═══ RAW TX GÖNDERİMİ — ATOMIK NONCE + DİNAMİK FEE + GAS LIMIT ═══
     let mut tx = TransactionRequest::default()

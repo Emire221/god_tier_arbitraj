@@ -653,6 +653,10 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
     let mut stats = ArbitrageStats::new();
     stats.active_transport = active_transport.to_string();
     let mut last_bitmap_block: u64 = block;
+    // v14.0: Son REVM simülasyonundan gelen gerçek gas değeri
+    // İlk blokta None → check_arbitrage_opportunity 150K fallback kullanır
+    // Sonraki bloklarda REVM'den dönen kesin gas ile dinamik maliyet hesaplanır
+    let mut last_simulated_gas: Option<u64> = None;
 
     // ══════════════ ANA DÖNGÜ — BLOK BAZLI + WSS HEARTBEAT ══════════════
     // v10.1: WSS bağlantı sağlığı kontrolü (Heartbeat)
@@ -775,9 +779,9 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
                 ));
             }
 
-            if let Some(opportunity) = check_arbitrage_opportunity(pools, &states, config, block_base_fee) {
-                // ── 4. DEĞERLENDİR + SİMÜLE + YÜRÜT ──────────
-                evaluate_and_execute(
+            if let Some(opportunity) = check_arbitrage_opportunity(pools, &states, config, block_base_fee, last_simulated_gas) {
+                // ── 4. DEĞERLENDİR + SİMÜLE + YÜRÜT ────────────────
+                if let Some(gas) = evaluate_and_execute(
                     &provider,
                     config,
                     pools,
@@ -788,7 +792,9 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
                     &nonce_manager,
                     block_timestamp,
                     block_base_fee,
-                ).await;
+                ).await {
+                    last_simulated_gas = Some(gas);
+                }
             }
         }
 

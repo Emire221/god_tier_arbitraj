@@ -359,9 +359,12 @@ impl SimulationEngine {
         }
 
         // Tüm kontroller geçti
+        // Not: validate_mathematical gerçek EVM çalıştırmaz — gas tahmini yapamaz.
+        // Gas değeri yalnızca REVM simulate() çağrısının olmadığı durumda (contract_address=None)
+        // fallback olarak kullanılır. REVM aktifken bu değer revm_result.gas_used ile ezilir.
         SimulationResult {
             success: true,
-            gas_used: 150_000, // v13.0: 350K → 150K — kompakt calldata + EIP-1153 gerçek gas ~120-150K
+            gas_used: 0, // v14.0: Artık 0 döner — gerçek gas yalnızca REVM'den gelir
             error: None,
         }
     }

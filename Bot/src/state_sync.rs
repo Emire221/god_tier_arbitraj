@@ -1,10 +1,12 @@
 // ============================================================================
-//  STATE_SYNC v9.1 — Multicall3 + Optimistic Pending TX Dinleyici
+//  STATE_SYNC v9.2 — Multicall3 + Optimistic Pending TX Dinleyici
 //
-//  v9.1 Yenilikler (Issue #101 — Buffer Overrun Düzeltmesi):
-//  ✓ Aerodrome Slipstream slot0 ABI güncellendi (6→7 parametre)
-//  ✓ feeProtocol (uint8) alanı eklendi — Uniswap V3 standardına uyum
-//  ✓ WSS state sync buffer overrun çökmesi giderildi
+//  v9.2 Yenilikler (Issue #101 — Aerodrome ABI Kök-neden Analizi):
+//  ✓ Aerodrome Slipstream slot0 ABI 6 parametre olarak düzeltildi
+//    (Aerodrome CLPool.sol Slot0 struct'ında feeProtocol YOKTUR)
+//  ✓ Aerodrome ticks() ABI 10 parametre olarak güncellendi
+//    (Uniswap V3'ten farklı: ekstra stakedLiquidityNet + rewardGrowthOutsideX128)
+//  ✓ Pool adresi doğrulama rehberi eklendi
 //
 //  v9.0 Yenilikler:
 //  ✓ Pending TX stream (eth_subscribe newPendingTransactions)
@@ -99,12 +101,24 @@ sol! {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Aerodrome Slipstream Havuz Arayüzü (slot0 → 7 değişken, feeProtocol DAHİL)
+// Aerodrome Slipstream Havuz Arayüzü (slot0 → 6 değişken, feeProtocol YOK)
 //
-// ÖNEMLİ: Canlı Base ağındaki güncel Aerodrome Slipstream kontratları
-// feeProtocol alanını ekledi. Eski 6 parametreli tanım ABI uyuşmazlığına
-// (buffer overrun) ve RPC decode hatasına yol açıyordu.
-// Güncel yapı artık Uniswap V3 standardıyla birebir aynı (7 parametre).
+// ÖNEMLİ: Aerodrome CLPool.sol Slot0 struct'ı Uniswap V3'ten FARKLIDIR:
+//   - Uniswap V3 slot0: 7 parametre (feeProtocol DAHİL)
+//   - Aerodrome slot0:  6 parametre (feeProtocol YOK)
+//
+// Kaynak: github.com/aerodrome-finance/slipstream/blob/main/contracts/core/CLPool.sol
+//   struct Slot0 {
+//       uint160 sqrtPriceX96;
+//       int24 tick;
+//       uint16 observationIndex;
+//       uint16 observationCardinality;
+//       uint16 observationCardinalityNext;
+//       bool unlocked;
+//   }
+//
+// Ayrıca Aerodrome ticks() 10 parametre döner (Uniswap V3: 8 parametre).
+// Ekstra alanlar: int128 stakedLiquidityNet, uint256 rewardGrowthOutsideX128
 // ─────────────────────────────────────────────────────────────────────────────
 
 sol! {
@@ -116,7 +130,6 @@ sol! {
             uint16 observationIndex,
             uint16 observationCardinality,
             uint16 observationCardinalityNext,
-            uint8 feeProtocol,
             bool unlocked
         );
 
@@ -130,7 +143,9 @@ sol! {
             int56 tickCumulativeOutside,
             uint160 secondsPerLiquidityOutsideX128,
             uint32 secondsOutside,
-            bool initialized
+            bool initialized,
+            int128 stakedLiquidityNet,
+            uint256 rewardGrowthOutsideX128
         );
 
         function tickBitmap(int16 wordPosition) external view returns (uint256);
@@ -178,7 +193,11 @@ pub async fn sync_pool_state<T: Transport + Clone, P: Provider<T, Ethereum> + Sy
                 liq_call.call(),
             );
             let slot0 = slot0_result
-                .map_err(|e| eyre::eyre!("[{}] slot0 okuma hatası (Aero/7-alan): {}", pool_config.name, e))?;
+                .map_err(|e| eyre::eyre!(
+                    "[{}] slot0 okuma hatası (Aero/6-alan): {}\n\
+                    → Havuz adresi doğru bir Aerodrome CLPool mu? Kontrol edin: {}",
+                    pool_config.name, e, pool_config.address
+                ))?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[{}] liquidity okuma hatası: {}", pool_config.name, e))?;
             (slot0.sqrtPriceX96, slot0.tick, liq._0)
@@ -521,7 +540,10 @@ fn encode_ticks_call(_dex: DexType, tick: i32) -> Vec<u8> {
 
 /// ticks() dönüş verisini decode et
 ///
-/// Dönen ABI formatı (256 byte — 8 alan × 32 byte):
+/// UniswapV3: 256 byte (8 alan × 32 byte)
+/// Aerodrome: 320 byte (10 alan × 32 byte — ekstra stakedLiquidityNet + rewardGrowthOutside)
+///
+/// İlk 8 alan her iki DEX'te aynı düzendedir:
 ///   [0..32]   uint128 liquidityGross
 ///   [32..64]  int128  liquidityNet
 ///   [64..96]  uint256 feeGrowthOutside0X128
@@ -530,6 +552,8 @@ fn encode_ticks_call(_dex: DexType, tick: i32) -> Vec<u8> {
 ///   [160..192] uint160 secondsPerLiquidityOutsideX128
 ///   [192..224] uint32 secondsOutside
 ///   [224..256] bool   initialized
+///   [256..288] int128 stakedLiquidityNet    (yalnızca Aerodrome)
+///   [288..320] uint256 rewardGrowthOutside  (yalnızca Aerodrome)
 fn decode_ticks_result(data: &[u8]) -> Option<(u128, i128, bool)> {
     if data.len() < 256 {
         return None;

@@ -1,5 +1,10 @@
 // ============================================================================
-//  STATE_SYNC v9.0 — Multicall3 + Optimistic Pending TX Dinleyici
+//  STATE_SYNC v9.1 — Multicall3 + Optimistic Pending TX Dinleyici
+//
+//  v9.1 Yenilikler (Issue #101 — Buffer Overrun Düzeltmesi):
+//  ✓ Aerodrome Slipstream slot0 ABI güncellendi (6→7 parametre)
+//  ✓ feeProtocol (uint8) alanı eklendi — Uniswap V3 standardına uyum
+//  ✓ WSS state sync buffer overrun çökmesi giderildi
 //
 //  v9.0 Yenilikler:
 //  ✓ Pending TX stream (eth_subscribe newPendingTransactions)
@@ -94,7 +99,12 @@ sol! {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Aerodrome Slipstream Havuz Arayüzü (slot0 → 6 değişken, feeProtocol YOK)
+// Aerodrome Slipstream Havuz Arayüzü (slot0 → 7 değişken, feeProtocol DAHİL)
+//
+// ÖNEMLİ: Canlı Base ağındaki güncel Aerodrome Slipstream kontratları
+// feeProtocol alanını ekledi. Eski 6 parametreli tanım ABI uyuşmazlığına
+// (buffer overrun) ve RPC decode hatasına yol açıyordu.
+// Güncel yapı artık Uniswap V3 standardıyla birebir aynı (7 parametre).
 // ─────────────────────────────────────────────────────────────────────────────
 
 sol! {
@@ -106,6 +116,7 @@ sol! {
             uint16 observationIndex,
             uint16 observationCardinality,
             uint16 observationCardinalityNext,
+            uint8 feeProtocol,
             bool unlocked
         );
 
@@ -167,7 +178,7 @@ pub async fn sync_pool_state<T: Transport + Clone, P: Provider<T, Ethereum> + Sy
                 liq_call.call(),
             );
             let slot0 = slot0_result
-                .map_err(|e| eyre::eyre!("[{}] slot0 okuma hatası (Aero/6-alan): {}", pool_config.name, e))?;
+                .map_err(|e| eyre::eyre!("[{}] slot0 okuma hatası (Aero/7-alan): {}", pool_config.name, e))?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[{}] liquidity okuma hatası: {}", pool_config.name, e))?;
             (slot0.sqrtPriceX96, slot0.tick, liq._0)
@@ -634,7 +645,7 @@ pub async fn optimistic_refresh_pool<T: Transport + Clone, P: Provider<T, Ethere
                 liq_call.call(),
             );
             let slot0 = slot0_result
-                .map_err(|e| eyre::eyre!("[OPT:{}] slot0 okuma hatası: {}", pool_config.name, e))?;
+                .map_err(|e| eyre::eyre!("[OPT:{}] slot0 okuma hatası (Aero/7-alan): {}", pool_config.name, e))?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[OPT:{}] liquidity okuma hatası: {}", pool_config.name, e))?;
             (slot0.sqrtPriceX96, slot0.tick, liq._0)

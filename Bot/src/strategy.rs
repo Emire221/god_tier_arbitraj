@@ -98,7 +98,7 @@ pub fn check_arbitrage_opportunity(
 
     let buy_state = if buy_idx == 0 { &state_a } else { &state_b };
     let sell_state = if sell_idx == 0 { &state_a } else { &state_b };
-    let _eth_price_ref = (price_a + price_b) / 2.0;
+    let avg_price_in_quote = (price_a + price_b) / 2.0;
 
     // ─── TickBitmap referansları (varsa) ───────────────────────────
     let sell_bitmap = sell_state.tick_bitmap.as_ref();
@@ -120,6 +120,9 @@ pub fn check_arbitrage_opportunity(
         config.gas_cost_fallback_weth
     };
 
+    // Gas cost'u quote cinsine çevir (NR için)
+    let dynamic_gas_cost_quote = dynamic_gas_cost_weth * avg_price_in_quote;
+
     // ─── Newton-Raphson Optimal Miktar Hesaplama ──────────────────
     // v6.0: TickBitmap varsa multi-tick hassasiyetinde, yoksa dampening
     let nr_result = math::find_optimal_amount_with_bitmap(
@@ -127,9 +130,9 @@ pub fn check_arbitrage_opportunity(
         pools[sell_idx].fee_fraction,
         buy_state,
         pools[buy_idx].fee_fraction,
-        dynamic_gas_cost_weth,
+        dynamic_gas_cost_quote,
         config.flash_loan_fee_bps,
-        1.0, // eth_price=1.0 → kâr doğrudan WETH cinsinden döner
+        avg_price_in_quote, // gerçek fiyat → kâr quote cinsinden döner
         config.max_trade_size_weth,
         pools[sell_idx].token0_is_weth,
         pools[sell_idx].tick_spacing,
@@ -138,8 +141,15 @@ pub fn check_arbitrage_opportunity(
         buy_bitmap,
     );
 
+    // NR kârı quote (cbBTC) cinsinden döndü → WETH’e çevir
+    let expected_profit_weth = if avg_price_in_quote > 0.0 {
+        nr_result.expected_profit / avg_price_in_quote
+    } else {
+        return None;
+    };
+
     // Kârlı değilse fırsatı atla
-    if nr_result.expected_profit < config.min_net_profit_weth || nr_result.optimal_amount <= 0.0 {
+    if expected_profit_weth < config.min_net_profit_weth || nr_result.optimal_amount <= 0.0 {
         return None;
     }
 
@@ -147,7 +157,7 @@ pub fn check_arbitrage_opportunity(
         buy_pool_idx: buy_idx,
         sell_pool_idx: sell_idx,
         optimal_amount_weth: nr_result.optimal_amount,
-        expected_profit_quote: nr_result.expected_profit,
+        expected_profit_weth,
         buy_price_quote: buy_state.eth_price_usd,
         sell_price_quote: sell_state.eth_price_usd,
         spread_pct,
@@ -186,7 +196,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
     if opportunity.sell_price_quote <= 0.0
         || opportunity.buy_price_quote <= 0.0
         || opportunity.optimal_amount_weth <= 0.0
-        || !opportunity.expected_profit_quote.is_finite()
+        || !opportunity.expected_profit_weth.is_finite()
     {
         return None;
     }
@@ -210,7 +220,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
     let revm_result = if let Some(contract_addr) = config.contract_address {
         // v11.0 Calldata: Yön ve token hesaplama
         //   buy_pool_idx=0 (UniV3 ucuz): uni=1(oneForZero→WETH al), aero=0(zeroForOne→WETH sat)
-        //   buy_pool_idx=1 (Slip ucuz):  uni=0(zeroForOne→USDC al), aero=1(oneForZero→USDC sat)
+        //   buy_pool_idx=1 (Slip ucuz):  uni=0(zeroForOne→Quote al), aero=1(oneForZero→Quote sat)
         let (uni_dir, aero_dir, owed_token, received_token) =
             compute_directions_and_tokens(
                 opportunity.buy_pool_idx,
@@ -286,9 +296,9 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
 
     // ─── KÂRLI FIRSAT RAPORU ─────────────────────────────────
     stats.profitable_opportunities += 1;
-    stats.total_potential_profit += opportunity.expected_profit_quote;
-    if opportunity.expected_profit_quote > stats.max_profit_weth {
-        stats.max_profit_weth = opportunity.expected_profit_quote;
+    stats.total_potential_profit += opportunity.expected_profit_weth;
+    if opportunity.expected_profit_weth > stats.max_profit_weth {
+        stats.max_profit_weth = opportunity.expected_profit_weth;
     }
 
     print_opportunity_report(opportunity, &sim_result, pools, config);
@@ -334,9 +344,9 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         // ═══ v12.0: DİNAMİK MEV BRIBE MÜZAYEDESİ ═══
         //
         // Tamamen WETH cinsinden bribe hesabı.
-        // Kâr zaten WETH cinsinden (NR'dan 1.0 fiyatla geldi).
+        // Kâr NR'den quote olarak geldi, WETH'e çevrildi.
         let expected_profit_wei = crate::types::safe_f64_to_u128(
-            opportunity.expected_profit_quote * 1e18
+            opportunity.expected_profit_weth * 1e18
         );
 
         let bribe_wei = {
@@ -347,7 +357,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
 
             // Kâr/Gas oranı (profit margin ratio) — tamamen WETH cinsinden
             let profit_margin_ratio = if gas_cost_weth > 0.00001 {
-                opportunity.expected_profit_quote / gas_cost_weth
+                opportunity.expected_profit_weth / gas_cost_weth
             } else {
                 10.0 // Gas ücretsiz → marj çok yüksek
             };
@@ -378,7 +388,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
                 "     {} Bribe: {:.0}% (marj: {:.1}x, profit: {:.6} WETH, gas: {:.6} WETH)",
                 "💰", dynamic_bribe_pct * 100.0,
                 profit_margin_ratio,
-                opportunity.expected_profit_quote,
+                opportunity.expected_profit_weth,
                 gas_cost_weth,
             );
 
@@ -534,7 +544,7 @@ fn write_shadow_log(
         opportunity.sell_price_quote,
         opportunity.spread_pct,
         opportunity.optimal_amount_weth,
-        opportunity.expected_profit_quote,
+        opportunity.expected_profit_weth,
         opportunity.nr_converged,
         opportunity.nr_iterations,
         sim_result.success,
@@ -595,7 +605,7 @@ async fn execute_on_chain(
     simulated_gas: u64,
     nonce: u64,
     nonce_manager: Arc<NonceManager>,
-    eth_price_usd: f64,
+    eth_price_in_quote: f64,
     token0_is_weth: bool,
     block_base_fee: u64,
     quote_token_decimals: u8,
@@ -611,7 +621,7 @@ async fn execute_on_chain(
         owed_token, received_token,
         trade_size_weth, uni_direction, aero_direction,
         min_profit, deadline_block, bribe_wei, simulated_gas, nonce,
-        eth_price_usd, token0_is_weth, block_base_fee,
+        eth_price_in_quote, token0_is_weth, block_base_fee,
         quote_token_decimals,
     ).await;
 
@@ -647,7 +657,7 @@ async fn execute_inner(
     bribe_wei: u128,
     simulated_gas: u64,
     nonce: u64,
-    eth_price_usd: f64,
+    eth_price_in_quote: f64,
     token0_is_weth: bool,
     block_base_fee: u64,
     quote_token_decimals: u8,
@@ -673,7 +683,7 @@ async fn execute_inner(
     let amount_in_wei = crate::types::weth_amount_to_input_wei(
         trade_size_weth,
         weth_input,
-        eth_price_usd,
+        eth_price_in_quote,
         quote_token_decimals,
     );
 
@@ -832,7 +842,7 @@ fn compute_directions_and_tokens(
 ///   - Orta likidite (>1e16): %99.5 (50 bps tolerans)
 ///   - Sığ likidite:          %95   (500 bps tolerans, güvenli)
 ///
-/// ÖNEMLİ: Float ve USD çevirisi YOKTUR. Tamamen U256 tam sayı matematik.
+/// ÖNEMLİ: Float ve quote çevirisi YOKTUR. Tamamen U256 tam sayı matematik.
 fn compute_min_profit_exact(exact_profit_wei: U256, slippage_factor_bps: u64) -> u128 {
     // slippage_factor_bps: 9990 = %99.9, 9950 = %99.5, 9500 = %95
     let min_profit_u256 = (exact_profit_wei * U256::from(slippage_factor_bps)) / U256::from(10_000u64);
@@ -848,7 +858,7 @@ fn compute_min_profit_exact(exact_profit_wei: U256, slippage_factor_bps: u64) ->
 /// Havuz likidite derinliğine göre slippage faktörü hesapla (bps cinsinden)
 ///
 /// Mantık:
-///   - Derin havuzlar (WETH/USDC, likidite > 1e18) → %99.9 (9990 bps)
+///   - Derin havuzlar (WETH/Quote, likidite > 1e18) → %99.9 (9990 bps)
 ///     MEV sandwich fırsatı minimuma iner
 ///   - Orta derinlik (likidite > 1e16) → %99.5 (9950 bps)
 ///     Makul güvenlik marjı
@@ -922,7 +932,7 @@ fn print_opportunity_report(
         "  {}  {} NET KÂR       : {:.6} WETH",
         "║".red(),
         "💰",
-        format!("{:.6}", opp.expected_profit_quote).green().bold(),
+        format!("{:.6}", opp.expected_profit_weth).green().bold(),
     );
     println!(
         "  {}  REVM Simülasyon  : {} (Gas: {})",
@@ -1148,10 +1158,10 @@ mod gas_spike_tests {
         // edilir — önemli olan spike'ın None döndürmesi.
         eprintln!(
             "Gas spike test sonuçları: normal={:?}, spike={:?}, high_gas={:?}, low_gas={:?}",
-            result_normal.as_ref().map(|r| r.expected_profit_quote),
-            result_spike.as_ref().map(|r| r.expected_profit_quote),
-            result_high_gas.as_ref().map(|r| r.expected_profit_quote),
-            result_low_gas.as_ref().map(|r| r.expected_profit_quote),
+            result_normal.as_ref().map(|r| r.expected_profit_weth),
+            result_spike.as_ref().map(|r| r.expected_profit_weth),
+            result_high_gas.as_ref().map(|r| r.expected_profit_weth),
+            result_low_gas.as_ref().map(|r| r.expected_profit_weth),
         );
     }
 
@@ -1190,10 +1200,10 @@ mod gas_spike_tests {
         );
         let opp = result.unwrap();
         assert!(
-            opp.expected_profit_quote > 0.0002,
+            opp.expected_profit_weth > 0.0002,
             "Kâr minimum eşikten ({}) yüksek olmalı: {:.6}",
             0.0002,
-            opp.expected_profit_quote
+            opp.expected_profit_weth
         );
     }
 

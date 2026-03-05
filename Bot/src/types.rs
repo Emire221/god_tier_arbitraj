@@ -73,17 +73,22 @@ pub fn is_token_whitelisted(token: &Address) -> bool {
 /// WETH decimals sabiti
 pub const WETH_DECIMALS_U8: u8 = 18;
 #[allow(dead_code)]
-/// USDC/USDT vb. stablecoin decimals sabiti
+/// Fallback decimals sabiti (bilinmeyen tokenlar için)
 pub const STABLECOIN_DECIMALS_U8: u8 = 6;
+
+/// cbBTC adresi (Base ağı)
+const CBBTC_ADDRESS: Address = address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf");
 
 #[allow(dead_code)]
 /// Token adresine göre decimal sayısını döndür.
-/// WETH → 18, diğer tüm tokenlar (USDC, USDT, DAI vb.) → 6
+/// WETH → 18, cbBTC → 8, diğer tokenlar (fallback) → 6
 pub fn get_token_decimals(token: &Address, weth_address: &Address) -> u8 {
     if token == weth_address {
         WETH_DECIMALS_U8 // 18
+    } else if *token == CBBTC_ADDRESS {
+        8 // cbBTC
     } else {
-        STABLECOIN_DECIMALS_U8 // 6 (USDC, USDT, USDbC)
+        STABLECOIN_DECIMALS_U8 // 6 (USDC, USDT, USDbC — fallback)
     }
 }
 
@@ -384,7 +389,7 @@ pub struct PoolState {
     pub liquidity: u128,
     /// Likidite float versiyonu (hızlı hesap için)
     pub liquidity_f64: f64,
-    /// ETH fiyatı (USDC cinsinden) — ör: 2500.45
+    /// WETH fiyatı quote token cinsinden — ör: 25.5 (cbBTC) veya 2500.0 (USDC)
     pub eth_price_usd: f64,
     /// Son güncellenen blok numarası
     pub last_block: u64,
@@ -504,7 +509,7 @@ pub struct ArbitrageOpportunity {
     /// Newton-Raphson ile hesaplanan optimal WETH miktarı
     pub optimal_amount_weth: f64,
     /// Beklenen net kâr (WETH cinsinden)
-    pub expected_profit_quote: f64,
+    pub expected_profit_weth: f64,
     /// Alış fiyatı (ucuz havuz ETH/Quote)
     pub buy_price_quote: f64,
     /// Satış fiyatı (pahalı havuz ETH/Quote)

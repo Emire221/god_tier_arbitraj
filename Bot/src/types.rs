@@ -54,6 +54,8 @@ pub fn token_whitelist() -> HashSet<Address> {
         address!("50c5725949A6F0c72E6C4a641F24049A917DB0Cb"),
         // cbETH — Coinbase Wrapped Staked ETH
         address!("2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22"),
+        // cbBTC — Coinbase Wrapped BTC (8 decimals)
+        address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
     ])
 }
 
@@ -135,22 +137,24 @@ pub fn get_owed_token_decimals(owed_token: &Address, weth_address: &Address) -> 
 /// WETH miktarını hedef token miktarına çevir (human-readable → wei).
 ///
 /// - Hedef WETH ise: amount_weth * 10^18
-/// - Hedef USDC ise: amount_weth * eth_price_usd * 10^6
+/// - Hedef quote token ise: amount_weth * eth_price_quote * 10^quote_decimals
 ///
 /// Bu fonksiyon calldata'ya yazılacak amount değerini üretir.
 pub fn weth_amount_to_input_wei(
     optimal_amount_weth: f64,
     is_weth_input: bool,
-    eth_price_usd: f64,
+    eth_price_quote: f64,
+    quote_token_decimals: u8,
 ) -> U256 {
     if is_weth_input {
         // Input WETH → 18 decimals
         U256::from(safe_f64_to_u128(optimal_amount_weth * 1e18))
     } else {
-        // Input USDC → 6 decimals
-        // WETH cinsinden miktar × ETH fiyatı × 10^6
-        let usdc_amount = optimal_amount_weth * eth_price_usd * 1e6;
-        U256::from(safe_f64_to_u128(usdc_amount))
+        // Input quote token → quote_token_decimals
+        // WETH cinsinden miktar × ETH/Quote fiyatı × 10^decimals
+        let scale = 10f64.powi(quote_token_decimals as i32);
+        let quote_amount = optimal_amount_weth * eth_price_quote * scale;
+        U256::from(safe_f64_to_u128(quote_amount))
     }
 }
 
@@ -173,7 +177,7 @@ pub fn safe_f64_to_u128(val: f64) -> u128 {
 /// Yapılandırılan token adreslerinin whitelist kontrolü
 /// Startup sırasında çağrılır — whitelistte olmayan token varsa hata döner
 #[allow(dead_code)]
-pub fn validate_token_whitelist(weth: &Address, usdc: &Address) -> Result<()> {
+pub fn validate_token_whitelist(weth: &Address, quote_token: &Address) -> Result<()> {
     let wl = token_whitelist();
     if !wl.contains(weth) {
         return Err(eyre::eyre!(
@@ -181,10 +185,10 @@ pub fn validate_token_whitelist(weth: &Address, usdc: &Address) -> Result<()> {
             weth
         ));
     }
-    if !wl.contains(usdc) {
+    if !wl.contains(quote_token) {
         return Err(eyre::eyre!(
-            "USDC adresi ({}) token whitelist'te YOK! Egzotik token riski.",
-            usdc
+            "Quote token adresi ({}) token whitelist'te YOK! Egzotik token riski.",
+            quote_token
         ));
     }
     Ok(())
@@ -499,12 +503,12 @@ pub struct ArbitrageOpportunity {
     pub sell_pool_idx: usize,
     /// Newton-Raphson ile hesaplanan optimal WETH miktarı
     pub optimal_amount_weth: f64,
-    /// Beklenen net kâr (USD)
-    pub expected_profit_usd: f64,
-    /// Alış fiyatı (ucuz havuz ETH/USDC)
-    pub buy_price: f64,
-    /// Satış fiyatı (pahalı havuz ETH/USDC)  
-    pub sell_price: f64,
+    /// Beklenen net kâr (WETH cinsinden)
+    pub expected_profit_quote: f64,
+    /// Alış fiyatı (ucuz havuz ETH/Quote)
+    pub buy_price_quote: f64,
+    /// Satış fiyatı (pahalı havuz ETH/Quote)
+    pub sell_price_quote: f64,
     /// Spread yüzdesi
     pub spread_pct: f64,
     /// Newton-Raphson yakınsadı mı?
@@ -548,14 +552,16 @@ pub struct BotConfig {
     pub contract_address: Option<Address>,
     /// WETH token adresi (Base: 0x4200000000000000000000000000000000000006)
     pub weth_address: Address,
-    /// USDC token adresi (Base: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913)
-    pub usdc_address: Address,
-    /// Tahmini gas maliyeti (USD)
-    pub gas_cost_usd: f64,
+    /// Quote token adresi (Örn: cbBTC 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf)
+    pub quote_token_address: Address,
+    /// Quote token decimal sayısı (Örn: cbBTC=8, USDC=6)
+    pub quote_token_decimals: u8,
+    /// Tahmini gas maliyeti fallback (WETH cinsinden)
+    pub gas_cost_fallback_weth: f64,
     /// Flash loan ücreti (basis points)
     pub flash_loan_fee_bps: f64,
-    /// Minimum net kâr eşiği (USD)
-    pub min_net_profit_usd: f64,
+    /// Minimum net kâr eşiği (WETH cinsinden)
+    pub min_net_profit_weth: f64,
     /// İstatistik gösterme aralığı (blok sayısı)
     pub stats_interval: u64,
     /// Maks yeniden bağlanma denemesi (0 = sınırsız)
@@ -635,14 +641,19 @@ impl BotConfig {
             .parse::<Address>()
             .unwrap_or_else(|_| "0x4200000000000000000000000000000000000006".parse::<Address>().unwrap());
 
-        let usdc_address = std::env::var("USDC_ADDRESS")
-            .unwrap_or_else(|_| "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".into())
+        let quote_token_address = std::env::var("QUOTE_TOKEN_ADDRESS")
+            .unwrap_or_else(|_| "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf".into())
             .parse::<Address>()
-            .unwrap_or_else(|_| "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".parse::<Address>().unwrap());
+            .unwrap_or_else(|_| "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf".parse::<Address>().unwrap());
 
-        let gas_cost_usd = Self::parse_env_f64("GAS_COST_USD", 0.10);
+        let quote_token_decimals = std::env::var("QUOTE_TOKEN_DECIMALS")
+            .unwrap_or_else(|_| "8".into())
+            .parse::<u8>()
+            .unwrap_or(8);
+
+        let gas_cost_fallback_weth = Self::parse_env_f64("GAS_COST_FALLBACK_WETH", 0.00005);
         let flash_loan_fee_bps = Self::parse_env_f64("FLASH_LOAN_FEE_BPS", 5.0);
-        let min_net_profit_usd = Self::parse_env_f64("MIN_NET_PROFIT_USD", 0.50);
+        let min_net_profit_weth = Self::parse_env_f64("MIN_NET_PROFIT_WETH", 0.0001);
         let max_trade_size_weth = Self::parse_env_f64("MAX_TRADE_SIZE_WETH", 50.0);
 
         let stats_interval = std::env::var("STATS_INTERVAL")
@@ -737,10 +748,11 @@ impl BotConfig {
             private_key,
             contract_address,
             weth_address,
-            usdc_address,
-            gas_cost_usd,
+            quote_token_address,
+            quote_token_decimals,
+            gas_cost_fallback_weth,
             flash_loan_fee_bps,
-            min_net_profit_usd,
+            min_net_profit_weth,
             stats_interval,
             max_retries,
             initial_retry_delay_secs: 2,
@@ -843,12 +855,15 @@ pub fn load_pool_configs_from_env() -> Result<Vec<PoolConfig>> {
         .parse::<bool>()
         .unwrap_or(true);
 
-    // Decimal bilgileri: WETH=18, USDC=6 (token sırasına göre atanır)
-    let (token0_decimals, token1_decimals) = if weth_is_token0 {
-        (18u8, 6u8) // token0=WETH(18), token1=USDC(6)
-    } else {
-        (6u8, 18u8) // token0=USDC(6), token1=WETH(18)
-    };
+    // Decimal bilgileri: .env'den oku (varsayılan: WETH=18, cbBTC=8)
+    let token0_decimals = std::env::var("TOKEN0_DECIMALS")
+        .unwrap_or_else(|_| "18".into())
+        .parse::<u8>()
+        .unwrap_or(18);
+    let token1_decimals = std::env::var("TOKEN1_DECIMALS")
+        .unwrap_or_else(|_| "8".into())
+        .parse::<u8>()
+        .unwrap_or(8);
 
     // Tick spacing (.env'den oku, yoksa fee'ye göre varsayılan)
     let pool_a_tick_spacing = std::env::var("POOL_A_TICK_SPACING")
@@ -898,7 +913,7 @@ pub struct ArbitrageStats {
     pub executed_trades: u64,
     pub failed_simulations: u64,
     pub max_spread_pct: f64,
-    pub max_profit_usd: f64,
+    pub max_profit_weth: f64,
     pub total_potential_profit: f64,
     pub session_start: Instant,
     /// Transport türü (aktif bağlantı)
@@ -923,7 +938,7 @@ impl ArbitrageStats {
             executed_trades: 0,
             failed_simulations: 0,
             max_spread_pct: 0.0,
-            max_profit_usd: 0.0,
+            max_profit_weth: 0.0,
             total_potential_profit: 0.0,
             session_start: Instant::now(),
             active_transport: String::from("Bilinmiyor"),

@@ -109,7 +109,7 @@ fn print_banner(config: &BotConfig) {
     println!("  {} Key Yönetimi   : {}", "▸".cyan(), if config.key_manager_active { "Şifreli Keystore (AES-256-GCM)".green().to_string() } else if config.private_key.is_some() { "Env Var (GÜVENSİZ)".yellow().to_string() } else { "Yok".red().to_string() });
     println!("  {} Flash Loan     : {}", "▸".cyan(), format!("Aave V3 (%{:.2} Komisyon)", config.flash_loan_fee_bps / 100.0).white());
     println!("  {} Maks İşlem     : {}", "▸".cyan(), format!("{:.1} WETH", config.max_trade_size_weth).white());
-    println!("  {} Min. Net Kâr   : {}", "▸".cyan(), format!("{:.2}$", config.min_net_profit_usd).white());
+    println!("  {} Min. Net Kâr   : {}", "▸".cyan(), format!("{:.6} WETH", config.min_net_profit_weth).white());
     println!(
         "  {} Başlangıç      : {}",
         "▸".cyan(),
@@ -167,7 +167,7 @@ fn print_block_update(
                 &config.name
             };
             pool_info.push_str(&format!(
-                "{}={:.2}$",
+                "{}={:.6}Q",
                 short_name,
                 state.eth_price_usd,
             ));
@@ -213,12 +213,12 @@ fn print_spread_info(pools: &[PoolConfig], states: &[SharedPoolState]) {
 
         if spread_pct > 0.05 {
             println!(
-                "     {} Spread: {:.4}% ({:.4}$) | {} AL→SAT",
+                "     {} Spread: {:.4}% ({:.6}Q) | {} AL→SAT",
                 "📊".yellow(), spread_pct, spread, direction,
             );
         } else {
             println!(
-                "     {} Spread: {:.4}% ({:.4}$) | {}",
+                "     {} Spread: {:.4}% ({:.6}Q) | {}",
                 "📊", spread_pct, spread, direction,
             );
         }
@@ -251,8 +251,8 @@ fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState]) {
         }
     );
     println!("  {}  Maks. Spread          : {:.4}%", "│".yellow(), stats.max_spread_pct);
-    println!("  {}  Maks. Kâr (tek)       : {:.4}$", "│".yellow(), stats.max_profit_usd);
-    println!("  {}  Toplam Pot. Kâr       : {:.4}$", "│".yellow(), stats.total_potential_profit);
+    println!("  {}  Maks. Kâr (tek)       : {:.6} WETH", "│".yellow(), stats.max_profit_weth);
+    println!("  {}  Toplam Pot. Kâr       : {:.6} WETH", "│".yellow(), stats.total_potential_profit);
 
     // v6.0: Gecikme istatistikleri
     println!("  {} ─── Gecikme (State Sync) ──────────────", "│".yellow());
@@ -269,7 +269,7 @@ fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState]) {
                 " | Bitmap: YOK".to_string()
             };
             println!(
-                "  {}  Havuz {} Fiyat       : {:.2}$ (tick: {}){}",
+                "  {}  Havuz {} Fiyat       : {:.6} Q (tick: {}){}",
                 "│".yellow(), i + 1, state.eth_price_usd, state.tick, bitmap_info,
             );
         }
@@ -303,9 +303,9 @@ async fn main() -> Result<()> {
     // ═══ v10.1: TOKEN WHITELIST DOĞRULAMA ═══
     // Startup sırasında yapılandırılan token adreslerini beyaz listeye karşı doğrula
     // v13.0: Aktif edildi — sahte token adresi ile başlatmayı engeller
-    crate::types::validate_token_whitelist(&config.weth_address, &config.usdc_address)?;
+    crate::types::validate_token_whitelist(&config.weth_address, &config.quote_token_address)?;
     println!(
-        "  {} Token Whitelist: WETH ve USDC adresleri doğrulandı",
+        "  {} Token Whitelist: WETH ve Quote token adresleri doğrulandı",
         "✅".green()
     );
 
@@ -479,7 +479,7 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
             Ok(_) => {
                 let state = states[i].read();
                 println!(
-                    "  {}   {} → {:.2}$ | Tick: {} | Likidite: {:.2e}",
+                    "  {}   {} → {:.6} Q | Tick: {} | Likidite: {:.2e}",
                     "✅".green(),
                     pools[i].name,
                     state.eth_price_usd,
@@ -888,7 +888,7 @@ async fn pending_tx_listener(
                     // Fiyat değişti — havuz güncellendi
                     let state = states[pool_idx].read();
                     println!(
-                        "     {} [Pending TX] {} iyimser güncelleme: {:.2}$",
+                        "     {} [Pending TX] {} iyimser güncelleme: {:.6} Q",
                         "🔮".magenta(),
                         pools[pool_idx].name,
                         state.eth_price_usd,

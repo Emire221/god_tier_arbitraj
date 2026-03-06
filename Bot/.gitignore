@@ -1,6 +1,3 @@
-# Ortam değişkenleri (hassas bilgiler!)
-.env
-
 # Rust build çıktıları
 /target
 

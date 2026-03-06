@@ -206,6 +206,8 @@ pub fn validate_token_whitelist(weth: &Address, quote_token: &Address) -> Result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DexType {
     UniswapV3,
+    /// PancakeSwap V3 — slot0 feeProtocol alanı uint32 (Uniswap V3'te uint8)
+    PancakeSwapV3,
     Aerodrome,
 }
 
@@ -213,6 +215,7 @@ impl std::fmt::Display for DexType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DexType::UniswapV3 => write!(f, "Uniswap V3"),
+            DexType::PancakeSwapV3 => write!(f, "PancakeSwap V3"),
             DexType::Aerodrome => write!(f, "Aerodrome"),
         }
     }
@@ -827,6 +830,7 @@ pub fn load_pool_configs_from_env() -> Result<Vec<PoolConfig>> {
         .as_str()
     {
         "aerodrome" => DexType::Aerodrome,
+        "pancakeswap" | "pancake" => DexType::PancakeSwapV3,
         _ => DexType::UniswapV3,
     };
 
@@ -849,6 +853,7 @@ pub fn load_pool_configs_from_env() -> Result<Vec<PoolConfig>> {
         .as_str()
     {
         "uniswap" => DexType::UniswapV3,
+        "pancakeswap" | "pancake" => DexType::PancakeSwapV3,
         _ => DexType::Aerodrome,
     };
 

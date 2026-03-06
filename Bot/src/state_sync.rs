@@ -67,7 +67,7 @@ sol! {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Uniswap V3 Havuz Arayüzü (slot0 → 7 değişken, feeProtocol DAHİL)
+// Uniswap V3 Havuz Arayüzü (slot0 → 7 değişken, feeProtocol uint8)
 // ─────────────────────────────────────────────────────────────────────────────
 
 sol! {
@@ -80,6 +80,49 @@ sol! {
             uint16 observationCardinality,
             uint16 observationCardinalityNext,
             uint8 feeProtocol,
+            bool unlocked
+        );
+
+        function liquidity() external view returns (uint128);
+
+        function ticks(int24 tick) external view returns (
+            uint128 liquidityGross,
+            int128 liquidityNet,
+            uint256 feeGrowthOutside0X128,
+            uint256 feeGrowthOutside1X128,
+            int56 tickCumulativeOutside,
+            uint160 secondsPerLiquidityOutsideX128,
+            uint32 secondsOutside,
+            bool initialized
+        );
+
+        function tickBitmap(int16 wordPosition) external view returns (uint256);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PancakeSwap V3 Havuz Arayüzü (slot0 → 7 değişken, feeProtocol uint32)
+//
+// ÖNEMLİ: PancakeSwap V3 slot0 struct'ı Uniswap V3'ten FARKLIDIR:
+//   - Uniswap V3 slot0:     7 parametre, feeProtocol = uint8
+//   - PancakeSwap V3 slot0: 7 parametre, feeProtocol = uint32
+//
+// PancakeSwap feeProtocol değeri ~209718400 olabilir ki bu uint8'e sığmaz.
+// Alloy'un katı ABI çözümleyicisi bunu "buffer overrun" olarak raporlar.
+//
+// Kaynak: github.com/pancakeswap/pancake-v3-contracts/.../PancakeV3Pool.sol
+// ─────────────────────────────────────────────────────────────────────────────
+
+sol! {
+    #[sol(rpc)]
+    interface IPancakeSwapV3Pool {
+        function slot0() external view returns (
+            uint160 sqrtPriceX96,
+            int24 tick,
+            uint16 observationIndex,
+            uint16 observationCardinality,
+            uint16 observationCardinalityNext,
+            uint32 feeProtocol,
             bool unlocked
         );
 
@@ -170,7 +213,6 @@ pub async fn sync_pool_state<T: Transport + Clone, P: Provider<T, Ethereum> + Sy
     let (sqrt_price_x96, tick, liquidity) = match pool_config.dex {
         DexType::UniswapV3 => {
             let pool = IUniswapV3Pool::new(pool_config.address, provider);
-            // v10.0: Paralel okuma — slot0 ve liquidity aynı anda (1 RTT)
             let slot0_call = pool.slot0();
             let liq_call = pool.liquidity();
             let (slot0_result, liq_result) = tokio::join!(
@@ -178,14 +220,31 @@ pub async fn sync_pool_state<T: Transport + Clone, P: Provider<T, Ethereum> + Sy
                 liq_call.call(),
             );
             let slot0 = slot0_result
-                .map_err(|e| eyre::eyre!("[{}] slot0 okuma hatası (V3/7-alan): {}", pool_config.name, e))?;
+                .map_err(|e| eyre::eyre!("[{}] slot0 okuma hatası (V3/7-alan/uint8): {}", pool_config.name, e))?;
+            let liq = liq_result
+                .map_err(|e| eyre::eyre!("[{}] liquidity okuma hatası: {}", pool_config.name, e))?;
+            (slot0.sqrtPriceX96, slot0.tick, liq._0)
+        }
+        DexType::PancakeSwapV3 => {
+            let pool = IPancakeSwapV3Pool::new(pool_config.address, provider);
+            let slot0_call = pool.slot0();
+            let liq_call = pool.liquidity();
+            let (slot0_result, liq_result) = tokio::join!(
+                slot0_call.call(),
+                liq_call.call(),
+            );
+            let slot0 = slot0_result
+                .map_err(|e| eyre::eyre!(
+                    "[{}] slot0 okuma hatası (PCS-V3/7-alan/uint32): {}\n\
+                    → Havuz adresi doğru bir PancakeSwap V3 Pool mu? Kontrol edin: {}",
+                    pool_config.name, e, pool_config.address
+                ))?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[{}] liquidity okuma hatası: {}", pool_config.name, e))?;
             (slot0.sqrtPriceX96, slot0.tick, liq._0)
         }
         DexType::Aerodrome => {
             let pool = IAerodromePool::new(pool_config.address, provider);
-            // v10.0: Paralel okuma — slot0 ve liquidity aynı anda (1 RTT)
             let slot0_call = pool.slot0();
             let liq_call = pool.liquidity();
             let (slot0_result, liq_result) = tokio::join!(
@@ -655,7 +714,21 @@ pub async fn optimistic_refresh_pool<T: Transport + Clone, P: Provider<T, Ethere
                 liq_call.call(),
             );
             let slot0 = slot0_result
-                .map_err(|e| eyre::eyre!("[OPT:{}] slot0 okuma hatası: {}", pool_config.name, e))?;
+                .map_err(|e| eyre::eyre!("[OPT:{}] slot0 okuma hatası (V3/uint8): {}", pool_config.name, e))?;
+            let liq = liq_result
+                .map_err(|e| eyre::eyre!("[OPT:{}] liquidity okuma hatası: {}", pool_config.name, e))?;
+            (slot0.sqrtPriceX96, slot0.tick, liq._0)
+        }
+        DexType::PancakeSwapV3 => {
+            let pool = IPancakeSwapV3Pool::new(pool_config.address, provider);
+            let slot0_call = pool.slot0();
+            let liq_call = pool.liquidity();
+            let (slot0_result, liq_result) = tokio::join!(
+                slot0_call.call(),
+                liq_call.call(),
+            );
+            let slot0 = slot0_result
+                .map_err(|e| eyre::eyre!("[OPT:{}] slot0 okuma hatası (PCS-V3/uint32): {}", pool_config.name, e))?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[OPT:{}] liquidity okuma hatası: {}", pool_config.name, e))?;
             (slot0.sqrtPriceX96, slot0.tick, liq._0)
@@ -669,7 +742,7 @@ pub async fn optimistic_refresh_pool<T: Transport + Clone, P: Provider<T, Ethere
                 liq_call.call(),
             );
             let slot0 = slot0_result
-                .map_err(|e| eyre::eyre!("[OPT:{}] slot0 okuma hatası (Aero/7-alan): {}", pool_config.name, e))?;
+                .map_err(|e| eyre::eyre!("[OPT:{}] slot0 okuma hatası (Aero/6-alan): {}", pool_config.name, e))?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[OPT:{}] liquidity okuma hatası: {}", pool_config.name, e))?;
             (slot0.sqrtPriceX96, slot0.tick, liq._0)

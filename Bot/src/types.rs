@@ -550,6 +550,7 @@ pub struct BotConfig {
     #[allow(dead_code)]
     pub rpc_http_url: String,
     /// IPC bağlantı yolu (Unix socket / Windows named pipe)
+    #[allow(dead_code)]
     pub rpc_ipc_path: Option<String>,
     /// Transport modu (IPC > WSS > HTTP)
     pub transport_mode: TransportMode,
@@ -615,6 +616,12 @@ pub struct BotConfig {
     /// v10.1: Circuit breaker eşiği — kaç ardışık başarısızlıkta bot kapanır
     /// Varsayılan: 3. .env'den CIRCUIT_BREAKER_THRESHOLD ile ayarlanabilir.
     pub circuit_breaker_threshold: u32,
+    /// v15.0: Yedek RPC WebSocket URL (failover için)
+    /// Primary RPC'de hata veya yüksek gecikme olursa backup'a geçilir.
+    pub rpc_wss_url_backup: Option<String>,
+    /// v15.0: Gecikme spike uyarı eşiği (ms)
+    /// Bu değerin üzerinde gecikme loglanır.
+    pub latency_spike_threshold_ms: f64,
 }
 
 impl BotConfig {
@@ -626,6 +633,11 @@ impl BotConfig {
         if rpc_wss_url.is_empty() || rpc_wss_url.starts_with("wss://your-") {
             return Err(eyre::eyre!("RPC_WSS_URL geçerli bir URL olmalıdır!"));
         }
+
+        // v15.0: Yedek RPC URL (opsiyonel)
+        let rpc_wss_url_backup = std::env::var("RPC_WSS_URL_BACKUP")
+            .ok()
+            .filter(|u| !u.is_empty() && !u.starts_with("wss://your-"));
 
         let rpc_http_url = std::env::var("RPC_HTTP_URL")
             .map_err(|_| eyre::eyre!("RPC_HTTP_URL .env dosyasında tanımlanmalıdır!"))?;
@@ -777,6 +789,8 @@ impl BotConfig {
             keystore_path,
             key_manager_active: false, // main.rs'de KeyManager başlatıldıktan sonra güncellenir
             circuit_breaker_threshold,
+            rpc_wss_url_backup,
+            latency_spike_threshold_ms: Self::parse_env_f64("LATENCY_SPIKE_THRESHOLD_MS", 200.0),
         })
     }
 
@@ -937,6 +951,10 @@ pub struct ArbitrageStats {
     /// v10.0: Ardışık başarısızlık sayacı (circuit breaker için)
     /// 3 ardışık simülasyon/TX başarısızlığında bot geçici olarak durur
     pub consecutive_failures: u32,
+    /// v15.0: Maksimum blok işleme gecikmesi (ms)
+    pub max_block_latency_ms: f64,
+    /// v15.0: Gecikme spike sayısı (threshold üzerinde)
+    pub latency_spikes: u64,
 }
 
 impl ArbitrageStats {
@@ -956,6 +974,8 @@ impl ArbitrageStats {
             min_block_latency_ms: f64::MAX,
             tick_bitmap_syncs: 0,
             consecutive_failures: 0,
+            max_block_latency_ms: 0.0,
+            latency_spikes: 0,
         }
     }
 
@@ -970,6 +990,9 @@ impl ArbitrageStats {
         }
         if latency_ms < self.min_block_latency_ms {
             self.min_block_latency_ms = latency_ms;
+        }
+        if latency_ms > self.max_block_latency_ms {
+            self.max_block_latency_ms = latency_ms;
         }
     }
 

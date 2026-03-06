@@ -148,8 +148,28 @@ pub fn check_arbitrage_opportunity(
         return None;
     };
 
+    // v15.0 DEBUG: NR sonuç detayları — fırsat filtreleme nedenini göster
+    // (Bu loglar canlıya geçiş onayına kadar kaldırılmamalı)
+    eprintln!(
+        "     {} [DEBUG NR] spread={:.4}% | nr_profit_weth={:.8} | min_required={:.8} | nr_amount={:.6} | converged={} | gas_cost_weth={:.8}",
+        "\u{1f52c}",
+        spread_pct,
+        expected_profit_weth,
+        config.min_net_profit_weth,
+        nr_result.optimal_amount,
+        nr_result.converged,
+        dynamic_gas_cost_weth,
+    );
+
     // Kârlı değilse fırsatı atla
     if expected_profit_weth < config.min_net_profit_weth || nr_result.optimal_amount <= 0.0 {
+        eprintln!(
+            "     {} [DEBUG] Fırsat kârsız — NR profit ({:.8}) < eşik ({:.8}) veya amount<=0 ({:.6})",
+            "\u{23ed}\u{fe0f}",
+            expected_profit_weth,
+            config.min_net_profit_weth,
+            nr_result.optimal_amount,
+        );
         return None;
     }
 
@@ -202,10 +222,9 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
     }
 
     // ─── İstatistik Güncelle ─────────────────────────────────────
-    stats.total_opportunities += 1;
-    if opportunity.spread_pct > stats.max_spread_pct {
-        stats.max_spread_pct = opportunity.spread_pct;
-    }
+    // v15.0: total_opportunities ve max_spread_pct artık main.rs'de
+    // her blokta güncelleniyor (fırsat koşulundan bağımsız).
+    // Burada sadece simülasyona özgü istatistikler kalıyor.
 
     // ─── REVM Simülasyonu ──────────────────────────────────────
     let sim_result = sim_engine.validate_mathematical(
@@ -1022,6 +1041,8 @@ mod gas_spike_tests {
             keystore_path: None,
             key_manager_active: false,
             circuit_breaker_threshold: 3,
+            rpc_wss_url_backup: None,
+            latency_spike_threshold_ms: 200.0,
         }
     }
 

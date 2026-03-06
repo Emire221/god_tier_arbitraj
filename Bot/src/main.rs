@@ -225,7 +225,14 @@ fn print_spread_info(pools: &[PoolConfig], states: &[SharedPoolState]) {
     }
 }
 
-fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState]) {
+fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools: &[PoolConfig]) {
+    // v15.0: Break-even spread hesapla (toplam fee = pool_a_fee + pool_b_fee)
+    let total_fee_pct = if pools.len() >= 2 {
+        (pools[0].fee_fraction + pools[1].fee_fraction) * 100.0
+    } else {
+        0.0
+    };
+
     println!();
     println!("{}", "  ┌───── OTURUM İSTATİSTİKLERİ (v9.0) ──────────────────────────┐".yellow());
     println!("  {}  Çalışma Süresi       : {}", "│".yellow(), stats.uptime_str().white().bold());
@@ -254,10 +261,26 @@ fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState]) {
     println!("  {}  Maks. Kâr (tek)       : {:.6} WETH", "│".yellow(), stats.max_profit_weth);
     println!("  {}  Toplam Pot. Kâr       : {:.6} WETH", "│".yellow(), stats.total_potential_profit);
 
+    // v15.0: Fee & break-even bilgisi
+    println!("  {} ─── Fee & Ekonomik Analiz ─────────────", "│".yellow());
+    if pools.len() >= 2 {
+        println!("  {}  Havuz A Fee           : {:.2}% ({})", "│".yellow(), pools[0].fee_fraction * 100.0, pools[0].name);
+        println!("  {}  Havuz B Fee           : {:.2}% ({})", "│".yellow(), pools[1].fee_fraction * 100.0, pools[1].name);
+        println!("  {}  Toplam Fee (2-yönlü)  : {:.2}%", "│".yellow(), total_fee_pct);
+        let profitable = stats.max_spread_pct > total_fee_pct;
+        if profitable {
+            println!("  {}  Durum                 : {} (spread > fee)", "│".yellow(), "KÂRLI OLABİLİR".green().bold());
+        } else {
+            println!("  {}  Durum                 : {} (spread {:.4}% < fee {:.2}%)", "│".yellow(), "KÂRSIZ".red().bold(), stats.max_spread_pct, total_fee_pct);
+        }
+    }
+
     // v6.0: Gecikme istatistikleri
     println!("  {} ─── Gecikme (State Sync) ──────────────", "│".yellow());
     println!("  {}  Ort. Gecikme          : {:.1}ms", "│".yellow(), stats.avg_block_latency_ms);
     println!("  {}  Min. Gecikme          : {:.1}ms", "│".yellow(), stats.min_block_latency_ms);
+    println!("  {}  Maks. Gecikme         : {:.1}ms", "│".yellow(), stats.max_block_latency_ms);
+    println!("  {}  Gecikme Spike         : {} kez", "│".yellow(), stats.latency_spikes);
     println!("  {}  TickBitmap Sync       : {} kez", "│".yellow(), stats.tick_bitmap_syncs);
 
     for (i, state_lock) in states.iter().enumerate() {
@@ -392,54 +415,38 @@ async fn main() -> Result<()> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
-    // ══════════════ MULTI-TRANSPORT BAĞLANTI ══════════════
-    // Öncelik sırası: IPC > WSS > HTTP
-    // Base L2 Sequencer'a en düşük gecikme için IPC tercih edilir
-    // Not: Blok aboneliği (subscribe_blocks) sadece WS/IPC üzerinden çalışır
+    // ══════════════ MULTI-TRANSPORT BAĞLANTI (v15.0: Failover) ══════════════
+    // Öncelik sırası: Primary WSS → Backup WSS (varsa)
+    // Base L2 Sequencer'a en düşük gecikme için WS tercih edilir
     println!("  {} Transport bağlantısı kuruluyor ({:?} mod)...", "⏳".yellow(), config.transport_mode);
     let connect_start = Instant::now();
 
-    let (provider, active_transport) = match config.transport_mode {
-        TransportMode::Ipc => {
-            // IPC: Yerel düğüm ile en düşük gecikmeyi sağlar
-            // alloy "full" feature ile IPC desteği gelecek — şimdilik WSS fallback
-            let ipc_path = config.rpc_ipc_path.as_deref().unwrap_or("");
-            if !ipc_path.is_empty() {
-                println!("  {} IPC ({}) henüz desteklenmiyor, WSS'ye düşülüyor...", "⚠️".yellow(), ipc_path);
+    // v15.0: Primary + Backup failover
+    let primary_result = {
+        let ws = WsConnect::new(&config.rpc_wss_url);
+        ProviderBuilder::new().on_ws(ws).await
+    };
+
+    let (provider, active_transport) = match primary_result {
+        Ok(p) => {
+            let ms = connect_start.elapsed().as_millis();
+            println!("  {} Primary WSS bağlantı kuruldu! ({}ms)", "✅".green(), ms);
+            (p, "WSS (Primary)")
+        }
+        Err(e) => {
+            println!("  {} Primary WSS bağlantı başarısız: {}", "⚠️".yellow(), e);
+            // v15.0: Backup RPC varsa dene
+            if let Some(ref backup_url) = config.rpc_wss_url_backup {
+                println!("  {} Backup WSS'ye geçiliyor...", "🔄".yellow());
+                let ws_backup = WsConnect::new(backup_url);
+                let p = ProviderBuilder::new().on_ws(ws_backup).await
+                    .map_err(|e2| eyre::eyre!("Primary ve Backup WSS başarısız. Primary: {}, Backup: {}", e, e2))?;
+                let ms = connect_start.elapsed().as_millis();
+                println!("  {} Backup WSS bağlantı kuruldu! ({}ms)", "✅".green(), ms);
+                (p, "WSS (Backup/Failover)")
+            } else {
+                return Err(eyre::eyre!("WSS bağlantısı başarısız ve yedek RPC tanımlı değil: {}", e));
             }
-            println!("  {} WSS bağlantısı kuruluyor (IPC fallback)...", "🌐".cyan());
-            let ws = WsConnect::new(&config.rpc_wss_url);
-            let p = ProviderBuilder::new().on_ws(ws).await?;
-            let ms = connect_start.elapsed().as_millis();
-            println!("  {} WSS bağlantı kuruldu! ({}ms)", "✅".green(), ms);
-            (p, "WSS (IPC fallback)")
-        }
-        TransportMode::Http => {
-            // HTTP: Polling gerektirir, subscribe_blocks çalışmaz
-            // WSS'ye düş çünkü blok aboneliği lazım
-            println!("  {} HTTP modu seçildi ama blok aboneliği WSS gerektirir. WSS kullanılacak.", "⚠️".yellow());
-            let ws = WsConnect::new(&config.rpc_wss_url);
-            let p = ProviderBuilder::new().on_ws(ws).await?;
-            let ms = connect_start.elapsed().as_millis();
-            println!("  {} WSS bağlantı kuruldu! ({}ms)", "✅".green(), ms);
-            (p, "WSS (HTTP yerine)")
-        }
-        TransportMode::Ws => {
-            println!("  {} WSS bağlantısı kuruluyor...", "🌐".cyan());
-            let ws = WsConnect::new(&config.rpc_wss_url);
-            let p = ProviderBuilder::new().on_ws(ws).await?;
-            let ms = connect_start.elapsed().as_millis();
-            println!("  {} WSS bağlantı kuruldu! ({}ms)", "✅".green(), ms);
-            (p, "WSS")
-        }
-        TransportMode::Auto => {
-            // Auto: IPC desteği geldiğinde önce IPC denenecek, şimdi WSS
-            println!("  {} [Auto] WSS bağlantısı kuruluyor...", "🌐".cyan());
-            let ws = WsConnect::new(&config.rpc_wss_url);
-            let p = ProviderBuilder::new().on_ws(ws).await?;
-            let ms = connect_start.elapsed().as_millis();
-            println!("  {} [Auto] WSS bağlantı kuruldu! ({}ms)", "✅".green(), ms);
-            (p, "WSS (Auto)")
         }
     };
 
@@ -703,6 +710,17 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
         // Gecikme ölçümü
         stats.update_latency(sync_ms as f64);
 
+        // v15.0: Gecikme spike tespiti ve uyarısı
+        if (sync_ms as f64) > config.latency_spike_threshold_ms {
+            stats.latency_spikes += 1;
+            eprintln!(
+                "  {} [Blok #{}] Gecikme SPIKE: {}ms (eşik: {:.0}ms) — #{} spike",
+                "⚡", block_number, sync_ms,
+                config.latency_spike_threshold_ms,
+                stats.latency_spikes,
+            );
+        }
+
         let all_synced = sync_results.iter().all(|r| r.is_ok());
 
         // Hata raporlama
@@ -741,6 +759,32 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
         // ── 2. BLOK + SPREAD BİLGİSİ ───────────────────────
         print_block_update(block_number, pools, &states, sync_ms);
         print_spread_info(pools, &states);
+
+        // ── 2.5. SPREAD İSTATİSTİK GÜNCELLEMESİ (Her blokta) ────────
+        // v15.0 FIX: max_spread ve total_opportunities güncelleme
+        // fırsat değerlendirmesinden BAĞIMSIZ olarak her blokta çalışır.
+        // Önceki sürümde bu istatistikler sadece evaluate_and_execute()
+        // içinde güncelleniyordu — NR kârsız bulursa hiç çağrılmıyordu.
+        if states.len() >= 2 {
+            let sa = states[0].read();
+            let sb = states[1].read();
+            if sa.is_active() && sb.is_active() {
+                let spread = (sa.eth_price_usd - sb.eth_price_usd).abs();
+                let min_p = sa.eth_price_usd.min(sb.eth_price_usd);
+                if min_p > 0.0 {
+                    let spread_pct = (spread / min_p) * 100.0;
+                    // max_spread her blokta güncellenir — fırsat koşulundan bağımsız
+                    if spread_pct > stats.max_spread_pct {
+                        stats.max_spread_pct = spread_pct;
+                    }
+                    // Spread > 0.001% ise "tespit edilen fırsat" olarak say
+                    // (NR kârlılığından bağımsız — ham spread algılama)
+                    if spread_pct > 0.001 {
+                        stats.total_opportunities += 1;
+                    }
+                }
+            }
+        }
 
         // ── 3. ARBİTRAJ FIRSATI KONTROLÜ ────────────────────
         if all_synced {
@@ -802,7 +846,7 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
         if stats.total_blocks_processed % config.stats_interval == 0
             && stats.total_blocks_processed > 0
         {
-            print_stats_summary(&stats, &states);
+            print_stats_summary(&stats, &states, pools);
         }
 
         // ── 6. PERİYODİK NONCE SENKRONİZASYONU (v10.0) ──────

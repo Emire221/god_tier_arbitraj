@@ -113,6 +113,11 @@ pub async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPoo
                 .unwrap_or(0.0)
                 >= 50_000.0
         })
+        // Stratejik komisyon filtresi — sadece ≤%0.01 fee'li havuzlar geçer
+        .filter(|p| match p.fee_tier {
+            Some(fee) => fee <= 0.01,
+            None => !p.dex_id.eq_ignore_ascii_case("aerodrome"),
+        })
         .map(|p| DiscoveredPool {
             address: p.pair_address,
             dex: p.dex_id,

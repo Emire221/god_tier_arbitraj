@@ -25,6 +25,121 @@
 use crate::types::{PoolState, TickBitmapData};
 
 // ─────────────────────────────────────────────────────────────────────────────
+// O(1) PreFilter — NR'den Önce Hızlı Kârlılık Eleme
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// O(1) kârlılık ön filtresi.
+///
+/// Newton-Raphson (NR) optimizasyonunun ~40 iterasyonluk kaba tarama +
+/// ~50 iterasyonluk ince ayar maliyetini önlemek için, spread'in
+/// fee'leri kurtarıp kurtaramayacağını tek bir çarpma/çıkarma ile kontrol eder.
+///
+/// Formül:
+///   expected_profit = (spread_ratio × amount) - (fee_a + fee_b + gas_cost)
+///
+/// `expected_profit > min_profit_wei` değilse NR'ye hiç girmeden `None` döner.
+pub struct PreFilter {
+    /// Havuz A fee oranı (ör: 0.0005 = %0.05)
+    pub fee_a: f64,
+    /// Havuz B fee oranı (ör: 0.0001 = %0.01)
+    pub fee_b: f64,
+    /// Tahmini gas maliyeti (WETH cinsinden)
+    pub estimated_gas_cost_weth: f64,
+    /// Minimum kâr eşiği (WETH cinsinden)
+    pub min_profit_weth: f64,
+    /// Flash loan fee oranı (ör: 0.0005 = 5 bps)
+    pub flash_loan_fee_rate: f64,
+}
+
+/// PreFilter sonucu
+#[derive(Debug, Clone, Copy)]
+pub enum PreFilterResult {
+    /// Spread fee'leri kurtarıyor — NR'ye devam et
+    Profitable {
+        /// Tahmini brüt kâr (WETH)
+        estimated_profit_weth: f64,
+        /// Spread oranı
+        spread_ratio: f64,
+    },
+    /// Spread fee'leri kurtaramıyor — NR'yi atla
+    Unprofitable {
+        /// Neden kârsız?
+        reason: PreFilterRejectReason,
+    },
+}
+
+/// Kârsızlık nedeni (debug logları için)
+#[derive(Debug, Clone, Copy)]
+pub enum PreFilterRejectReason {
+    /// Spread toplam fee'den küçük
+    SpreadBelowFees,
+    /// Tahmini kâr minimum eşiğin altında
+    ProfitBelowThreshold,
+    /// Geçersiz fiyat verisi
+    InvalidPriceData,
+}
+
+impl PreFilter {
+    /// O(1) kârlılık kontrolü.
+    ///
+    /// # Argümanlar
+    /// - `price_a`: Havuz A ETH fiyatı (quote cinsinden)
+    /// - `price_b`: Havuz B ETH fiyatı (quote cinsinden)
+    /// - `trade_amount_weth`: İşlem boyutu (WETH)
+    ///
+    /// # Karmaşıklık
+    /// O(1) — sabit sayıda aritmetik operasyon, allocation yok.
+    #[inline]
+    pub fn check(
+        &self,
+        price_a: f64,
+        price_b: f64,
+        trade_amount_weth: f64,
+    ) -> PreFilterResult {
+        // Geçerlilik kontrolü — NaN/Infinity/sıfır fiyat
+        if price_a <= 0.0 || price_b <= 0.0
+            || !price_a.is_finite() || !price_b.is_finite()
+            || trade_amount_weth <= 0.0
+        {
+            return PreFilterResult::Unprofitable {
+                reason: PreFilterRejectReason::InvalidPriceData,
+            };
+        }
+
+        // Spread oranı = |price_a - price_b| / min(price_a, price_b)
+        let spread = (price_a - price_b).abs();
+        let min_price = price_a.min(price_b);
+        let spread_ratio = spread / min_price;
+
+        // Toplam fee oranı = fee_a + fee_b + flash_loan_fee
+        let total_fee_ratio = self.fee_a + self.fee_b + self.flash_loan_fee_rate;
+
+        // Spread fee'leri kurtarıyor mu?
+        if spread_ratio <= total_fee_ratio {
+            return PreFilterResult::Unprofitable {
+                reason: PreFilterRejectReason::SpreadBelowFees,
+            };
+        }
+
+        // Tahmini brüt kâr (WETH cinsinden)
+        // profit ≈ (spread_ratio - total_fee_ratio) × amount - gas_cost
+        let estimated_profit = (spread_ratio - total_fee_ratio) * trade_amount_weth
+            - self.estimated_gas_cost_weth;
+
+        if estimated_profit < self.min_profit_weth {
+            return PreFilterResult::Unprofitable {
+                reason: PreFilterRejectReason::ProfitBelowThreshold,
+            };
+        }
+
+        PreFilterResult::Profitable {
+            estimated_profit_weth: estimated_profit,
+            spread_ratio,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Sabitler
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -94,6 +94,9 @@ error ZeroAddress();
 /// @dev v13.0: ZeroAmount yerine semantik olarak doğru hata
 error InvalidCalldataLength();
 
+/// @dev Coinbase bribe transferi başarısız oldu
+error BribeFailed();
+
 // (v12.0: PoolNotWhitelisted kaldırıldı — off-chain doğrulama)
 
 // ── MINIMAL INTERFACES ───────────────────────────────────────────────────────
@@ -218,7 +221,7 @@ contract ArbitrajBotu {
     //
     // ═════════════════════════════════════════════════════════════════════════
 
-    fallback() external {
+    fallback() external payable {
         // ── 1. EXECUTOR KONTROLÜ ─────────────────────────────────────────
         if (msg.sender != executor) revert Unauthorized();
 
@@ -313,6 +316,19 @@ contract ArbitrajBotu {
         //    Bot'un off-chain hesapladığı kârın toleranslı hali.
         //    Sandviç saldırısında kâr düştüğünde burası revert atar.
         if (profit < minProfit) revert InsufficientProfit();
+
+        // ── 8.5. COINBASE BRIBE — Validator/Sequencer Tip ────────────────
+        //    msg.value > 0 ise ETH'yi doğrudan block.coinbase'e transfer et.
+        //    Base L2: Sequencer sıralama önceliği için kullanılır.
+        //    Assembly call() ile gas-efficient transfer (~6700 gas).
+        //    Bribe başarısız olursa TX revert olur (BribeFailed).
+        if (msg.value > 0) {
+            bool bribeOk;
+            assembly {
+                bribeOk := call(gas(), coinbase(), callvalue(), 0, 0, 0, 0)
+            }
+            if (!bribeOk) revert BribeFailed();
+        }
 
         // ── 9. KÂR KONTRAT İÇİNDE KALIR ───────────────────────────────
         //    v9.0: Kâr otomatik olarak dışarı gönderilmez.

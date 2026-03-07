@@ -622,6 +622,12 @@ pub struct BotConfig {
     /// v15.0: Gecikme spike uyarı eşiği (ms)
     /// Bu değerin üzerinde gecikme loglanır.
     pub latency_spike_threshold_ms: f64,
+    /// v10.0: Private/Flashbots RPC URL (MEV koruması için)
+    /// Tanımlıysa eth_sendBundle kullanılır, değilse public mempool
+    pub private_rpc_url: Option<String>,
+    /// v10.0: Ek WSS RPC URL'leri (Round-Robin havuz için)
+    /// Primary + backup dışında 3. endpoint
+    pub rpc_wss_url_extra: Vec<String>,
 }
 
 impl BotConfig {
@@ -791,6 +797,21 @@ impl BotConfig {
             circuit_breaker_threshold,
             rpc_wss_url_backup,
             latency_spike_threshold_ms: Self::parse_env_f64("LATENCY_SPIKE_THRESHOLD_MS", 200.0),
+            private_rpc_url: std::env::var("PRIVATE_RPC_URL")
+                .ok()
+                .filter(|u| !u.is_empty()),
+            rpc_wss_url_extra: {
+                let mut extras = Vec::new();
+                // RPC_WSS_URL_2, RPC_WSS_URL_3 opsiyonel ek endpoint'ler
+                for key in &["RPC_WSS_URL_2", "RPC_WSS_URL_3"] {
+                    if let Ok(url) = std::env::var(key) {
+                        if !url.is_empty() && !url.starts_with("wss://your-") {
+                            extras.push(url);
+                        }
+                    }
+                }
+                extras
+            },
         })
     }
 

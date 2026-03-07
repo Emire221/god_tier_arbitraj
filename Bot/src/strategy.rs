@@ -89,6 +89,52 @@ pub fn check_arbitrage_opportunity(
         return None;
     };
 
+    // ─── O(1) PreFilter — NR'ye girmeden hızlı eleme ─────────
+    // Spread'in fee'leri kurtarıp kurtaramayacağını mikrosaniyede kontrol eder.
+    // Kurtaramıyorsa NR'nin ~90 iterasyonluk hesaplama maliyetinden kaçınılır.
+    {
+        // Dinamik gas cost (PreFilter için)
+        let gas_estimate: u64 = last_simulated_gas.unwrap_or(150_000);
+        let prefilter_gas_cost_weth = if block_base_fee > 0 {
+            ((gas_estimate as f64 * block_base_fee as f64) / 1e18).max(0.00001)
+        } else {
+            config.gas_cost_fallback_weth
+        };
+
+        let pre_filter = math::PreFilter {
+            fee_a: pools[0].fee_fraction,
+            fee_b: pools[1].fee_fraction,
+            estimated_gas_cost_weth: prefilter_gas_cost_weth,
+            min_profit_weth: config.min_net_profit_weth,
+            flash_loan_fee_rate: config.flash_loan_fee_bps / 10_000.0,
+        };
+
+        // Kaba tarama miktarı: max trade size'ın %50'si (konservatif tahmin)
+        let probe_amount = config.max_trade_size_weth * 0.5;
+
+        match pre_filter.check(price_a, price_b, probe_amount) {
+            math::PreFilterResult::Unprofitable { reason } => {
+                eprintln!(
+                    "     {} [PreFilter] Spread {:.4}% → {:?} | fee_total={:.3}% | gas={:.8} WETH",
+                    "\u{23ed}\u{fe0f}",
+                    spread_pct,
+                    reason,
+                    (pools[0].fee_fraction + pools[1].fee_fraction + config.flash_loan_fee_bps / 10_000.0) * 100.0,
+                    prefilter_gas_cost_weth,
+                );
+                return None;
+            }
+            math::PreFilterResult::Profitable { estimated_profit_weth, spread_ratio } => {
+                eprintln!(
+                    "     {} [PreFilter] GEÇTI | spread_ratio={:.6} | est_profit={:.8} WETH → NR'ye devam",
+                    "\u{2705}",
+                    spread_ratio,
+                    estimated_profit_weth,
+                );
+            }
+        }
+    }
+
     // Yön belirleme: Ucuzdan al, pahalıya sat
     let (buy_idx, sell_idx) = if price_a < price_b {
         (0, 1) // A ucuz, B pahalı
@@ -205,6 +251,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
     nonce_manager: &Arc<NonceManager>,
     block_timestamp: u64,
     block_base_fee: u64,
+    block_latency_ms: f64,
 ) -> Option<u64> {
     let _buy_pool = &pools[opportunity.buy_pool_idx];
     let _sell_pool = &pools[opportunity.sell_pool_idx];
@@ -328,15 +375,21 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         println!(
             "  {} {}",
             "👻".yellow(),
-            "GÖLGE MODU: İşlem atlandı — detaylar shadow_logs.json'a kaydediliyor".yellow().bold()
+            "GÖLGE MODU: İşlem atlandı — detaylar shadow_analytics.jsonl'e kaydediliyor".yellow().bold()
         );
 
-        // Shadow log kaydı
+        // Dinamik bribe hesabı (loglama için)
+        let dynamic_bribe_weth = opportunity.expected_profit_weth * config.bribe_pct;
+
+        // Shadow log kaydı (v10.0: yapılandırılmış JSONL)
         write_shadow_log(
             opportunity,
             &sim_result,
             pools,
             config,
+            simulated_gas_used,
+            dynamic_bribe_weth,
+            block_latency_ms,
         );
     } else if config.execution_enabled() {
         let rpc_url = config.rpc_wss_url.clone();
@@ -513,8 +566,12 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
 // Gölge Modu (Shadow Mode) — JSON Loglama
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Gölge modunda bulunan fırsatın tüm detaylarını shadow_logs.json dosyasına
-/// satır satır (JSON Lines / NDJSON formatında) append eder.
+/// Gölge modunda bulunan fırsatın tüm detaylarını shadow_analytics.jsonl
+/// dosyasına satır satır (JSON Lines / NDJSON formatında) append eder.
+///
+/// v10.0 Yapılandırılmış Alanlar:
+///   - timestamp, pool_pair, gas_used, expected_profit
+///   - simulated_profit, dynamic_bribe, latency_ms
 ///
 /// Bu dosya birkaç gün sonra açılıp:
 ///   "Bot 1000 fırsat bulmuş, gerçek TX atsaydık toplam 450$ kazanacaktık"
@@ -524,70 +581,64 @@ fn write_shadow_log(
     sim_result: &SimulationResult,
     pools: &[PoolConfig],
     _config: &BotConfig,
+    simulated_gas: u64,
+    dynamic_bribe_weth: f64,
+    latency_ms: f64,
 ) {
     let buy_pool = &pools[opportunity.buy_pool_idx];
     let sell_pool = &pools[opportunity.sell_pool_idx];
 
-    // Kompakt calldata boyutunu hesapla (134 byte)
-    let payload_bytes = 134;
+    // pool_pair: "UniV3-WETH/cbBTC ↔ Aero-WETH/cbBTC"
+    let pool_pair = format!("{} ↔ {}", buy_pool.name, sell_pool.name);
 
-    // JSON Lines formatında tek satır
-    let log_entry = format!(
-        concat!(
-            "{{",
-            "\"timestamp\":\"{}\",",
-            "\"block\":0,",
-            "\"buy_pool\":\"{}\",",
-            "\"buy_pool_addr\":\"{}\",",
-            "\"buy_price_quote\":{:.6},",
-            "\"sell_pool\":\"{}\",",
-            "\"sell_pool_addr\":\"{}\",",
-            "\"sell_price_quote\":{:.6},",
-            "\"spread_pct\":{:.6},",
-            "\"optimal_amount_weth\":{:.8},",
-            "\"expected_profit_weth\":{:.6},",
-            "\"nr_converged\":{},",
-            "\"nr_iterations\":{},",
-            "\"sim_success\":{},",
-            "\"sim_gas_used\":{},",
-            "\"payload_bytes\":{},",
-            "\"mode\":\"shadow\"",
-            "}}"
-        ),
-        Local::now().format("%Y-%m-%dT%H:%M:%S%.3f"),
-        buy_pool.name,
-        buy_pool.address,
-        opportunity.buy_price_quote,
-        sell_pool.name,
-        sell_pool.address,
-        opportunity.sell_price_quote,
-        opportunity.spread_pct,
-        opportunity.optimal_amount_weth,
-        opportunity.expected_profit_weth,
-        opportunity.nr_converged,
-        opportunity.nr_iterations,
-        sim_result.success,
-        sim_result.gas_used,
-        payload_bytes,
-    );
+    // Simulated profit = expected profit if sim succeeded, 0 otherwise
+    let simulated_profit_weth = if sim_result.success {
+        opportunity.expected_profit_weth
+    } else {
+        0.0
+    };
+
+    // JSONL yapılandırılmış log satırı
+    let log_entry = serde_json::json!({
+        "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
+        "pool_pair": pool_pair,
+        "buy_pool": buy_pool.name,
+        "buy_pool_addr": format!("{}", buy_pool.address),
+        "buy_price_quote": (opportunity.buy_price_quote * 1e6).round() / 1e6,
+        "sell_pool": sell_pool.name,
+        "sell_pool_addr": format!("{}", sell_pool.address),
+        "sell_price_quote": (opportunity.sell_price_quote * 1e6).round() / 1e6,
+        "spread_pct": (opportunity.spread_pct * 1e6).round() / 1e6,
+        "optimal_amount_weth": (opportunity.optimal_amount_weth * 1e8).round() / 1e8,
+        "expected_profit": (opportunity.expected_profit_weth * 1e8).round() / 1e8,
+        "simulated_profit": (simulated_profit_weth * 1e8).round() / 1e8,
+        "gas_used": simulated_gas,
+        "dynamic_bribe": (dynamic_bribe_weth * 1e8).round() / 1e8,
+        "latency_ms": (latency_ms * 10.0).round() / 10.0,
+        "nr_converged": opportunity.nr_converged,
+        "nr_iterations": opportunity.nr_iterations,
+        "sim_success": sim_result.success,
+        "sim_error": sim_result.error.as_deref(),
+        "mode": "shadow",
+    });
 
     // Dosyaya append (satır satır)
     match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("shadow_logs.json")
+        .open("shadow_analytics.jsonl")
     {
         Ok(mut file) => {
             if let Err(e) = writeln!(file, "{}", log_entry) {
                 eprintln!(
-                    "  {} shadow_logs.json yazma hatası: {}",
+                    "  {} shadow_analytics.jsonl yazma hatası: {}",
                     "⚠️".yellow(), e
                 );
             }
         }
         Err(e) => {
             eprintln!(
-                "  {} shadow_logs.json açma hatası: {}",
+                "  {} shadow_analytics.jsonl açma hatası: {}",
                 "⚠️".yellow(), e
             );
         }
@@ -764,12 +815,13 @@ async fn execute_inner(
     // bu floor yalnızca aşırı düşük gas raporlarına karşı güvenlik ağıdır.
     let gas_limit = gas_limit_with_buffer.max(100_000);
 
-    // ═══ RAW TX GÖNDERİMİ — ATOMIK NONCE + DİNAMİK FEE + GAS LIMIT ═══
+    // ═══ RAW TX GÖNDERİMİ — ATOMIK NONCE + DİNAMİK FEE + GAS LIMIT + BRIBE ═══
     let mut tx = TransactionRequest::default()
         .to(contract_address)
         .input(calldata.into())
         .nonce(nonce)
-        .gas_limit(gas_limit as u128);
+        .gas_limit(gas_limit as u128)
+        .value(alloy::primitives::U256::from(bribe_wei)); // Coinbase bribe: msg.value olarak gönderilir
 
     // v13.0: max_fee_per_gas — base_fee spike koruması
     // max_fee = (base_fee × 2) + priority_fee
@@ -970,7 +1022,7 @@ fn print_opportunity_report(
         println!(
             "  {}  Durum            : {}",
             "║".red(),
-            "👻 GÖLGE MODU — shadow_logs.json'a kaydedildi".yellow().bold()
+            "👻 GÖLGE MODU — shadow_analytics.jsonl'e kaydedildi".yellow().bold()
         );
     } else {
         println!(
@@ -1043,6 +1095,8 @@ mod gas_spike_tests {
             circuit_breaker_threshold: 3,
             rpc_wss_url_backup: None,
             latency_spike_threshold_ms: 200.0,
+            private_rpc_url: None,
+            rpc_wss_url_extra: Vec::new(),
         }
     }
 

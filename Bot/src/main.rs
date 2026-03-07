@@ -22,6 +22,9 @@ mod state_sync;
 mod simulator;
 mod strategy;
 mod key_manager;
+mod transport;
+mod executor;
+mod pool_discovery;
 
 use types::*;
 use state_sync::*;
@@ -121,7 +124,7 @@ fn print_banner(config: &BotConfig) {
         if config.execution_enabled() {
             "CANLI (Kontrat Tetikleme Aktif)".green().bold().to_string()
         } else if config.shadow_mode() {
-            "GÖLGE MODU (Kuru Sıkı — shadow_logs.json'a kayıt)".yellow().bold().to_string()
+            "GÖLGE MODU (Kuru Sıkı — shadow_analytics.jsonl'e kayıt)".yellow().bold().to_string()
         } else {
             "GÖZLEM (Sadece İzleme)".yellow().bold().to_string()
         }
@@ -317,8 +320,42 @@ async fn main() -> Result<()> {
         return key_manager::KeyManager::cli_encrypt_key();
     }
 
+    // ═══ CLI: --discover-pools ile DexScreener havuz keşfi ═══
+    if args.iter().any(|a| a == "--discover-pools") {
+        let rt = tokio::runtime::Handle::current();
+        return rt.block_on(pool_discovery::cli_discover_pools());
+    }
+
     // Yapılandırmayı oku
     let mut config = BotConfig::from_env()?;
+
+    // ═══ CLI: --mode shadow|live ile mod geçersiz kılma ═══
+    if let Some(pos) = args.iter().position(|a| a == "--mode") {
+        if let Some(mode) = args.get(pos + 1) {
+            match mode.to_lowercase().as_str() {
+                "shadow" => {
+                    config.execution_enabled_flag = false;
+                    println!(
+                        "  {} CLI: --mode shadow → Gölge modu zorlandı",
+                        "👻".yellow()
+                    );
+                }
+                "live" => {
+                    config.execution_enabled_flag = true;
+                    println!(
+                        "  {} CLI: --mode live → Canlı mod zorlandı",
+                        "🚀".green()
+                    );
+                }
+                other => {
+                    return Err(eyre::eyre!(
+                        "Geçersiz mod: '{}'. Kullanım: --mode shadow|live",
+                        other
+                    ));
+                }
+            }
+        }
+    }
 
     // Havuz yapılandırmalarını oku
     let pools = load_pool_configs_from_env()?;
@@ -415,42 +452,61 @@ async fn main() -> Result<()> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
-    // ══════════════ MULTI-TRANSPORT BAĞLANTI (v15.0: Failover) ══════════════
-    // Öncelik sırası: Primary WSS → Backup WSS (varsa)
-    // Base L2 Sequencer'a en düşük gecikme için WS tercih edilir
+    // ══════════════ MULTI-TRANSPORT BAĞLANTI (v10.0: RpcPool) ══════════════
+    // IPC öncelikli, Round-Robin WSS fallback, arka plan sağlık kontrolü
     println!("  {} Transport bağlantısı kuruluyor ({:?} mod)...", "⏳".yellow(), config.transport_mode);
     let connect_start = Instant::now();
 
-    // v15.0: Primary + Backup failover
-    let primary_result = {
-        let ws = WsConnect::new(&config.rpc_wss_url);
-        ProviderBuilder::new().on_ws(ws).await
-    };
+    // RPC Pool için WSS URL listesi oluştur
+    let mut ws_urls = vec![config.rpc_wss_url.clone()];
+    if let Some(ref backup) = config.rpc_wss_url_backup {
+        ws_urls.push(backup.clone());
+    }
+    ws_urls.extend(config.rpc_wss_url_extra.iter().cloned());
 
-    let (provider, active_transport) = match primary_result {
-        Ok(p) => {
-            let ms = connect_start.elapsed().as_millis();
-            println!("  {} Primary WSS bağlantı kuruldu! ({}ms)", "✅".green(), ms);
-            (p, "WSS (Primary)")
-        }
-        Err(e) => {
-            println!("  {} Primary WSS bağlantı başarısız: {}", "⚠️".yellow(), e);
-            // v15.0: Backup RPC varsa dene
-            if let Some(ref backup_url) = config.rpc_wss_url_backup {
-                println!("  {} Backup WSS'ye geçiliyor...", "🔄".yellow());
-                let ws_backup = WsConnect::new(backup_url);
-                let p = ProviderBuilder::new().on_ws(ws_backup).await
-                    .map_err(|e2| eyre::eyre!("Primary ve Backup WSS başarısız. Primary: {}, Backup: {}", e, e2))?;
-                let ms = connect_start.elapsed().as_millis();
-                println!("  {} Backup WSS bağlantı kuruldu! ({}ms)", "✅".green(), ms);
-                (p, "WSS (Backup/Failover)")
-            } else {
-                return Err(eyre::eyre!("WSS bağlantısı başarısız ve yedek RPC tanımlı değil: {}", e));
-            }
-        }
-    };
+    // RpcPool oluştur ve bağlan
+    let mut rpc_pool = transport::RpcPool::new(
+        config.rpc_ipc_path.clone(),
+        &ws_urls,
+    );
+    rpc_pool.connect_all().await?;
+    let rpc_pool = Arc::new(rpc_pool);
+
+    // Arka plan sağlık kontrolü başlat (2s aralıkla node yoklama)
+    rpc_pool.spawn_health_checker();
+
+    println!(
+        "  {} RpcPool hazır: {} | Sağlıklı node: {}",
+        "✅".green(),
+        rpc_pool.transport_info().cyan(),
+        rpc_pool.healthy_node_count(),
+    );
+
+    // Primary provider al (ana döngü için)
+    let provider = rpc_pool.get_provider().await?;
+    let active_transport = rpc_pool.transport_info();
 
     let total_connect_ms = connect_start.elapsed().as_millis();
+
+    // ══════════════ MEV EXECUTOR (v10.0) ══════════════
+    let _mev_executor = Arc::new(executor::MevExecutor::new(
+        config.private_rpc_url.clone(),
+        config.rpc_wss_url.clone(),
+        config.bribe_pct,
+    ));
+    if config.private_rpc_url.is_some() {
+        println!(
+            "  {} MEV Koruması: {} (eth_sendBundle aktif)",
+            "🛡️".green(),
+            "AKTİF".green().bold()
+        );
+    } else {
+        println!(
+            "  {} MEV Koruması: {} (PRIVATE_RPC_URL tanımlayın)",
+            "⚠️".yellow(),
+            "DEVRE DIŞI".yellow().bold()
+        );
+    }
 
     // Son blok
     let block = provider.get_block_number().await?;
@@ -836,6 +892,7 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
                     &nonce_manager,
                     block_timestamp,
                     block_base_fee,
+                    sync_ms as f64,
                 ).await {
                     last_simulated_gas = Some(gas);
                 }

@@ -228,16 +228,9 @@ fn print_spread_info(pools: &[PoolConfig], states: &[SharedPoolState]) {
     }
 }
 
-fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools: &[PoolConfig]) {
-    // v15.0: Break-even spread hesapla (toplam fee = pool_a_fee + pool_b_fee)
-    let total_fee_pct = if pools.len() >= 2 {
-        (pools[0].fee_fraction + pools[1].fee_fraction) * 100.0
-    } else {
-        0.0
-    };
-
+fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools: &[PoolConfig], pair_combos: &[pool_discovery::PairCombo]) {
     println!();
-    println!("{}", "  ┌───── OTURUM İSTATİSTİKLERİ (v9.0) ──────────────────────────┐".yellow());
+    println!("{}", "  ┌───── OTURUM İSTATİSTİKLERİ (v11.0) ─────────────────────────┐".yellow());
     println!("  {}  Çalışma Süresi       : {}", "│".yellow(), stats.uptime_str().white().bold());
     println!("  {}  İşlenen Blok         : {}", "│".yellow(), format!("{}", stats.total_blocks_processed).white());
     println!("  {}  Tespit Edilen Fırsat  : {}", "│".yellow(), format!("{}", stats.total_opportunities).white());
@@ -264,17 +257,27 @@ fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools
     println!("  {}  Maks. Kâr (tek)       : {:.6} WETH", "│".yellow(), stats.max_profit_weth);
     println!("  {}  Toplam Pot. Kâr       : {:.6} WETH", "│".yellow(), stats.total_potential_profit);
 
-    // v15.0: Fee & break-even bilgisi
+    // v11.0: Fee & break-even — tüm çiftler
     println!("  {} ─── Fee & Ekonomik Analiz ─────────────", "│".yellow());
-    if pools.len() >= 2 {
-        println!("  {}  Havuz A Fee           : {:.2}% ({})", "│".yellow(), pools[0].fee_fraction * 100.0, pools[0].name);
-        println!("  {}  Havuz B Fee           : {:.2}% ({})", "│".yellow(), pools[1].fee_fraction * 100.0, pools[1].name);
-        println!("  {}  Toplam Fee (2-yönlü)  : {:.2}%", "│".yellow(), total_fee_pct);
-        let profitable = stats.max_spread_pct > total_fee_pct;
+    let mut min_total_fee_pct = f64::MAX;
+    for combo in pair_combos {
+        if combo.pool_a_idx < pools.len() && combo.pool_b_idx < pools.len() {
+            let fee_a = pools[combo.pool_a_idx].fee_fraction;
+            let fee_b = pools[combo.pool_b_idx].fee_fraction;
+            let total = (fee_a + fee_b) * 100.0;
+            if total < min_total_fee_pct { min_total_fee_pct = total; }
+            println!("  {}  {} : {:.2}% + {:.2}% = {:.2}%",
+                "│".yellow(), combo.pair_name,
+                fee_a * 100.0, fee_b * 100.0, total,
+            );
+        }
+    }
+    if min_total_fee_pct < f64::MAX {
+        let profitable = stats.max_spread_pct > min_total_fee_pct;
         if profitable {
             println!("  {}  Durum                 : {} (spread > fee)", "│".yellow(), "KÂRLI OLABİLİR".green().bold());
         } else {
-            println!("  {}  Durum                 : {} (spread {:.4}% < fee {:.2}%)", "│".yellow(), "KÂRSIZ".red().bold(), stats.max_spread_pct, total_fee_pct);
+            println!("  {}  Durum                 : {} (spread {:.4}% < min fee {:.2}%)", "│".yellow(), "KÂRSIZ".red().bold(), stats.max_spread_pct, min_total_fee_pct);
         }
     }
 
@@ -356,16 +359,32 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Havuz yapılandırmalarını oku
-    let pools = load_pool_configs_from_env()?;
+    // Havuz yapılandırmalarını matched_pools.json'dan yükle
+    let (pools, pair_combos) = match pool_discovery::load_matched_pools() {
+        Ok(cfg) => pool_discovery::build_runtime(&cfg)?,
+        Err(_) => {
+            eprintln!("  {} matched_pools.json bulunamadı — otomatik havuz keşfi başlatılıyor...", "🔍".cyan());
+            pool_discovery::cli_discover_pools().await?;
+            let cfg = pool_discovery::load_matched_pools()?;
+            pool_discovery::build_runtime(&cfg)?
+        }
+    };
 
-    // ═══ v10.1: TOKEN WHITELIST DOĞRULAMA ═══
-    // Startup sırasında yapılandırılan token adreslerini beyaz listeye karşı doğrula
-    // v13.0: Aktif edildi — sahte token adresi ile başlatmayı engeller
-    crate::types::validate_token_whitelist(&config.weth_address, &config.quote_token_address)?;
+    // ═══ v11.0: TOKEN WHITELIST DOĞRULAMA (tüm çiftler) ═══
+    {
+        let wl = crate::types::token_whitelist();
+        if !wl.contains(&config.weth_address) {
+            return Err(eyre::eyre!("WETH adresi ({}) whitelist'te YOK!", config.weth_address));
+        }
+        for pool in &pools {
+            if !wl.contains(&pool.quote_token_address) {
+                return Err(eyre::eyre!("Quote token {} whitelist'te YOK!", pool.quote_token_address));
+            }
+        }
+    }
     println!(
-        "  {} Token Whitelist: WETH ve Quote token adresleri doğrulandı",
-        "✅".green()
+        "  {} Token Whitelist: Tüm token adresleri doğrulandı ({} havuz)",
+        "✅".green(), pools.len()
     );
 
     // ═══ v9.0: KEY MANAGER BAŞLATMA ═══
@@ -404,7 +423,7 @@ async fn main() -> Result<()> {
             );
         }
 
-        match run_bot(&config, &pools).await {
+        match run_bot(&config, &pools, &pair_combos).await {
             Ok(_) => {
                 println!(
                     "\n  {} Bağlantı kesildi. Yeniden bağlanılıyor...",
@@ -450,7 +469,7 @@ async fn main() -> Result<()> {
 // BOT MOTORU — Blok Dinle → State Sync → Fırsat Tara → Simüle → Yürüt
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
+async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_discovery::PairCombo]) -> Result<()> {
     // ══════════════ MULTI-TRANSPORT BAĞLANTI (v10.0: RpcPool) ══════════════
     // IPC öncelikli, Round-Robin WSS fallback, arka plan sağlık kontrolü
     println!("  {} Transport bağlantısı kuruluyor ({:?} mod)...", "⏳".yellow(), config.transport_mode);
@@ -813,27 +832,28 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
 
         // ── 2. BLOK + SPREAD BİLGİSİ ───────────────────────
         print_block_update(block_number, pools, &states, sync_ms);
-        print_spread_info(pools, &states);
+        for combo in pair_combos {
+            let pp = [pools[combo.pool_a_idx].clone(), pools[combo.pool_b_idx].clone()];
+            let ps = [states[combo.pool_a_idx].clone(), states[combo.pool_b_idx].clone()];
+            print_spread_info(&pp, &ps);
+        }
 
         // ── 2.5. SPREAD İSTATİSTİK GÜNCELLEMESİ (Her blokta) ────────
         // v15.0 FIX: max_spread ve total_opportunities güncelleme
         // fırsat değerlendirmesinden BAĞIMSIZ olarak her blokta çalışır.
         // Önceki sürümde bu istatistikler sadece evaluate_and_execute()
         // içinde güncelleniyordu — NR kârsız bulursa hiç çağrılmıyordu.
-        if states.len() >= 2 {
-            let sa = states[0].read();
-            let sb = states[1].read();
+        for combo in pair_combos {
+            let sa = states[combo.pool_a_idx].read();
+            let sb = states[combo.pool_b_idx].read();
             if sa.is_active() && sb.is_active() {
                 let spread = (sa.eth_price_usd - sb.eth_price_usd).abs();
                 let min_p = sa.eth_price_usd.min(sb.eth_price_usd);
                 if min_p > 0.0 {
                     let spread_pct = (spread / min_p) * 100.0;
-                    // max_spread her blokta güncellenir — fırsat koşulundan bağımsız
                     if spread_pct > stats.max_spread_pct {
                         stats.max_spread_pct = spread_pct;
                     }
-                    // Spread > 0.001% ise "tespit edilen fırsat" olarak say
-                    // (NR kârlılığından bağımsız — ham spread algılama)
                     if spread_pct > 0.001 {
                         stats.total_opportunities += 1;
                     }
@@ -878,22 +898,26 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
                 ));
             }
 
-            if let Some(opportunity) = check_arbitrage_opportunity(pools, &states, config, block_base_fee, last_simulated_gas) {
-                // ── 4. DEĞERLENDİR + SİMÜLE + YÜRÜT ────────────────
-                if let Some(gas) = evaluate_and_execute(
-                    &provider,
-                    config,
-                    pools,
-                    &states,
-                    &opportunity,
-                    &sim_engine,
-                    &mut stats,
-                    &nonce_manager,
-                    block_timestamp,
-                    block_base_fee,
-                    sync_ms as f64,
-                ).await {
-                    last_simulated_gas = Some(gas);
+            for combo in pair_combos {
+                let pp = [pools[combo.pool_a_idx].clone(), pools[combo.pool_b_idx].clone()];
+                let ps = [states[combo.pool_a_idx].clone(), states[combo.pool_b_idx].clone()];
+                if let Some(opportunity) = check_arbitrage_opportunity(&pp, &ps, config, block_base_fee, last_simulated_gas) {
+                    // ── 4. DEĞERLENDİR + SİMÜLE + YÜRÜT ────────────────
+                    if let Some(gas) = evaluate_and_execute(
+                        &provider,
+                        config,
+                        &pp,
+                        &ps,
+                        &opportunity,
+                        &sim_engine,
+                        &mut stats,
+                        &nonce_manager,
+                        block_timestamp,
+                        block_base_fee,
+                        sync_ms as f64,
+                    ).await {
+                        last_simulated_gas = Some(gas);
+                    }
                 }
             }
         }
@@ -902,7 +926,7 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig]) -> Result<()> {
         if stats.total_blocks_processed % config.stats_interval == 0
             && stats.total_blocks_processed > 0
         {
-            print_stats_summary(&stats, &states, pools);
+            print_stats_summary(&stats, &states, pools, pair_combos);
         }
 
         // ── 6. PERİYODİK NONCE SENKRONİZASYONU (v10.0) ──────

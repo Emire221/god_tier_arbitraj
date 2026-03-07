@@ -886,6 +886,7 @@ mod sequencer_reorg_tests {
                 dex: DexType::UniswapV3,
                 token0_is_weth: true,
                 tick_spacing: 10,
+                quote_token_address: address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
             },
             PoolConfig {
                 address: POOL_B,
@@ -897,6 +898,7 @@ mod sequencer_reorg_tests {
                 dex: DexType::Aerodrome,
                 token0_is_weth: true,
                 tick_spacing: 1,
+                quote_token_address: address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
             },
         ]
     }

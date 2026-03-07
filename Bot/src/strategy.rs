@@ -292,7 +292,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
                 opportunity.buy_pool_idx,
                 pools[0].token0_is_weth,
                 &config.weth_address,
-                &config.quote_token_address,
+                &pools[0].quote_token_address,
             );
 
         // ═══ v11.0: DİNAMİK DECIMAL AMOUNT HESAPLAMA ═══
@@ -306,7 +306,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
             opportunity.optimal_amount_weth,
             weth_input,
             (opportunity.buy_price_quote + opportunity.sell_price_quote) / 2.0,
-            config.quote_token_decimals,
+            if pools[0].token0_is_weth { pools[0].token1_decimals } else { pools[0].token0_decimals },
         );
 
         // v9.0: Deadline block hesapla (v11.0: minimum +3 tolerans)
@@ -406,7 +406,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
                 opportunity.buy_pool_idx,
                 pools[0].token0_is_weth,
                 &config.weth_address,
-                &config.quote_token_address,
+                &pools[0].quote_token_address,
             );
 
         // v11.0: Deadline block hesapla (minimum +3 tolerans)
@@ -486,7 +486,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
                 opportunity.optimal_amount_weth,
                 weth_input,
                 (opportunity.buy_price_quote + opportunity.sell_price_quote) / 2.0,
-                config.quote_token_decimals,
+                if pools[0].token0_is_weth { pools[0].token1_decimals } else { pools[0].token0_decimals },
             );
 
             let uni_zero_for_one = uni_dir == 0;
@@ -537,7 +537,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
 
         // v13.0: block_base_fee'yi execute'a aktar (max_fee_per_gas hesabı için)
         let base_fee_for_exec = block_base_fee;
-        let qt_decimals = config.quote_token_decimals;
+        let qt_decimals = if pools[0].token0_is_weth { pools[0].token1_decimals } else { pools[0].token0_decimals };
 
         tokio::spawn(async move {
             execute_on_chain(
@@ -1112,6 +1112,7 @@ mod gas_spike_tests {
                 dex: DexType::UniswapV3,
                 token0_is_weth: true,
                 tick_spacing: 10,
+                quote_token_address: address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
             },
             PoolConfig {
                 address: POOL_B_ADDR,
@@ -1123,6 +1124,7 @@ mod gas_spike_tests {
                 dex: DexType::Aerodrome,
                 token0_is_weth: true,
                 tick_spacing: 1,
+                quote_token_address: address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
             },
         ]
     }

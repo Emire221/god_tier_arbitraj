@@ -374,6 +374,8 @@ pub struct PoolConfig {
     pub token0_is_weth: bool,
     /// Tick aralığı (Uniswap V3 %0.05 = 10, Aerodrome değişken)
     pub tick_spacing: i32,
+    /// Quote token adresi (çift bazlı — matched_pools.json'dan)
+    pub quote_token_address: Address,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -561,9 +563,11 @@ pub struct BotConfig {
     pub contract_address: Option<Address>,
     /// WETH token adresi (Base: 0x4200000000000000000000000000000000000006)
     pub weth_address: Address,
-    /// Quote token adresi (Örn: cbBTC 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf)
+    /// Quote token adresi (v11.0: per-pair — geriye uyumluluk için saklanır)
+    #[allow(dead_code)]
     pub quote_token_address: Address,
-    /// Quote token decimal sayısı (Örn: cbBTC=8, USDC=6)
+    /// Quote token decimal sayısı (v11.0: per-pair — geriye uyumluluk için saklanır)
+    #[allow(dead_code)]
     pub quote_token_decimals: u8,
     /// Tahmini gas maliyeti fallback (WETH cinsinden)
     pub gas_cost_fallback_weth: f64,
@@ -841,111 +845,10 @@ impl BotConfig {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Havuz Adresleri (.env tabanlı)
+// load_pool_configs_from_env() SİLİNDİ — v11.0
+// Havuz yapılandırması artık matched_pools.json'dan pool_discovery::build_runtime()
+// ile yüklenir. Statik POOL_A/B_ADDRESS env var'ları kullanılmaz.
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// .env dosyasından havuz yapılandırmalarını oku
-pub fn load_pool_configs_from_env() -> Result<Vec<PoolConfig>> {
-    let pool_a_addr = std::env::var("POOL_A_ADDRESS")
-        .map_err(|_| eyre::eyre!("POOL_A_ADDRESS .env dosyasında tanımlanmalıdır!"))?
-        .parse::<Address>()
-        .map_err(|e| eyre::eyre!("POOL_A_ADDRESS geçersiz adres: {}", e))?;
-
-    let pool_a_name = std::env::var("POOL_A_NAME")
-        .unwrap_or_else(|_| "Havuz A".into());
-
-    let pool_a_fee_bps = std::env::var("POOL_A_FEE_BPS")
-        .unwrap_or_else(|_| "5".into())
-        .parse::<u32>()
-        .unwrap_or(5);
-
-    let pool_a_dex = match std::env::var("POOL_A_DEX")
-        .unwrap_or_else(|_| "uniswap".into())
-        .to_lowercase()
-        .as_str()
-    {
-        "aerodrome" => DexType::Aerodrome,
-        "pancakeswap" | "pancake" => DexType::PancakeSwapV3,
-        _ => DexType::UniswapV3,
-    };
-
-    let pool_b_addr = std::env::var("POOL_B_ADDRESS")
-        .map_err(|_| eyre::eyre!("POOL_B_ADDRESS .env dosyasında tanımlanmalıdır!"))?
-        .parse::<Address>()
-        .map_err(|e| eyre::eyre!("POOL_B_ADDRESS geçersiz adres: {}", e))?;
-
-    let pool_b_name = std::env::var("POOL_B_NAME")
-        .unwrap_or_else(|_| "Havuz B".into());
-
-    let pool_b_fee_bps = std::env::var("POOL_B_FEE_BPS")
-        .unwrap_or_else(|_| "100".into())
-        .parse::<u32>()
-        .unwrap_or(100);
-
-    let pool_b_dex = match std::env::var("POOL_B_DEX")
-        .unwrap_or_else(|_| "aerodrome".into())
-        .to_lowercase()
-        .as_str()
-    {
-        "uniswap" => DexType::UniswapV3,
-        "pancakeswap" | "pancake" => DexType::PancakeSwapV3,
-        _ => DexType::Aerodrome,
-    };
-
-    // Token sırası tespiti (Base Network: WETH=0x4200...0006 < USDC=0x8335...)
-    // WETH_IS_TOKEN0=true → token0=WETH(18), token1=USDC(6)
-    let weth_is_token0 = std::env::var("WETH_IS_TOKEN0")
-        .unwrap_or_else(|_| "true".into())
-        .to_lowercase()
-        .parse::<bool>()
-        .unwrap_or(true);
-
-    // Decimal bilgileri: .env'den oku (varsayılan: WETH=18, cbBTC=8)
-    let token0_decimals = std::env::var("TOKEN0_DECIMALS")
-        .unwrap_or_else(|_| "18".into())
-        .parse::<u8>()
-        .unwrap_or(18);
-    let token1_decimals = std::env::var("TOKEN1_DECIMALS")
-        .unwrap_or_else(|_| "8".into())
-        .parse::<u8>()
-        .unwrap_or(8);
-
-    // Tick spacing (.env'den oku, yoksa fee'ye göre varsayılan)
-    let pool_a_tick_spacing = std::env::var("POOL_A_TICK_SPACING")
-        .unwrap_or_else(|_| "10".into())
-        .parse::<i32>()
-        .unwrap_or(10);
-
-    let pool_b_tick_spacing = std::env::var("POOL_B_TICK_SPACING")
-        .unwrap_or_else(|_| "1".into())
-        .parse::<i32>()
-        .unwrap_or(1);
-
-    Ok(vec![
-        PoolConfig {
-            address: pool_a_addr,
-            name: pool_a_name,
-            fee_bps: pool_a_fee_bps,
-            fee_fraction: pool_a_fee_bps as f64 / 10_000.0,
-            token0_decimals,
-            token1_decimals,
-            dex: pool_a_dex,
-            token0_is_weth: weth_is_token0,
-            tick_spacing: pool_a_tick_spacing,
-        },
-        PoolConfig {
-            address: pool_b_addr,
-            name: pool_b_name,
-            fee_bps: pool_b_fee_bps,
-            fee_fraction: pool_b_fee_bps as f64 / 10_000.0,
-            token0_decimals,
-            token1_decimals,
-            dex: pool_b_dex,
-            token0_is_weth: weth_is_token0,
-            tick_spacing: pool_b_tick_spacing,
-        },
-    ])
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Arbitraj İstatistikleri

@@ -1,16 +1,27 @@
 // ============================================================================
-//  POOL DISCOVERY v10.0 — DexScreener API ile Dinamik Havuz Keşfi
+//  POOL DISCOVERY v11.0 — DexScreener API + Otonom Çift Eşleştirme Motoru
 //
-//  Özellikler:
-//  ✓ DexScreener API üzerinden Base ağı WETH çiftlerini tara
-//  ✓ Hacim ve likiditeye göre sırala → en iyi çapraz-DEX fırsatlarını bul
-//  ✓ TARGET_POOLS olarak .env'ye yaz (opsiyonel)
-//  ✓ CLI: --discover-pools ile çalıştırılır
+//  v11.0 Yenilikler:
+//  ✓ Token bazlı gruplayma (HashMap<(token0, token1), Vec<Pool>>)
+//  ✓ Çapraz-DEX arbitraj çift eşleştirme (aynı token çifti, farklı DEX)
+//  ✓ matched_pools.json yapılandırılmış çıktı (serde_json)
+//  ✓ build_runtime: JSON → PoolConfig + PairCombo dönüşümü
+//
+//  v10.0 (korunuyor):
+//  ✓ DexScreener API, komisyon filtresi (≤ %0.01), likidite filtresi ($50K+)
 // ============================================================================
 
 use eyre::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use colored::*;
+use std::collections::HashMap;
+use alloy::primitives::Address;
+
+use crate::types::{DexType, PoolConfig};
+
+// ─── Sabitler ───
+const BASE_WETH_LOWER: &str = "0x4200000000000000000000000000000000000006";
+const MATCHED_POOLS_PATH: &str = "matched_pools.json";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DexScreener API Yanıt Yapıları
@@ -35,7 +46,6 @@ struct DexPair {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct DexToken {
     address: String,
     symbol: String,
@@ -51,36 +61,117 @@ struct DexVolume {
     h24: Option<f64>,
 }
 
-/// Keşfedilen havuz bilgisi
+/// Keşfedilen havuz bilgisi (internal — sadece keşif aşamasında kullanılır)
 #[derive(Debug, Clone)]
-pub struct DiscoveredPool {
-    pub address: String,
-    pub dex: String,
-    pub base_symbol: String,
-    pub quote_symbol: String,
-    pub liquidity_usd: f64,
-    pub volume_24h: f64,
-    pub fee_tier: Option<f64>,
+struct DiscoveredPool {
+    address: String,
+    dex: String,
+    base_token_address: String,
+    base_symbol: String,
+    quote_token_address: String,
+    quote_symbol: String,
+    liquidity_usd: f64,
+    volume_24h: f64,
+    fee_tier: Option<f64>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Ana Keşif Fonksiyonu
+// matched_pools.json Yapıları
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Base ağında WETH çiftlerini DexScreener API üzerinden keşfet.
-///
-/// Filtreleme:
-///   - chainId = "base"
-///   - Minimum likidite: $50K
-///   - DEX: uniswap, aerodrome, pancakeswap vb.
-///   - Hacme göre sırala, ilk `max_results` tanesini döndür
-pub async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> {
-    // Base WETH adresi
-    const BASE_WETH: &str = "0x4200000000000000000000000000000000000006";
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenInfo {
+    pub address: String,
+    pub symbol: String,
+    pub decimals: u8,
+}
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatchedPoolEntry {
+    pub address: String,
+    pub dex_id: String,
+    pub fee_bps: u32,
+    pub tick_spacing: i32,
+    pub liquidity_usd: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatchedPair {
+    pub pair_name: String,
+    pub base_token: TokenInfo,
+    pub quote_token: TokenInfo,
+    pub weth_is_token0: bool,
+    pub pools: Vec<MatchedPoolEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatchedPoolsConfig {
+    pub version: String,
+    pub chain_id: u64,
+    pub updated_at: String,
+    pub matched_pairs: Vec<MatchedPair>,
+}
+
+/// Ana döngü için çift eşleştirme indeksleri
+pub struct PairCombo {
+    pub pair_name: String,
+    pub pool_a_idx: usize,
+    pub pool_b_idx: usize,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Yardımcı Fonksiyonlar
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn normalize_pair_key(addr_a: &str, addr_b: &str) -> (String, String) {
+    let a = addr_a.to_lowercase();
+    let b = addr_b.to_lowercase();
+    if a < b { (a, b) } else { (b, a) }
+}
+
+fn fee_tier_to_bps(fee_tier: Option<f64>) -> u32 {
+    fee_tier.map(|f| (f * 100.0).round() as u32).unwrap_or(0)
+}
+
+fn infer_tick_spacing(dex_id: &str, fee_bps: u32) -> i32 {
+    let dex_lower = dex_id.to_lowercase();
+    if dex_lower.contains("pancakeswap") || dex_lower.contains("pancake") {
+        match fee_bps { 1 => 1, 5 => 10, 25 => 50, 100 => 200, _ => 10 }
+    } else {
+        match fee_bps { 1 => 1, 5 => 10, 30 => 60, 100 => 200, _ => 10 }
+    }
+}
+
+fn infer_token_decimals(address: &str) -> u8 {
+    let lower = address.to_lowercase();
+    if lower.ends_with("0000000000000000000006") { 18 }
+    else if lower.contains("cbb7c0000ab88b473b1f5afd9ef808440eed33bf") { 8 }
+    else if lower.contains("833589fcd6edb6e08f4c7c32d4f71b54bda02913") { 6 }
+    else if lower.contains("d9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca") { 6 }
+    else if lower.contains("50c5725949a6f0c72e6c4a641f24049a917db0cb") { 18 }
+    else if lower.contains("2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22") { 18 }
+    else { 18 }
+}
+
+fn infer_dex_type(dex_id: &str) -> DexType {
+    let lower = dex_id.to_lowercase();
+    if lower.contains("pancakeswap") || lower.contains("pancake") {
+        DexType::PancakeSwapV3
+    } else if lower.contains("aerodrome") {
+        DexType::Aerodrome
+    } else {
+        DexType::UniswapV3
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DexScreener Keşif
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> {
     let url = format!(
         "https://api.dexscreener.com/latest/dex/tokens/{}",
-        BASE_WETH
+        BASE_WETH_LOWER
     );
 
     eprintln!("  {} DexScreener API sorgulanıyor...", "🔍".cyan());
@@ -121,7 +212,9 @@ pub async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPoo
         .map(|p| DiscoveredPool {
             address: p.pair_address,
             dex: p.dex_id,
+            base_token_address: p.base_token.address,
             base_symbol: p.base_token.symbol,
+            quote_token_address: p.quote_token.address,
             quote_symbol: p.quote_token.symbol,
             liquidity_usd: p.liquidity.as_ref().and_then(|l| l.usd).unwrap_or(0.0),
             volume_24h: p.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0),
@@ -141,137 +234,248 @@ pub async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPoo
     Ok(discovered)
 }
 
-/// Keşfedilen havuzları terminale yazdır ve TARGET_POOLS olarak .env'ye yaz.
+// ─────────────────────────────────────────────────────────────────────────────
+// Otonom Çift Eşleştirme
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Keşfedilen havuzları token çiftlerine göre grupla ve arbitraj eşleştirmesi yap
+fn match_arbitrage_pairs(pools: &[DiscoveredPool]) -> Vec<MatchedPair> {
+    let mut groups: HashMap<(String, String), Vec<&DiscoveredPool>> = HashMap::new();
+    for pool in pools {
+        let key = normalize_pair_key(&pool.base_token_address, &pool.quote_token_address);
+        groups.entry(key).or_default().push(pool);
+    }
+
+    let mut matched = Vec::new();
+
+    for ((token0_addr, token1_addr), group) in &groups {
+        // Her DEX'ten en yüksek likiditeli havuzu seç (O(N) tek geçiş)
+        let mut dex_best: HashMap<String, &DiscoveredPool> = HashMap::new();
+        for pool in group {
+            let dex_key = pool.dex.to_lowercase();
+            match dex_best.get(&dex_key) {
+                Some(existing) if existing.liquidity_usd >= pool.liquidity_usd => {}
+                _ => { dex_best.insert(dex_key, pool); }
+            }
+        }
+
+        // En az 2 farklı DEX gerekli
+        if dex_best.len() < 2 {
+            continue;
+        }
+
+        let mut selected: Vec<&DiscoveredPool> = dex_best.into_values().collect();
+        selected.sort_by(|a, b| {
+            b.liquidity_usd.partial_cmp(&a.liquidity_usd).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // WETH ve quote token belirleme
+        let is_t0_weth = token0_addr.eq_ignore_ascii_case(BASE_WETH_LOWER);
+        let (weth_addr, quote_addr) = if is_t0_weth {
+            (token0_addr.clone(), token1_addr.clone())
+        } else {
+            (token1_addr.clone(), token0_addr.clone())
+        };
+
+        // Sembolleri ilk havuzdan belirle
+        let ref_pool = selected[0];
+        let (weth_sym, quote_sym) = if ref_pool.base_token_address.to_lowercase() == BASE_WETH_LOWER {
+            (ref_pool.base_symbol.clone(), ref_pool.quote_symbol.clone())
+        } else {
+            (ref_pool.quote_symbol.clone(), ref_pool.base_symbol.clone())
+        };
+
+        let pair_name = format!("{}/{}", weth_sym, quote_sym);
+        matched.push(MatchedPair {
+            pair_name,
+            base_token: TokenInfo {
+                address: weth_addr,
+                symbol: weth_sym,
+                decimals: 18,
+            },
+            quote_token: TokenInfo {
+                address: quote_addr.clone(),
+                symbol: quote_sym,
+                decimals: infer_token_decimals(&quote_addr),
+            },
+            weth_is_token0: is_t0_weth,
+            pools: selected.iter().map(|p| {
+                let fee_bps = fee_tier_to_bps(p.fee_tier);
+                MatchedPoolEntry {
+                    address: p.address.clone(),
+                    dex_id: p.dex.clone(),
+                    fee_bps,
+                    tick_spacing: infer_tick_spacing(&p.dex, fee_bps),
+                    liquidity_usd: p.liquidity_usd,
+                }
+            }).collect(),
+        });
+    }
+
+    // Toplam likiditeye göre sırala (azalan)
+    matched.sort_by(|a, b| {
+        let liq_a: f64 = a.pools.iter().map(|p| p.liquidity_usd).sum();
+        let liq_b: f64 = b.pools.iter().map(|p| p.liquidity_usd).sum();
+        liq_b.partial_cmp(&liq_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    matched
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLI Keşif + JSON Çıktı
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Havuzları keşfet, eşleştir ve matched_pools.json olarak yaz
 pub async fn cli_discover_pools() -> Result<()> {
-    let pools = discover_base_pools(20).await?;
+    let pools = discover_base_pools(50).await?;
 
     if pools.is_empty() {
         eprintln!("  {} Hiç havuz bulunamadı.", "⚠️".yellow());
         return Ok(());
     }
 
-    println!();
-    println!(
-        "{}",
-        "  ╔═══════════════════════════════════════════════════════════════════╗"
-            .cyan()
-            .bold()
-    );
-    println!(
-        "{}",
-        "  ║       DexScreener — Base Ağı WETH Havuzları (Hacme Göre)         ║"
-            .cyan()
-            .bold()
-    );
-    println!(
-        "{}",
-        "  ╠═══════════════════════════════════════════════════════════════════╣"
-            .cyan()
-            .bold()
-    );
+    eprintln!("  {} {} havuz keşfedildi, eşleştirme yapılıyor...", "✅".green(), pools.len());
 
-    for (i, pool) in pools.iter().enumerate() {
-        let fee_str = pool
-            .fee_tier
-            .map(|f| format!("{:.2}%", f))
-            .unwrap_or_else(|| "N/A".into());
+    let matched_pairs = match_arbitrage_pairs(&pools);
 
-        println!(
-            "  {}  #{:2}  {} | {}/{} | Liq: ${:.0}K | Vol24h: ${:.0}K | Fee: {}",
-            "║".cyan(),
-            i + 1,
-            pool.dex.white().bold(),
-            pool.base_symbol,
-            pool.quote_symbol,
-            pool.liquidity_usd / 1000.0,
-            pool.volume_24h / 1000.0,
-            fee_str,
-        );
-        println!(
-            "  {}       {}",
-            "║".cyan(),
-            pool.address.dimmed()
-        );
+    if matched_pairs.is_empty() {
+        eprintln!("  {} Arbitraj çifti bulunamadı (en az 2 DEX'te aynı çift gerekli).", "⚠️".yellow());
+        return Ok(());
     }
 
-    println!(
-        "{}",
-        "  ╚═══════════════════════════════════════════════════════════════════╝"
-            .cyan()
-            .bold()
-    );
+    // Terminal çıktısı
+    println!();
+    println!("{}", "  ╔═══════════════════════════════════════════════════════════════════╗".cyan().bold());
+    println!("{}", "  ║   Otonom Çift Eşleştirme — Base Ağı Arbitraj Havuzları            ║".cyan().bold());
+    println!("{}", "  ╠═══════════════════════════════════════════════════════════════════╣".cyan().bold());
 
-    // TARGET_POOLS — virgülle ayrılmış adres listesi
-    let target_pools: Vec<&str> = pools.iter().map(|p| p.address.as_str()).collect();
-    let target_pools_str = target_pools.join(",");
-
-    // .env dosyasına yaz (varsa güncelle, yoksa ekle)
-    write_target_pools_to_env(&target_pools_str)?;
-
-    println!(
-        "\n  {} TARGET_POOLS .env'ye yazıldı ({} havuz)",
-        "✅".green(),
-        pools.len()
-    );
-
-    Ok(())
-}
-
-/// TARGET_POOLS değerini .env dosyasına yaz.
-/// Mevcut TARGET_POOLS satırı varsa güncelle, yoksa dosya sonuna ekle.
-fn write_target_pools_to_env(pools_csv: &str) -> Result<()> {
-    use std::io::Write;
-
-    let env_path = ".env";
-    let content = std::fs::read_to_string(env_path).unwrap_or_default();
-
-    let new_line = format!("TARGET_POOLS={}", pools_csv);
-    let updated = if content.contains("TARGET_POOLS=") {
-        // Mevcut satırı güncelle
-        let mut result = String::new();
-        for line in content.lines() {
-            if line.starts_with("TARGET_POOLS=") {
-                result.push_str(&new_line);
-            } else {
-                result.push_str(line);
-            }
-            result.push('\n');
+    for (i, pair) in matched_pairs.iter().enumerate() {
+        println!(
+            "  {}  #{} {} ({} havuz)",
+            "║".cyan(), i + 1,
+            pair.pair_name.white().bold(),
+            pair.pools.len(),
+        );
+        for pool in &pair.pools {
+            let fee_str = format!("{:.2}%", pool.fee_bps as f64 / 100.0);
+            println!(
+                "  {}    → {} | Fee: {} | Liq: ${:.0}K | {}",
+                "║".cyan(),
+                pool.dex_id.white(),
+                fee_str,
+                pool.liquidity_usd / 1000.0,
+                pool.address.dimmed(),
+            );
         }
-        result
-    } else {
-        // Sonuna ekle
-        let mut result = content;
-        if !result.ends_with('\n') && !result.is_empty() {
-            result.push('\n');
-        }
-        result.push_str(&new_line);
-        result.push('\n');
-        result
+    }
+
+    println!("{}", "  ╚═══════════════════════════════════════════════════════════════════╝".cyan().bold());
+
+    let config = MatchedPoolsConfig {
+        version: "11.0".into(),
+        chain_id: 8453,
+        updated_at: chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+        matched_pairs,
     };
 
-    let mut file = std::fs::File::create(env_path)
-        .map_err(|e| eyre::eyre!(".env yazma hatası: {}", e))?;
-    file.write_all(updated.as_bytes())
-        .map_err(|e| eyre::eyre!(".env yazma hatası: {}", e))?;
+    write_matched_pools_json(&config)?;
+
+    println!(
+        "\n  {} matched_pools.json yazıldı ({} çift, {} toplam havuz)",
+        "✅".green(),
+        config.matched_pairs.len(),
+        config.matched_pairs.iter().map(|p| p.pools.len()).sum::<usize>(),
+    );
 
     Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TARGET_POOLS Okuma — state_sync entegrasyonu
+// JSON I/O
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// .env'den TARGET_POOLS listesini oku (varsa).
-/// Format: TARGET_POOLS=0xaddr1,0xaddr2,...
-///
-/// state_sync::sync_all_pools() tarafından çağrılır — keşfedilen havuzların
-/// adresleri bu fonksiyonla alınıp ek havuzlar olarak takip edilebilir.
-#[allow(dead_code)]
-pub fn load_target_pools_from_env() -> Vec<String> {
-    std::env::var("TARGET_POOLS")
-        .unwrap_or_default()
-        .split(',')
-        .filter(|s| !s.is_empty() && s.starts_with("0x"))
-        .map(|s| s.trim().to_string())
-        .collect()
+fn write_matched_pools_json(config: &MatchedPoolsConfig) -> Result<()> {
+    let json = serde_json::to_string_pretty(config)
+        .map_err(|e| eyre::eyre!("JSON serileştirme hatası: {}", e))?;
+    std::fs::write(MATCHED_POOLS_PATH, json)
+        .map_err(|e| eyre::eyre!("matched_pools.json yazma hatası: {}", e))?;
+    Ok(())
+}
+
+/// matched_pools.json dosyasını yükle
+pub fn load_matched_pools() -> Result<MatchedPoolsConfig> {
+    let content = std::fs::read_to_string(MATCHED_POOLS_PATH)
+        .map_err(|e| eyre::eyre!("matched_pools.json okunamadı: {} — Önce `--discover-pools` çalıştırın", e))?;
+    let config: MatchedPoolsConfig = serde_json::from_str(&content)
+        .map_err(|e| eyre::eyre!("matched_pools.json parse hatası: {}", e))?;
+    Ok(config)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Runtime Dönüşümü — JSON → PoolConfig + PairCombo
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// matched_pools.json'dan runtime yapıları oluştur:
+///   - `Vec<PoolConfig>`: Tüm unique havuzların düz listesi (state_sync için)
+///   - `Vec<PairCombo>`: Her arbitraj çifti için havuz indeks çiftleri
+pub fn build_runtime(config: &MatchedPoolsConfig) -> Result<(Vec<PoolConfig>, Vec<PairCombo>)> {
+    let mut all_pools: Vec<PoolConfig> = Vec::new();
+    let mut pair_combos: Vec<PairCombo> = Vec::new();
+    let mut address_to_idx: HashMap<String, usize> = HashMap::new();
+
+    for pair in &config.matched_pairs {
+        let quote_token_address = pair.quote_token.address.parse::<Address>()
+            .map_err(|e| eyre::eyre!("Geçersiz quote token adresi '{}': {}", pair.quote_token.address, e))?;
+
+        let mut pair_indices: Vec<usize> = Vec::new();
+
+        for pool_entry in &pair.pools {
+            let addr_lower = pool_entry.address.to_lowercase();
+
+            let idx = if let Some(&existing_idx) = address_to_idx.get(&addr_lower) {
+                existing_idx
+            } else {
+                let address = pool_entry.address.parse::<Address>()
+                    .map_err(|e| eyre::eyre!("Geçersiz havuz adresi '{}': {}", pool_entry.address, e))?;
+
+                let pool_config = PoolConfig {
+                    address,
+                    name: format!("{}-{}", pool_entry.dex_id, pair.pair_name),
+                    fee_bps: pool_entry.fee_bps,
+                    fee_fraction: pool_entry.fee_bps as f64 / 10_000.0,
+                    token0_decimals: if pair.weth_is_token0 { 18 } else { pair.quote_token.decimals },
+                    token1_decimals: if pair.weth_is_token0 { pair.quote_token.decimals } else { 18 },
+                    dex: infer_dex_type(&pool_entry.dex_id),
+                    token0_is_weth: pair.weth_is_token0,
+                    tick_spacing: pool_entry.tick_spacing,
+                    quote_token_address,
+                };
+
+                let idx = all_pools.len();
+                all_pools.push(pool_config);
+                address_to_idx.insert(addr_lower, idx);
+                idx
+            };
+
+            pair_indices.push(idx);
+        }
+
+        // Her çift içindeki tüm 2-havuz kombinasyonlarını üret
+        for i in 0..pair_indices.len() {
+            for j in (i + 1)..pair_indices.len() {
+                pair_combos.push(PairCombo {
+                    pair_name: pair.pair_name.clone(),
+                    pool_a_idx: pair_indices[i],
+                    pool_b_idx: pair_indices[j],
+                });
+            }
+        }
+    }
+
+    if all_pools.is_empty() {
+        return Err(eyre::eyre!("matched_pools.json'da geçerli havuz bulunamadı"));
+    }
+
+    Ok((all_pools, pair_combos))
 }

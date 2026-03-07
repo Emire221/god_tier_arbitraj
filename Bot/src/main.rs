@@ -322,8 +322,7 @@ async fn main() -> Result<()> {
 
     // ═══ CLI: --discover-pools ile DexScreener havuz keşfi ═══
     if args.iter().any(|a| a == "--discover-pools") {
-        let rt = tokio::runtime::Handle::current();
-        return rt.block_on(pool_discovery::cli_discover_pools());
+        return pool_discovery::cli_discover_pools().await;
     }
 
     // Yapılandırmayı oku

@@ -197,6 +197,16 @@ async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> 
     let mut discovered: Vec<DiscoveredPool> = pairs
         .into_iter()
         .filter(|p| p.chain_id == "base")
+        // ── DEX Beyaz Listesi (Uniswap V3 ABI uyumlu) ──────────
+        // Sadece slot0() ABI'si Uniswap V3 referansıyla birebir uyumlu
+        // DEX'ler kabul edilir. Algebra V3 (quickswap), Aerodrome vb.
+        // farklı slot0 yapısı kullanır → state_sync revert → spike.
+        .filter(|p| {
+            let dex = p.dex_id.to_lowercase();
+            dex.contains("uniswap")
+                || dex.contains("pancakeswap")
+                || dex.contains("sushiswap")
+        })
         .filter(|p| {
             p.liquidity
                 .as_ref()
@@ -205,10 +215,7 @@ async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> 
                 >= 50_000.0
         })
         // Stratejik komisyon filtresi — sadece ≤%0.01 fee'li havuzlar geçer
-        .filter(|p| match p.fee_tier {
-            Some(fee) => fee <= 0.01,
-            None => !p.dex_id.eq_ignore_ascii_case("aerodrome"),
-        })
+        .filter(|p| p.fee_tier.map_or(true, |fee| fee <= 0.01))
         .map(|p| DiscoveredPool {
             address: p.pair_address,
             dex: p.dex_id,

@@ -562,13 +562,8 @@ pub struct BotConfig {
     /// Arbitraj kontrat adresi (opsiyonel)
     pub contract_address: Option<Address>,
     /// WETH token adresi (Base: 0x4200000000000000000000000000000000000006)
+    /// v12.0: Hardcoded — .env'den okunmaz, Base ağında sabittir.
     pub weth_address: Address,
-    /// Quote token adresi (v11.0: per-pair — geriye uyumluluk için saklanır)
-    #[allow(dead_code)]
-    pub quote_token_address: Address,
-    /// Quote token decimal sayısı (v11.0: per-pair — geriye uyumluluk için saklanır)
-    #[allow(dead_code)]
-    pub quote_token_decimals: u8,
     /// Tahmini gas maliyeti fallback (WETH cinsinden)
     pub gas_cost_fallback_weth: f64,
     /// Flash loan ücreti (basis points)
@@ -665,21 +660,11 @@ impl BotConfig {
             .filter(|addr| !addr.is_empty() && addr != "0xYourContractAddress")
             .and_then(|addr| addr.parse::<Address>().ok());
 
-        // ── Token Adresleri ───────────────────────────────────────
-        let weth_address = std::env::var("WETH_ADDRESS")
-            .unwrap_or_else(|_| "0x4200000000000000000000000000000000000006".into())
-            .parse::<Address>()
-            .unwrap_or_else(|_| "0x4200000000000000000000000000000000000006".parse::<Address>().unwrap());
-
-        let quote_token_address = std::env::var("QUOTE_TOKEN_ADDRESS")
-            .unwrap_or_else(|_| "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf".into())
-            .parse::<Address>()
-            .unwrap_or_else(|_| "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf".parse::<Address>().unwrap());
-
-        let quote_token_decimals = std::env::var("QUOTE_TOKEN_DECIMALS")
-            .unwrap_or_else(|_| "8".into())
-            .parse::<u8>()
-            .unwrap_or(8);
+        // ── WETH Adresi (Base sabit) ─────────────────────────────
+        // v12.0: Legacy env var'lar (WETH_ADDRESS, QUOTE_TOKEN_*,
+        // WETH_IS_TOKEN0, TOKEN0_DECIMALS, TOKEN1_DECIMALS) görmezden geliniyor.
+        // Havuz bazlı token bilgileri matched_pools.json'dan geliyor.
+        let weth_address: Address = address!("4200000000000000000000000000000000000006");
 
         let gas_cost_fallback_weth = Self::parse_env_f64("GAS_COST_FALLBACK_WETH", 0.00005);
         let flash_loan_fee_bps = Self::parse_env_f64("FLASH_LOAN_FEE_BPS", 5.0);
@@ -778,8 +763,6 @@ impl BotConfig {
             private_key,
             contract_address,
             weth_address,
-            quote_token_address,
-            quote_token_decimals,
             gas_cost_fallback_weth,
             flash_loan_fee_bps,
             min_net_profit_weth,

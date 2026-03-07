@@ -309,13 +309,127 @@ fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GÖREV 3: Kendi Kendini Onaran .env Şablonu — Fail-Safe Generator
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// .env dosyası yoksa standart HFT altyapı şablonunu diske yazar ve
+/// kullanıcıya RPC URL'lerini girmesini söyleyip zarifçe (graceful) kapanır.
+fn generate_default_env_and_exit() -> ! {
+    let template = r#"# ═══════════════════════════════════════════════════════════════════════════════
+#  Kuantum Beyin III v9.0 — Otomatik Oluşturulan .env Şablonu
+#
+#  Bu dosya bot tarafından otomatik oluşturulmuştur.
+#  Lütfen aşağıdaki RPC URL'lerini kendi Alchemy/Infura/QuickNode
+#  bilgilerinizle doldurun ve botu yeniden başlatın.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── RPC Bağlantıları (ZORUNLU — Alchemy / Infura / QuickNode) ───
+RPC_WSS_URL=
+RPC_HTTP_URL=
+RPC_WSS_URL_BACKUP=
+RPC_WSS_URL_2=
+RPC_WSS_URL_3=
+RPC_IPC_PATH=
+TRANSPORT_MODE=auto
+
+# ─── Zincir Ayarı (Base Mainnet) ───
+CHAIN_ID=8453
+
+# ─── Cüzdan ve Kontrat ───
+PRIVATE_KEY=
+KEYSTORE_PATH=
+ARBITRAGE_CONTRACT_ADDRESS=
+
+# ─── MEV Koruması (opsiyonel) ───
+PRIVATE_RPC_URL=
+
+# ─── Maliyet ve Strateji (WETH cinsinden) ───
+GAS_COST_FALLBACK_WETH=0.00005
+FLASH_LOAN_FEE_BPS=0.0
+MIN_NET_PROFIT_WETH=0.0001
+MAX_TRADE_SIZE_WETH=50.0
+MAX_STALENESS_MS=2000
+STATS_INTERVAL=10
+MAX_RETRIES=0
+
+# ─── TickBitmap Derinlik Ayarları ───
+TICK_BITMAP_RANGE=10
+TICK_BITMAP_MAX_AGE_BLOCKS=5
+
+# ─── Gölge Modu (Shadow Mode) ───
+EXECUTION_ENABLED=false
+
+# ─── RPC Failover & Gecikme Ayarları ───
+LATENCY_SPIKE_THRESHOLD_MS=200
+
+# ─── MEV & TX Ayarları ───
+DEADLINE_BLOCKS=2
+BRIBE_PCT=0.25
+CIRCUIT_BREAKER_THRESHOLD=3
+
+# ─── Admin (opsiyonel) ───
+ADMIN_ADDRESS=
+"#;
+
+    match std::fs::write(".env", template) {
+        Ok(_) => {
+            println!();
+            println!(
+                "{}",
+                "╔══════════════════════════════════════════════════════════════════╗"
+            );
+            println!(
+                "{}",
+                "║  .env dosyası bulunamadı — varsayılan şablon oluşturuldu.       ║"
+            );
+            println!(
+                "{}",
+                "║                                                                  ║"
+            );
+            println!(
+                "{}",
+                "║  Lütfen .env dosyasını açın,                                     ║"
+            );
+            println!(
+                "{}",
+                "║  RPC_WSS_URL ve RPC_HTTP_URL alanlarını doldurun                 ║"
+            );
+            println!(
+                "{}",
+                "║  ve botu tekrar başlatın.                                        ║"
+            );
+            println!(
+                "{}",
+                "╚══════════════════════════════════════════════════════════════════╝"
+            );
+            println!();
+        }
+        Err(e) => {
+            eprintln!("  HATA: .env şablonu yazılamadı: {}", e);
+        }
+    }
+
+    std::process::exit(0)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ANA GİRİŞ NOKTASI — Yeniden Bağlanma Döngüsü
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // .env dosyasını yükle
-    dotenvy::dotenv().ok();
+    // ═══ GÖREV 3: Kendi Kendini Onaran .env Şablonu ═══
+    // .env dosyası yoksa standart HFT şablonu oluştur ve zarifçe kapat.
+    if let Err(_) = dotenvy::dotenv() {
+        if !std::path::Path::new(".env").exists() {
+            generate_default_env_and_exit();
+        }
+        // .env var ama parse hatası olabilir — devam et, env::var fallback'leri yeterli
+        eprintln!(
+            "  {} .env dosyası okundu ama bazı satırlar parse edilemedi — varsayılanlar kullanılacak.",
+            "⚠️".yellow()
+        );
+    }
 
     // ═══ CLI: --encrypt-key argümanı ile keystore oluşturma ═══
     let args: Vec<String> = std::env::args().collect();
@@ -359,16 +473,23 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Havuz yapılandırmalarını matched_pools.json'dan yükle
-    let (pools, pair_combos) = match pool_discovery::load_matched_pools() {
-        Ok(cfg) => pool_discovery::build_runtime(&cfg)?,
-        Err(_) => {
-            eprintln!("  {} matched_pools.json bulunamadı — otomatik havuz keşfi başlatılıyor...", "🔍".cyan());
-            pool_discovery::cli_discover_pools().await?;
-            let cfg = pool_discovery::load_matched_pools()?;
-            pool_discovery::build_runtime(&cfg)?
-        }
+    // ═══ GÖREV 2: Auto-Bootstrap — matched_pools.json yoksa veya boşsa otomatik keşif ═══
+    let needs_discovery = match std::fs::metadata("matched_pools.json") {
+        Ok(meta) => meta.len() == 0, // Dosya var ama boş
+        Err(_) => true,               // Dosya yok
     };
+
+    if needs_discovery {
+        eprintln!(
+            "  {} matched_pools.json {} — otomatik havuz keşfi başlatılıyor...",
+            "🔍".cyan(),
+            if std::path::Path::new("matched_pools.json").exists() { "boş" } else { "bulunamadı" }
+        );
+        pool_discovery::cli_discover_pools().await?;
+    }
+
+    let matched_cfg = pool_discovery::load_matched_pools()?;
+    let (pools, pair_combos) = pool_discovery::build_runtime(&matched_cfg)?;
 
     // ═══ v11.0: TOKEN WHITELIST DOĞRULAMA (tüm çiftler) ═══
     {

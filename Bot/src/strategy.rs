@@ -1061,7 +1061,6 @@ mod gas_spike_tests {
     const POOL_A_ADDR: Address = address!("d0b53D9277642d899DF5C87A3966A349A798F224");
     const POOL_B_ADDR: Address = address!("cDAC0d6c6C59727a65F871236188350531885C43");
     const WETH_ADDR: Address = address!("4200000000000000000000000000000000000006");
-    const QUOTE_ADDR: Address = address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf");
 
     fn make_test_config(min_profit: f64, gas_cost_fallback: f64) -> BotConfig {
         BotConfig {
@@ -1072,8 +1071,6 @@ mod gas_spike_tests {
             private_key: None,
             contract_address: None,
             weth_address: WETH_ADDR,
-            quote_token_address: QUOTE_ADDR,
-            quote_token_decimals: 8,
             gas_cost_fallback_weth: gas_cost_fallback,
             flash_loan_fee_bps: 5.0,
             min_net_profit_weth: min_profit,

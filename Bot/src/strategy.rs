@@ -162,6 +162,7 @@ pub fn check_arbitrage_opportunity(
             sell_state.tick,
             pools[sell_idx].token0_is_weth,
             sell_bitmap,
+            pools[sell_idx].tick_spacing,
         );
         let buy_hard_cap = math::exact::hard_liquidity_cap_weth(
             buy_state.sqrt_price_x96,
@@ -169,6 +170,7 @@ pub fn check_arbitrage_opportunity(
             buy_state.tick,
             pools[buy_idx].token0_is_weth,
             buy_bitmap,
+            pools[buy_idx].tick_spacing,
         );
         let effective_cap = sell_hard_cap.min(buy_hard_cap);
 

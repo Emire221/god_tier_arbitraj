@@ -1072,6 +1072,8 @@ pub fn max_safe_swap_amount(
     sqrt_price_f64: f64,
     liquidity: f64,
     token0_is_weth: bool,
+    current_tick: i32,
+    tick_spacing: i32,
 ) -> f64 {
     if sqrt_price_f64 <= 0.0 || liquidity <= 0.0
        || sqrt_price_f64.is_nan() || sqrt_price_f64.is_infinite()
@@ -1090,7 +1092,7 @@ pub fn max_safe_swap_amount(
     } else {
         liquidity as u128
     };
-    let result = exact::max_safe_swap_amount_u256(sqrt_price_u256, liquidity_u128, token0_is_weth);
+    let result = exact::max_safe_swap_amount_u256(sqrt_price_u256, liquidity_u128, token0_is_weth, current_tick, tick_spacing);
     sanitize_f64(result)
 }
 
@@ -1367,6 +1369,7 @@ pub fn find_optimal_amount_with_bitmap(
         sell_pool.tick,
         token0_is_weth,
         sell_bitmap,
+        sell_tick_spacing,
     );
     let hard_cap_buy = exact::hard_liquidity_cap_weth(
         buy_pool.sqrt_price_x96,
@@ -1374,14 +1377,17 @@ pub fn find_optimal_amount_with_bitmap(
         buy_pool.tick,
         token0_is_weth,
         buy_bitmap,
+        buy_tick_spacing,
     );
 
     // Eski single-tick cap (geriye uyumluluk + karşılaştırma)
     let liq_cap_sell = exact::max_safe_swap_amount_u256(
         sell_pool.sqrt_price_x96, sell_pool.liquidity, token0_is_weth,
+        sell_pool.tick, sell_tick_spacing,
     );
     let liq_cap_buy = exact::max_safe_swap_amount_u256(
         buy_pool.sqrt_price_x96, buy_pool.liquidity, token0_is_weth,
+        buy_pool.tick, buy_tick_spacing,
     );
 
     // Minimum(hard_cap, single_tick_cap) her iki havuz için
@@ -1669,6 +1675,7 @@ mod tests {
         let pool = make_test_pool(2000.0);
         let max_weth = max_safe_swap_amount(
             pool.sqrt_price_f64, pool.liquidity_f64, true,
+            pool.tick, 10,
         );
         assert!(
             max_weth > 1.0 && max_weth < 1_000_000.0,
@@ -1982,10 +1989,14 @@ mod tests {
             liquidity in arb_liquidity(),
             token0_is_weth in proptest::bool::ANY,
         ) {
+            // Derive a reasonable tick from sqrtPrice for test
+            let tick = sqrt_price_x96_to_tick(sqrt_price_x96);
             let sonuc = max_safe_swap_amount(
                 sqrt_price_x96,
                 liquidity,
                 token0_is_weth,
+                tick,
+                10,
             );
             prop_assert!(!sonuc.is_nan(),
                 "max_safe_swap_amount NaN! sqrtP={}, liq={}", sqrt_price_x96, liquidity);
@@ -2768,30 +2779,63 @@ pub mod exact {
     /// Uniswap V3 SqrtPriceMath formülleri ile:
     ///   token0: capacity = L × Q96 / sqrtPriceX96
     ///   token1: capacity = L × sqrtPriceX96 / Q96
-    /// Güvenli sınır = capacity × 15 / 100, sonuç WETH olarak / 1e18
+    ///
+    /// v11.1: Artık %15 sezgisel hesap YOK.  Bunun yerine mevcut fiyattan
+    ///        bir sonraki tick_spacing sınırına kadar absorbe edilebilecek
+    ///        tam WETH miktarı hesaplanır (get_amount0_delta / get_amount1_delta).
+    ///        Böylece 6 vs 18 decimal asimetrik havuzlarda milyarlık hayalet
+    ///        likidite sorunu ortadan kalkar.
     pub fn max_safe_swap_amount_u256(
         sqrt_price_x96: U256,
         liquidity: u128,
         token0_is_weth: bool,
+        current_tick: i32,
+        tick_spacing: i32,
     ) -> f64 {
-        if sqrt_price_x96.is_zero() || liquidity == 0 {
+        if sqrt_price_x96.is_zero() || liquidity == 0 || tick_spacing == 0 {
             return 0.0;
         }
-        let liq = U256::from(liquidity);
-        let usage_num = U256::from(15u64);
-        let usage_den = U256::from(100u64);
 
-        if token0_is_weth {
-            // token0(WETH) kapasitesi: L × Q96 / sqrtPriceX96 → raw token0 wei
-            let capacity_raw = mul_div(liq, Q96, sqrt_price_x96);
-            let safe_raw = mul_div(capacity_raw, usage_num, usage_den);
-            u256_to_f64(safe_raw) / 1e18
+        // Tick'i Uniswap V3 geçerli aralığa kısıtla
+        const MIN_TICK: i32 = -887272;
+        const MAX_TICK: i32 = 887272;
+        let clamped_tick = current_tick.clamp(MIN_TICK, MAX_TICK);
+
+        // Mevcut tick aralığının alt ve üst sınırlarını bul
+        let lower_tick = clamped_tick.div_euclid(tick_spacing) * tick_spacing;
+        let upper_tick = lower_tick + tick_spacing;
+
+        let capacity_raw = if token0_is_weth {
+            // WETH = token0 → swap yönü zeroForOne → fiyat DÜŞER (alt sınıra)
+            let sqrt_lower = get_sqrt_ratio_at_tick(lower_tick.clamp(MIN_TICK, MAX_TICK));
+            // Fiyat tam sınırdaysa bir tick_spacing daha aşağı git
+            let target_tick = if sqrt_lower >= sqrt_price_x96 {
+                (lower_tick - tick_spacing).clamp(MIN_TICK, MAX_TICK)
+            } else {
+                lower_tick
+            };
+            let sqrt_target = get_sqrt_ratio_at_tick(target_tick);
+            if sqrt_target >= sqrt_price_x96 {
+                return 0.0;
+            }
+            get_amount0_delta(sqrt_target, sqrt_price_x96, liquidity, false)
         } else {
-            // token1(WETH) kapasitesi: L × sqrtPriceX96 / Q96 → raw token1 wei
-            let capacity_raw = mul_div(liq, sqrt_price_x96, Q96);
-            let safe_raw = mul_div(capacity_raw, usage_num, usage_den);
-            u256_to_f64(safe_raw) / 1e18
-        }
+            // WETH = token1 → swap yönü oneForZero → fiyat YUKARI (üst sınıra)
+            let sqrt_upper = get_sqrt_ratio_at_tick(upper_tick.clamp(MIN_TICK, MAX_TICK));
+            // Fiyat tam sınırdaysa bir tick_spacing daha yukarı git
+            let target_tick = if sqrt_upper <= sqrt_price_x96 {
+                (upper_tick + tick_spacing).clamp(MIN_TICK, MAX_TICK)
+            } else {
+                upper_tick.clamp(MIN_TICK, MAX_TICK)
+            };
+            let sqrt_target = get_sqrt_ratio_at_tick(target_tick);
+            if sqrt_target <= sqrt_price_x96 {
+                return 0.0;
+            }
+            get_amount1_delta(sqrt_price_x96, sqrt_target, liquidity, false)
+        };
+
+        u256_to_f64(capacity_raw) / 1e18
     }
 
     /// Hard Liquidity Cap — TickBitmap'ten gerçek mevcut likiditeyi hesapla.
@@ -2818,11 +2862,12 @@ pub mod exact {
         current_tick: i32,
         token0_is_weth: bool,
         bitmap: Option<&TickBitmapData>,
+        tick_spacing: i32,
     ) -> f64 {
         // Bitmap yoksa single-tick fallback
         let bitmap = match bitmap {
             Some(bm) if !bm.ticks.is_empty() => bm,
-            _ => return max_safe_swap_amount_u256(sqrt_price_x96, liquidity, token0_is_weth),
+            _ => return max_safe_swap_amount_u256(sqrt_price_x96, liquidity, token0_is_weth, current_tick, tick_spacing),
         };
 
         if sqrt_price_x96.is_zero() || liquidity == 0 {
@@ -2903,7 +2948,7 @@ pub mod exact {
 
         // Minimum: single-tick fallback ile karşılaştır, büyük olanı al
         // (bitmap'te çok az tick varsa fallback daha iyi olabilir)
-        let single_tick_cap = max_safe_swap_amount_u256(sqrt_price_x96, liquidity, token0_is_weth);
+        let single_tick_cap = max_safe_swap_amount_u256(sqrt_price_x96, liquidity, token0_is_weth, current_tick, tick_spacing);
 
         cap_weth.max(single_tick_cap)
     }

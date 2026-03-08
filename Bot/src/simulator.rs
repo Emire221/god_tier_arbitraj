@@ -408,6 +408,7 @@ impl SimulationEngine {
         // Güvenli maksimum swap miktarı (U256 tabanlı)
         let max_safe = math::exact::max_safe_swap_amount_u256(
             state.sqrt_price_x96, state.liquidity, config.token0_is_weth,
+            current_tick, config.tick_spacing,
         );
 
         // TickBitmap referansı al

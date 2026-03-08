@@ -134,18 +134,25 @@ fn print_banner(config: &BotConfig) {
     println!();
 }
 
-fn print_pool_header(pools: &[PoolConfig]) {
+fn print_pool_header(pools: &[PoolConfig], states: &[SharedPoolState]) {
     println!("{}", "  ┌──────────────────────────────────────────────────────────────┐".dimmed());
     println!("  {} {}", "│".dimmed(), "Gözetlenen Havuzlar:".white().bold());
     for (i, p) in pools.iter().enumerate() {
         let icon = if i == 0 { "🔵" } else { "🟣" };
+        let fee_display = if i < states.len() {
+            states[i].read().live_fee_bps
+                .map(|b| b as f64 / 100.0)
+                .unwrap_or(p.fee_bps as f64 / 100.0)
+        } else {
+            p.fee_bps as f64 / 100.0
+        };
         println!(
             "  {}   {} {} ({} — Ücret: %{:.2})",
             "│".dimmed(),
             icon,
             p.name,
             p.dex,
-            p.fee_bps as f64 / 100.0
+            fee_display
         );
         println!("  {}     {}", "│".dimmed(), format!("{}", p.address).dimmed());
     }
@@ -232,7 +239,7 @@ fn print_spread_info(pools: &[PoolConfig], states: &[SharedPoolState]) {
 
 fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools: &[PoolConfig], pair_combos: &[pool_discovery::PairCombo]) {
     println!();
-    println!("{}", "  ┌───── OTURUM İSTATİSTİKLERİ (v11.0) ─────────────────────────┐".yellow());
+    println!("{}", "  ┌───── OTURUM İSTATİSTİKLERİ (v16.2) ─────────────────────────┐".yellow());
     println!("  {}  Çalışma Süresi       : {}", "│".yellow(), stats.uptime_str().white().bold());
     println!("  {}  İşlenen Blok         : {}", "│".yellow(), format!("{}", stats.total_blocks_processed).white());
     println!("  {}  Tespit Edilen Fırsat  : {}", "│".yellow(), format!("{}", stats.total_opportunities).white());
@@ -264,8 +271,20 @@ fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools
     let mut min_total_fee_pct = f64::MAX;
     for combo in pair_combos {
         if combo.pool_a_idx < pools.len() && combo.pool_b_idx < pools.len() {
-            let fee_a = pools[combo.pool_a_idx].fee_fraction;
-            let fee_b = pools[combo.pool_b_idx].fee_fraction;
+            let fee_a = if combo.pool_a_idx < states.len() {
+                states[combo.pool_a_idx].read().live_fee_bps
+                    .map(|b| b as f64 / 10_000.0)
+                    .unwrap_or(pools[combo.pool_a_idx].fee_fraction)
+            } else {
+                pools[combo.pool_a_idx].fee_fraction
+            };
+            let fee_b = if combo.pool_b_idx < states.len() {
+                states[combo.pool_b_idx].read().live_fee_bps
+                    .map(|b| b as f64 / 10_000.0)
+                    .unwrap_or(pools[combo.pool_b_idx].fee_fraction)
+            } else {
+                pools[combo.pool_b_idx].fee_fraction
+            };
             let total = (fee_a + fee_b) * 100.0;
             if total < min_total_fee_pct { min_total_fee_pct = total; }
             println!("  {}  {} : {:.2}% + {:.2}% = {:.2}%",
@@ -533,7 +552,6 @@ async fn main() -> Result<()> {
 
     // Banner göster
     print_banner(&config);
-    print_pool_header(&pools);
 
     // Yeniden bağlanma döngüsü
     let mut retry_count: u32 = 0;
@@ -703,13 +721,18 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
         match result {
             Ok(_) => {
                 let state = states[i].read();
+                let fee_info = match state.live_fee_bps {
+                    Some(bps) => format!("Fee: {}bps ({:.2}%)", bps, bps as f64 / 100.0),
+                    None => format!("Fee: N/A (config: {}bps)", pools[i].fee_bps),
+                };
                 println!(
-                    "  {}   {} → {:.6} Q | Tick: {} | Likidite: {:.2e}",
+                    "  {}   {} → {:.6} Q | Tick: {} | Likidite: {:.2e} | {}",
                     "✅".green(),
                     pools[i].name,
                     state.eth_price_usd,
                     state.tick,
                     state.liquidity_f64,
+                    fee_info,
                 );
             }
             Err(e) => println!("  {}   {} state hatası: {}", "❌".red(), pools[i].name, e),
@@ -743,6 +766,9 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
         }
     }
     println!("  {} TickBitmap toplam süre: {}ms", "🗺️".cyan(), bitmap_ms);
+
+    // State sync tamamlandı — havuz başlığını canlı fee'lerle göster
+    print_pool_header(pools, &states);
 
     // ══════════════ REVM SİMÜLASYON MOTORU ══════════════
     let mut sim_engine = SimulationEngine::new();

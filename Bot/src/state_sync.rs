@@ -231,7 +231,7 @@ pub async fn sync_pool_state<T: Transport + Clone, P: Provider<T, Ethereum> + Sy
                 .map_err(|e| eyre::eyre!("[{}] slot0 okuma hatası (V3/7-alan/uint8): {}", pool_config.name, e))?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[{}] liquidity okuma hatası: {}", pool_config.name, e))?;
-            let fee_bps = fee_result.ok().map(|f| f._0 / 100); // uint24 pips → bps (3000 → 30)
+            let fee_bps: Option<u32> = fee_result.ok().map(|f| f._0 / 100);
             (slot0.sqrtPriceX96, slot0.tick, liq._0, fee_bps)
         }
         DexType::PancakeSwapV3 => {
@@ -252,7 +252,7 @@ pub async fn sync_pool_state<T: Transport + Clone, P: Provider<T, Ethereum> + Sy
                 ))?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[{}] liquidity okuma hatası: {}", pool_config.name, e))?;
-            let fee_bps = fee_result.ok().map(|f| f._0 / 100);
+            let fee_bps: Option<u32> = fee_result.ok().map(|f| f._0 / 100);
             (slot0.sqrtPriceX96, slot0.tick, liq._0, fee_bps)
         }
         DexType::Aerodrome => {
@@ -273,7 +273,7 @@ pub async fn sync_pool_state<T: Transport + Clone, P: Provider<T, Ethereum> + Sy
                 ))?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[{}] liquidity okuma hatası: {}", pool_config.name, e))?;
-            let fee_bps = fee_result.ok().map(|f| f._0 / 100);
+            let fee_bps: Option<u32> = fee_result.ok().map(|f| f._0 / 100);
             (slot0.sqrtPriceX96, slot0.tick, liq._0, fee_bps)
         }
     };

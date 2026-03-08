@@ -1390,9 +1390,13 @@ pub fn find_optimal_amount_with_bitmap(
         buy_pool.tick, buy_tick_spacing,
     );
 
-    // Minimum(hard_cap, single_tick_cap) her iki havuz için
-    let sell_cap = hard_cap_sell.min(liq_cap_sell.max(0.001) * 2.0).max(0.001);
-    let buy_cap = hard_cap_buy.min(liq_cap_buy.max(0.001) * 2.0).max(0.001);
+    // v16.0: Hard cap ve single-tick cap'in minimumunu al.
+    // Eski: `* 2.0` çarpanı single-tick kapasiteyi yapay olarak şişiriyor
+    // ve NR'nin havuzda olmayan likiditeyi hedeflemesine yol açıyordu.
+    // Yeni: Her iki metriğin minimumunu al, %99.9 güvenlik marjı zaten
+    // hard_liquidity_cap_weth içinde uygulanıyor.
+    let sell_cap = hard_cap_sell.min(liq_cap_sell.max(0.001)).max(0.001);
+    let buy_cap = hard_cap_buy.min(liq_cap_buy.max(0.001)).max(0.001);
     let effective_max = max_amount_weth
         .min(sell_cap)
         .min(buy_cap);
@@ -1487,6 +1491,12 @@ pub fn find_optimal_amount_with_bitmap(
         x = x_new;
     }
 
+    // v16.0: NR yakınsama sonrası nihai güvenlik tavanı.
+    // NR iterasyonları sırasında clamp uygulanıyor ama yakınsama sonrası
+    // son bir kez daha effective_max ile sınırla — havuz kapasitesinin
+    // %99.9'unu (slippage payı) ASLA aşamaz.
+    x = x.clamp(min_amount, effective_max);
+
     let final_profit = compute_arbitrage_profit_with_bitmap(
         x, sell_pool, sell_fee, buy_pool, buy_fee,
         gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
@@ -1538,6 +1548,7 @@ mod tests {
             is_initialized: true,
             bytecode: None,
             tick_bitmap: None,
+            live_fee_bps: None,
         }
     }
 
@@ -2950,7 +2961,11 @@ pub mod exact {
         // (bitmap'te çok az tick varsa fallback daha iyi olabilir)
         let single_tick_cap = max_safe_swap_amount_u256(sqrt_price_x96, liquidity, token0_is_weth, current_tick, tick_spacing);
 
-        cap_weth.max(single_tick_cap)
+        // v16.0: %99.9 güvenlik marjı — slippage payı bırak.
+        // Havuz kapasitesinin tam sınırında işlem yapmak tick-çapraz
+        // hatalarına ve REVM revert'lerine yol açar.
+        let raw_cap = cap_weth.max(single_tick_cap);
+        raw_cap * 0.999
     }
 
     // ── Test ─────────────────────────────────────────────────────────────────

@@ -284,8 +284,16 @@ contract ArbitrajBotu {
             tstore(0x04, receivedToken)  // Slot 4: Alınan/input token adresi
         }
 
-        // ── 5. BAKİYE KONTROLÜ — ÖNCE ───────────────────────────────────
-        uint256 balBefore = IERC20(owedToken).balanceOf(address(this));
+        // ── 5. BAKİYE KONTROLÜ — ÖNCE (Assembly — SLOAD eliminasyonu) ────
+        uint256 balBefore;
+        assembly {
+            // balanceOf(address) selector = 0x70a08231
+            mstore(0x00, 0x70a0823100000000000000000000000000000000000000000000000000000000)
+            mstore(0x04, address())
+            let ok := staticcall(gas(), owedToken, 0x00, 0x24, 0x00, 0x20)
+            if iszero(ok) { revert(0, 0) }
+            balBefore := mload(0x00)
+        }
 
         // ── 6. FLASH SWAP TETİKLE ────────────────────────────────────────
         //    UniV3 flash swap: token'lar ÖNCE gönderilir,
@@ -303,8 +311,15 @@ contract ArbitrajBotu {
             hex"01"              // data: ≥1 byte → callback tetiklenir (TLOAD kullanılır)
         );
 
-        // ── 7. BAKİYE KONTROLÜ — SONRA ──────────────────────────────────
-        uint256 balAfter = IERC20(owedToken).balanceOf(address(this));
+        // ── 7. BAKİYE KONTROLÜ — SONRA (Assembly — SLOAD eliminasyonu) ───
+        uint256 balAfter;
+        assembly {
+            mstore(0x00, 0x70a0823100000000000000000000000000000000000000000000000000000000)
+            mstore(0x04, address())
+            let ok := staticcall(gas(), owedToken, 0x00, 0x24, 0x00, 0x20)
+            if iszero(ok) { revert(0, 0) }
+            balAfter := mload(0x00)
+        }
 
         // ── 8. SANDVİÇ KORUMASI — İki Aşamalı Doğrulama ────────────────
         //    Aşama 1: Kâr var mı? (bakiye artmış olmalı)
@@ -474,7 +489,14 @@ contract ArbitrajBotu {
     /// @dev Sadece admin (soğuk cüzdan/multisig) çağırabilir
     function withdrawToken(address token) external {
         if (msg.sender != admin) revert Unauthorized();
-        uint256 bal = IERC20(token).balanceOf(address(this));
+        uint256 bal;
+        assembly {
+            mstore(0x00, 0x70a0823100000000000000000000000000000000000000000000000000000000)
+            mstore(0x04, address())
+            let ok := staticcall(gas(), token, 0x00, 0x24, 0x00, 0x20)
+            if iszero(ok) { revert(0, 0) }
+            bal := mload(0x00)
+        }
         if (bal == 0) revert ZeroAmount();
         _safeTransfer(token, admin, bal);
         emit EmergencyTokenWithdraw(token, bal, admin);
@@ -495,24 +517,43 @@ contract ArbitrajBotu {
     //  VIEW — Bakiye Sorgulama
     // ═════════════════════════════════════════════════════════════════════════
 
-    /// @notice Kontrat'ın belirli bir token bakiyesini döndür
-    function getBalance(address token) external view returns (uint256) {
-        return IERC20(token).balanceOf(address(this));
+    /// @notice Kontrat'ın belirli bir token bakiyesini döndür (assembly optimized)
+    function getBalance(address token) external view returns (uint256 bal) {
+        assembly {
+            mstore(0x00, 0x70a0823100000000000000000000000000000000000000000000000000000000)
+            mstore(0x04, address())
+            let ok := staticcall(gas(), token, 0x00, 0x24, 0x00, 0x20)
+            if iszero(ok) { revert(0, 0) }
+            bal := mload(0x00)
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════
     //  INTERNAL — Güvenli ERC20 Transfer (Non-Standard Token Desteği)
     // ═════════════════════════════════════════════════════════════════════════
 
-    /// @dev Low-level call ile ERC20 transfer. USDT gibi bool dönmeyen
-    ///      token'ları da destekler. Başarısız olursa revert.
+    /// @dev Assembly ERC20 transfer — abi.encodeWithSelector eliminasyonu.
+    ///      USDT gibi bool dönmeyen token'ları da destekler.
+    ///      ~200 gas tasarrufu (bellek genişleme + ABI encoding overhead eliminasyonu).
     function _safeTransfer(address token, address to, uint256 amt) internal {
-        (bool ok, bytes memory ret) = token.call(
-            abi.encodeWithSelector(IERC20.transfer.selector, to, amt)
-        );
-        if (!ok || (ret.length > 0 && !abi.decode(ret, (bool)))) {
-            revert TransferFailed();
+        bool ok;
+        assembly {
+            // transfer(address,uint256) selector = 0xa9059cbb
+            let ptr := mload(0x40) // free memory pointer
+            mstore(ptr,        0xa9059cbb00000000000000000000000000000000000000000000000000000000)
+            mstore(add(ptr, 4), to)
+            mstore(add(ptr, 36), amt)
+            ok := call(gas(), token, 0, ptr, 68, ptr, 32)
+            // Non-standard token desteği: returndatasize 0 ise ok kabul et
+            // Standart token: returndata 32 byte ve true olmalı
+            if ok {
+                switch returndatasize()
+                case 0   { /* USDT-tarzı: veri dönmez → ok */ }
+                case 32  { if iszero(mload(ptr)) { ok := 0 } }
+                default  { ok := 0 }
+            }
         }
+        if (!ok) revert TransferFailed();
     }
 
     // ═════════════════════════════════════════════════════════════════════════

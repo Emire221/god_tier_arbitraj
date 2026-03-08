@@ -917,6 +917,7 @@ mod sequencer_reorg_tests {
             is_initialized: true,
             bytecode: None,
             tick_bitmap: None,
+            live_fee_bps: None,
         }))
     }
 
@@ -947,6 +948,7 @@ mod sequencer_reorg_tests {
             is_initialized: true,
             bytecode: None,
             tick_bitmap: None,
+            live_fee_bps: None,
         }));
 
         let states: Vec<SharedPoolState> = vec![state_a, state_b];
@@ -987,6 +989,7 @@ mod sequencer_reorg_tests {
             is_initialized: false, // Havuz başlatılmamış gibi
             bytecode: None,
             tick_bitmap: None,
+            live_fee_bps: None,
         }));
 
         let states: Vec<SharedPoolState> = vec![state_a, state_b];
@@ -1022,6 +1025,7 @@ mod sequencer_reorg_tests {
                 is_initialized: true,
                 bytecode: None,
                 tick_bitmap: None,
+                live_fee_bps: None,
             }))
         };
 

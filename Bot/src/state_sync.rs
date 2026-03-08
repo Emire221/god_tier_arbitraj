@@ -85,6 +85,8 @@ sol! {
 
         function liquidity() external view returns (uint128);
 
+        function fee() external view returns (uint24);
+
         function ticks(int24 tick) external view returns (
             uint128 liquidityGross,
             int128 liquidityNet,
@@ -127,6 +129,8 @@ sol! {
         );
 
         function liquidity() external view returns (uint128);
+
+        function fee() external view returns (uint24);
 
         function ticks(int24 tick) external view returns (
             uint128 liquidityGross,
@@ -178,6 +182,8 @@ sol! {
 
         function liquidity() external view returns (uint128);
 
+        function fee() external view returns (uint24);
+
         function ticks(int24 tick) external view returns (
             uint128 liquidityGross,
             int128 liquidityNet,
@@ -210,28 +216,33 @@ pub async fn sync_pool_state<T: Transport + Clone, P: Provider<T, Ethereum> + Sy
     pool_state: &SharedPoolState,
     block_number: u64,
 ) -> Result<()> {
-    let (sqrt_price_x96, tick, liquidity) = match pool_config.dex {
+    let (sqrt_price_x96, tick, liquidity, live_fee_bps) = match pool_config.dex {
         DexType::UniswapV3 => {
             let pool = IUniswapV3Pool::new(pool_config.address, provider);
             let slot0_call = pool.slot0();
             let liq_call = pool.liquidity();
-            let (slot0_result, liq_result) = tokio::join!(
+            let fee_call = pool.fee();
+            let (slot0_result, liq_result, fee_result) = tokio::join!(
                 slot0_call.call(),
                 liq_call.call(),
+                fee_call.call(),
             );
             let slot0 = slot0_result
                 .map_err(|e| eyre::eyre!("[{}] slot0 okuma hatası (V3/7-alan/uint8): {}", pool_config.name, e))?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[{}] liquidity okuma hatası: {}", pool_config.name, e))?;
-            (slot0.sqrtPriceX96, slot0.tick, liq._0)
+            let fee_bps = fee_result.ok().map(|f| f._0 / 100); // uint24 pips → bps (3000 → 30)
+            (slot0.sqrtPriceX96, slot0.tick, liq._0, fee_bps)
         }
         DexType::PancakeSwapV3 => {
             let pool = IPancakeSwapV3Pool::new(pool_config.address, provider);
             let slot0_call = pool.slot0();
             let liq_call = pool.liquidity();
-            let (slot0_result, liq_result) = tokio::join!(
+            let fee_call = pool.fee();
+            let (slot0_result, liq_result, fee_result) = tokio::join!(
                 slot0_call.call(),
                 liq_call.call(),
+                fee_call.call(),
             );
             let slot0 = slot0_result
                 .map_err(|e| eyre::eyre!(
@@ -241,15 +252,18 @@ pub async fn sync_pool_state<T: Transport + Clone, P: Provider<T, Ethereum> + Sy
                 ))?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[{}] liquidity okuma hatası: {}", pool_config.name, e))?;
-            (slot0.sqrtPriceX96, slot0.tick, liq._0)
+            let fee_bps = fee_result.ok().map(|f| f._0 / 100);
+            (slot0.sqrtPriceX96, slot0.tick, liq._0, fee_bps)
         }
         DexType::Aerodrome => {
             let pool = IAerodromePool::new(pool_config.address, provider);
             let slot0_call = pool.slot0();
             let liq_call = pool.liquidity();
-            let (slot0_result, liq_result) = tokio::join!(
+            let fee_call = pool.fee();
+            let (slot0_result, liq_result, fee_result) = tokio::join!(
                 slot0_call.call(),
                 liq_call.call(),
+                fee_call.call(),
             );
             let slot0 = slot0_result
                 .map_err(|e| eyre::eyre!(
@@ -259,7 +273,8 @@ pub async fn sync_pool_state<T: Transport + Clone, P: Provider<T, Ethereum> + Sy
                 ))?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[{}] liquidity okuma hatası: {}", pool_config.name, e))?;
-            (slot0.sqrtPriceX96, slot0.tick, liq._0)
+            let fee_bps = fee_result.ok().map(|f| f._0 / 100);
+            (slot0.sqrtPriceX96, slot0.tick, liq._0, fee_bps)
         }
     };
 
@@ -288,6 +303,7 @@ pub async fn sync_pool_state<T: Transport + Clone, P: Provider<T, Ethereum> + Sy
         state.last_block = block_number;
         state.last_update = Instant::now();
         state.is_initialized = true;
+        state.live_fee_bps = live_fee_bps;
     }
 
     Ok(())
@@ -1022,6 +1038,7 @@ mod rpc_failover_tests {
             is_initialized: true,
             bytecode: None,
             tick_bitmap: None,
+            live_fee_bps: None,
         }))
     }
 

@@ -407,6 +407,9 @@ pub struct PoolState {
     /// Off-chain TickBitmap derinlik haritası
     /// "50 ETH satarsam hangi tick'leri patlatırım?" sorusunu yanıtlar
     pub tick_bitmap: Option<TickBitmapData>,
+    /// Zincirden okunan canlı fee (basis points, ör: 500 = %0.05)
+    /// None ise config'teki statik fee_bps kullanılır
+    pub live_fee_bps: Option<u32>,
 }
 
 impl Default for PoolState {
@@ -423,6 +426,7 @@ impl Default for PoolState {
             is_initialized: false,
             bytecode: None,
             tick_bitmap: None,
+            live_fee_bps: None,
         }
     }
 }

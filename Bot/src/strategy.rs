@@ -102,8 +102,8 @@ pub fn check_arbitrage_opportunity(
         };
 
         let pre_filter = math::PreFilter {
-            fee_a: pools[0].fee_fraction,
-            fee_b: pools[1].fee_fraction,
+            fee_a: state_a.live_fee_bps.map(|b| b as f64 / 10_000.0).unwrap_or(pools[0].fee_fraction),
+            fee_b: state_b.live_fee_bps.map(|b| b as f64 / 10_000.0).unwrap_or(pools[1].fee_fraction),
             estimated_gas_cost_weth: prefilter_gas_cost_weth,
             min_profit_weth: config.min_net_profit_weth,
             flash_loan_fee_rate: config.flash_loan_fee_bps / 10_000.0,
@@ -211,11 +211,14 @@ pub fn check_arbitrage_opportunity(
 
     // ─── Newton-Raphson Optimal Miktar Hesaplama ──────────────────
     // v6.0: TickBitmap varsa multi-tick hassasiyetinde, yoksa dampening
+    // v16.0: Canlı on-chain fee kullanımı (live_fee_bps varsa statik fee yerine)
+    let sell_fee = sell_state.live_fee_bps.map(|b| b as f64 / 10_000.0).unwrap_or(pools[sell_idx].fee_fraction);
+    let buy_fee = buy_state.live_fee_bps.map(|b| b as f64 / 10_000.0).unwrap_or(pools[buy_idx].fee_fraction);
     let nr_result = math::find_optimal_amount_with_bitmap(
         sell_state,
-        pools[sell_idx].fee_fraction,
+        sell_fee,
         buy_state,
-        pools[buy_idx].fee_fraction,
+        buy_fee,
         dynamic_gas_cost_quote,
         config.flash_loan_fee_bps,
         avg_price_in_quote, // gerçek fiyat → kâr quote cinsinden döner
@@ -1187,6 +1190,7 @@ mod gas_spike_tests {
             is_initialized: true,
             bytecode: None,
             tick_bitmap: None,
+            live_fee_bps: None,
         }))
     }
 

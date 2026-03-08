@@ -1,11 +1,11 @@
 // ============================================================================
-//  EXECUTOR v10.0 — MEV Korumalı İşlem Gönderimi
+//  EXECUTOR v11.0 — MEV Korumalı İşlem Gönderimi (Strict Private-Only)
 //
 //  Özellikler:
 //  ✓ eth_sendBundle (Flashbots/Private RPC) ile sandwich koruması
 //  ✓ Dinamik bribe hesabı (kârın %25'i validator'a tip)
-//  ✓ Public mempool bypass — TX'ler doğrudan builder'a gönderilir
-//  ✓ Fallback: Private RPC yoksa eth_sendRawTransaction
+//  ✓ Public mempool YASAKLI — fallback tamamen kaldırıldı
+//  ✓ Private RPC yoksa işlem reddedilir (güvenlik garantisi)
 //  ✓ Zero-copy calldata referansları
 //  ✓ unwrap() yasak — tüm hatalar eyre ile yönetilir
 // ============================================================================
@@ -56,11 +56,11 @@ struct BundleResponse {
 // MEV Korumalı Executor
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// MEV-korumalı işlem yürütücüsü.
+/// MEV-korumalı işlem yürütücüsü (Strict Private-Only).
 ///
 /// İşlem gönderme stratejisi:
 ///   1. Private/Flashbots RPC varsa → eth_sendBundle
-///   2. Yoksa → eth_sendRawTransaction (public mempool - uyarı loglanır)
+///   2. Private RPC yoksa → İŞLEM REDDEDİLİR (public mempool yasak)
 ///
 /// Bribe (validator tip) hesabı:
 ///   - Kârın dinamik yüzdesi (%25 base, margin'e göre uyarlanır)
@@ -71,7 +71,7 @@ pub struct MevExecutor {
     /// Private/Flashbots RPC URL (eth_sendBundle için)
     /// Örn: https://relay.flashbots.net veya özel builder endpoint
     private_rpc_url: Option<String>,
-    /// Standart RPC URL (fallback için)
+    /// Standart RPC URL (bundle imzalama/gönderim için)
     standard_rpc_url: String,
     /// Dinamik bribe yüzde tabanı (0.25 = %25)
     base_bribe_pct: f64,
@@ -157,25 +157,30 @@ impl MevExecutor {
             .map_err(|_| eyre::eyre!("Geçersiz private key"))?;
         let wallet = EthereumWallet::from(signer);
 
-        // 4. Gönder — Private RPC veya fallback
+        // 4. Gönder — YALNIZCA Private RPC (public mempool kesinlikle yasak)
         if let Some(ref private_url) = self.private_rpc_url {
-            self.send_bundle(
+            match self.send_bundle(
                 private_url,
                 &wallet,
                 tx,
                 current_block,
                 nonce_manager,
-            ).await
+            ).await {
+                Ok(hash) => Ok(hash),
+                Err(e) => {
+                    nonce_manager.rollback();
+                    eprintln!(
+                        "     🛑 Private RPC bundle başarısız — işlem iptal edildi (public mempool'a DÜŞÜRÜLMEDİ): {}",
+                        e
+                    );
+                    Err(eyre::eyre!("Private RPC bundle hatası (fallback yok): {}", e))
+                }
+            }
         } else {
             eprintln!(
-                "     ⚠️  Private RPC tanımlı değil — public mempool kullanılıyor (MEV riski!)"
+                "     🛑 PRIVATE_RPC_URL tanımlı değil — public mempool'a TX gönderimi güvenlik politikası gereği YASAKLANMIŞTIR."
             );
-            self.send_raw_tx(
-                &self.standard_rpc_url,
-                &wallet,
-                tx,
-                nonce_manager,
-            ).await
+            Err(eyre::eyre!("Public mempool execution is strictly forbidden. PRIVATE_RPC_URL ayarlayın."))
         }
     }
 
@@ -280,52 +285,17 @@ impl MevExecutor {
         Ok(tx_hash)
     }
 
-    /// Fallback: eth_sendRawTransaction (public mempool)
-    async fn send_raw_tx(
-        &self,
-        rpc_url: &str,
-        wallet: &EthereumWallet,
-        tx: TransactionRequest,
-        nonce_manager: &Arc<NonceManager>,
-    ) -> Result<String> {
-        let ws = WsConnect::new(rpc_url);
-        let provider = ProviderBuilder::new()
-            .with_recommended_fillers()
-            .wallet(wallet.clone())
-            .on_ws(ws)
-            .await
-            .map_err(|e| eyre::eyre!("TX provider bağlantı hatası: {}", e))?;
-
-        let pending = provider.send_transaction(tx)
-            .await
-            .map_err(|e| eyre::eyre!("TX gönderme hatası: {}", e))?;
-
-        let tx_hash = format!("{:?}", pending.tx_hash());
-        eprintln!("     📡 TX yayınlandı (public mempool): {}", &tx_hash);
-
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            pending.get_receipt(),
-        ).await {
-            Ok(Ok(receipt)) => {
-                eprintln!(
-                    "     ✅ TX onaylandı: blok #{}",
-                    receipt.block_number.unwrap_or_default()
-                );
-            }
-            Ok(Err(e)) => {
-                nonce_manager.rollback();
-                eprintln!("     ⚠️  TX receipt hatası (nonce geri alındı): {}", e);
-            }
-            Err(_) => {
-                nonce_manager.rollback();
-                eprintln!("     ⏰ TX timeout (60s) — nonce geri alındı");
-            }
-        }
-
-        Ok(tx_hash)
-    }
-
+    // ── send_raw_tx (public mempool) KALDIRILDI ────────────────────────────
+    // v11.0: Public mempool fallback tamamen kaldırıldı.
+    // Arbitraj TX'leri ASLA public mempool'a gönderilmemelidir.
+    // Public mempool'a düşen bir arbitraj TX'i MEV botları tarafından
+    // anında front-run/sandwich edilir ve kontrat zarar görür.
+    //
+    // EKSİ send_raw_tx metodu bulunuyordu:
+    //   - Kaldırılma sebebi: Güvenlik zafiyeti (OWASP: Insecure Design)
+    //   - Alternatif: Yalnızca eth_sendBundle (Private RPC) kullanılır
+    //   - Private RPC yoksa → işlem iptal edilir, hata döner
+    // ───────────────────────────────────────────────────────────────────────
     // ── Dinamik Bribe Hesabı ─────────────────────────────────────────────────
 
     /// Bribe hesaplama sonucu

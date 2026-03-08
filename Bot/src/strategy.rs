@@ -150,6 +150,44 @@ pub fn check_arbitrage_opportunity(
     let sell_bitmap = sell_state.tick_bitmap.as_ref();
     let buy_bitmap = buy_state.tick_bitmap.as_ref();
 
+    // ─── v11.0: Hard Liquidity Cap — NR Öncesi Havuz Derinlik Kontrolü ─────
+    // Havuzun gerçek mevcut likiditesini hesapla (TickBitmap'ten).
+    // WETH/USDC havuzlarında 18 vs 6 decimal uyumsuzluğu burada yakalanır.
+    // Eğer havuzda sadece ~5 WETH varken MAX_TRADE_SIZE (50 WETH) öneriliyorsa,
+    // NR bu tavanla sınırlandırılır ve REVM revert'ü önlenir.
+    {
+        let sell_hard_cap = math::exact::hard_liquidity_cap_weth(
+            sell_state.sqrt_price_x96,
+            sell_state.liquidity,
+            sell_state.tick,
+            pools[sell_idx].token0_is_weth,
+            sell_bitmap,
+        );
+        let buy_hard_cap = math::exact::hard_liquidity_cap_weth(
+            buy_state.sqrt_price_x96,
+            buy_state.liquidity,
+            buy_state.tick,
+            pools[buy_idx].token0_is_weth,
+            buy_bitmap,
+        );
+        let effective_cap = sell_hard_cap.min(buy_hard_cap);
+
+        if effective_cap < config.max_trade_size_weth * 0.1 {
+            eprintln!(
+                "     \u{26a0}\u{fe0f} [Liquidity] Havuz derinliği çok sığ: sell_cap={:.4} buy_cap={:.4} WETH (MAX_TRADE={:.1})",
+                sell_hard_cap, buy_hard_cap, config.max_trade_size_weth,
+            );
+        }
+
+        if effective_cap <= 0.001 {
+            eprintln!(
+                "     \u{23ed}\u{fe0f} [Liquidity] Yetersiz likidite — NR atlanıyor (cap={:.6} WETH)",
+                effective_cap,
+            );
+            return None;
+        }
+    }
+
     // ─── Dinamik Gas Cost (v14.0) ─────────────────────────────────
     // Formül: gas_cost_weth = (gas_estimate * base_fee) / 1e18
     // Base_fee 0 ise (pre-EIP1559 veya hata) fallback: config.gas_cost_fallback_weth

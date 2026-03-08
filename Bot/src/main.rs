@@ -39,7 +39,9 @@ use chrono::Local;
 use colored::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::collections::HashMap;
 use parking_lot::RwLock;
+use tokio_util::sync::CancellationToken;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Terminal Çıktı Yardımcıları
@@ -552,6 +554,9 @@ async fn main() -> Result<()> {
                 );
             }
             Err(e) => {
+                // CancellationToken .cancel() eski listener'ları temizler.
+                // run_bot döndüğünde token scope'u biter, yeni döngüde
+                // yeni token üretilir.
                 println!(
                     "\n  {} Hata: {:#}",
                     "❌".red(), e
@@ -591,6 +596,24 @@ async fn main() -> Result<()> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_discovery::PairCombo]) -> Result<()> {
+    // ══════════════ CANCELLATION TOKEN (v11.0: Zombi Thread Önleme) ══════════════
+    // Her run_bot çağrısında yeni bir CancellationToken üretilir.
+    // Arka plan listener'larına (pending_tx, swap_event) paslanır.
+    // run_bot hata ile çıktığında token.cancel() çağrılarak
+    // tüm zombi WebSocket dinleyicileri temiz biçimde sonlandırılır.
+    let cancel_token = CancellationToken::new();
+
+    // Scope guard: fonksiyon herhangi bir şekilde çıkarsa token'ı iptal et
+    let _cancel_guard = cancel_token.clone().drop_guard();
+
+    // ══════════════ COOL-DOWN BLACKLIST (v11.0: Circuit Breaker Refactor) ══════════════
+    // PairId (combo index) → blacklist_until_block
+    // Bir çift 3 ardışık kez başarısız olursa, current_block + 100 bloğa kadar engellenir.
+    // Bot çalışmaya devam eder, sadece o çifti atlar.
+    let mut pair_cooldown: HashMap<usize, u64> = HashMap::new();
+    // Per-pair ardışık hata sayacı: combo_index → consecutive_failures
+    let mut pair_failures: HashMap<usize, u32> = HashMap::new();
+
     // ══════════════ MULTI-TRANSPORT BAĞLANTI (v10.0: RpcPool) ══════════════
     // IPC öncelikli, Round-Robin WSS fallback, arka plan sağlık kontrolü
     println!("  {} Transport bağlantısı kuruluyor ({:?} mod)...", "⏳".yellow(), config.transport_mode);
@@ -792,21 +815,28 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
         let states_bg: Vec<SharedPoolState> = states.iter().map(|s| Arc::clone(s)).collect();
         let pool_addrs_bg = pool_addresses.clone();
         let rpc_url_bg = config.rpc_wss_url.clone();
+        let token_bg = cancel_token.clone();
 
         tokio::spawn(async move {
-            // Pending TX stream — best effort, hata olursa sessizce devam et
-            match pending_tx_listener(
-                &rpc_url_bg,
-                &pools_bg,
-                &states_bg,
-                &pool_addrs_bg,
-            ).await {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!(
-                        "  {} Pending TX dinleyici hatası (blok bazlı akış devam ediyor): {}",
-                        "⚠️", e
-                    );
+            tokio::select! {
+                _ = token_bg.cancelled() => {
+                    eprintln!("  {} Pending TX dinleyici graceful shutdown (CancellationToken)", "🔌");
+                }
+                result = pending_tx_listener(
+                    &rpc_url_bg,
+                    &pools_bg,
+                    &states_bg,
+                    &pool_addrs_bg,
+                ) => {
+                    match result {
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!(
+                                "  {} Pending TX dinleyici hatası (blok bazlı akış devam ediyor): {}",
+                                "⚠️", e
+                            );
+                        }
+                    }
                 }
             }
         });
@@ -820,32 +850,39 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
         let pools_ev = pools.to_vec();
         let states_ev: Vec<SharedPoolState> = states.iter().map(|s| Arc::clone(s)).collect();
         let rpc_url_ev = config.rpc_wss_url.clone();
+        let token_ev = cancel_token.clone();
 
         tokio::spawn(async move {
-            // WebSocket bağlantısı kur
-            let ws = WsConnect::new(&rpc_url_ev);
-            match ProviderBuilder::new().on_ws(ws).await {
-                Ok(ws_provider) => {
-                    match state_sync::start_swap_event_listener(
-                        &ws_provider,
-                        &pools_ev,
-                        &states_ev,
-                    ).await {
-                        Ok(_) => {}
+            tokio::select! {
+                _ = token_ev.cancelled() => {
+                    eprintln!("  {} Swap event dinleyici graceful shutdown (CancellationToken)", "🔌");
+                }
+                _result = async {
+                    let ws = WsConnect::new(&rpc_url_ev);
+                    match ProviderBuilder::new().on_ws(ws).await {
+                        Ok(ws_provider) => {
+                            match state_sync::start_swap_event_listener(
+                                &ws_provider,
+                                &pools_ev,
+                                &states_ev,
+                            ).await {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    eprintln!(
+                                        "  {} Swap event dinleyici hatası (blok bazlı akış devam ediyor): {}",
+                                        "⚠️", e
+                                    );
+                                }
+                            }
+                        }
                         Err(e) => {
                             eprintln!(
-                                "  {} Swap event dinleyici hatası (blok bazlı akış devam ediyor): {}",
+                                "  {} Swap event WS bağlantı hatası: {}",
                                 "⚠️", e
                             );
                         }
                     }
-                }
-                Err(e) => {
-                    eprintln!(
-                        "  {} Swap event WS bağlantı hatası: {}",
-                        "⚠️", e
-                    );
-                }
+                } => {}
             }
         });
     }
@@ -984,42 +1021,32 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
 
         // ── 3. ARBİTRAJ FIRSATI KONTROLÜ ────────────────────
         if all_synced {
-            // v10.1: Circuit Breaker — ardışık başarısızlıkta botu güvenle kapat
-            //         30s uyku yerine process::exit(1) çağrılır.
-            //         Sebep: 3 ardışık revert = sistemik sorun (kontrat hedef alınmış,
-            //         likidite çekilmiş, RPC tutarsızlığı vb.). Uyuyup devam etmek
-            //         sadece daha fazla gas yakar.
-            //         Eşik: CIRCUIT_BREAKER_THRESHOLD (.env, varsayılan=3)
-            if stats.consecutive_failures >= config.circuit_breaker_threshold {
-                eprintln!(
-                    "\n  {} CIRCUIT BREAKER TETIKLENDI! {} ardışık başarısızlık (eşik: {})",
-                    "🛑",
-                    stats.consecutive_failures,
-                    config.circuit_breaker_threshold,
-                );
-                eprintln!(
-                    "  {} Bot güvenli kapanıyor — manuel müdahale gerekli.",
-                    "🛑",
-                );
-                eprintln!(
-                    "  {} Son istatistikler: {} blok, {} fırsat, {} başarısız sim, {} işlem",
-                    "📊",
-                    stats.total_blocks_processed,
-                    stats.total_opportunities,
-                    stats.failed_simulations,
-                    stats.executed_trades,
-                );
-                // v13.0: Graceful shutdown — process::exit(1) yerine return Err
-                // Tokio runtime temizce kapatılır, WS bağlantıları düzgün kesilir,
-                // zeroize drop handler çalışır, nonce state korunur.
-                return Err(eyre::eyre!(
-                    "Circuit breaker tetiklendi: {} ardışık başarısızlık (eşik: {})",
-                    stats.consecutive_failures,
-                    config.circuit_breaker_threshold
-                ));
-            }
+            for (combo_idx, combo) in pair_combos.iter().enumerate() {
+                // ── v11.0: Cool-down Blacklist kontrolü ──────────────
+                // Bu çift blacklist'te mi? (current_block + 100 blok engeli)
+                if let Some(&until_block) = pair_cooldown.get(&combo_idx) {
+                    if block_number < until_block {
+                        // Hâlâ cool-down'da — bu çifti atla, diğerlerine devam et
+                        if block_number % 25 == 0 {
+                            // Her 25 blokta bir hatırlatma logu
+                            eprintln!(
+                                "     {} [Blacklist] {} \u{2192} blok #{}'a kadar engelli (kalan: {} blok)",
+                                "\u{26d4}", combo.pair_name, until_block,
+                                until_block.saturating_sub(block_number),
+                            );
+                        }
+                        continue;
+                    } else {
+                        // Cool-down süresi doldu — çifti yeniden aktif et
+                        pair_cooldown.remove(&combo_idx);
+                        pair_failures.remove(&combo_idx);
+                        eprintln!(
+                            "     {} [Blacklist] {} cool-down süresi doldu — yeniden aktif",
+                            "\u{2705}", combo.pair_name,
+                        );
+                    }
+                }
 
-            for combo in pair_combos {
                 let pp = [pools[combo.pool_a_idx].clone(), pools[combo.pool_b_idx].clone()];
                 let ps = [states[combo.pool_a_idx].clone(), states[combo.pool_b_idx].clone()];
                 if let Some(opportunity) = check_arbitrage_opportunity(&pp, &ps, config, block_base_fee, last_simulated_gas) {
@@ -1038,6 +1065,29 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
                         sync_ms as f64,
                     ).await {
                         last_simulated_gas = Some(gas);
+                        // Başarılı simülasyon — bu çift için hata sayacını sıfırla
+                        pair_failures.remove(&combo_idx);
+                    } else {
+                        // evaluate_and_execute None döndü → simülasyon başarısız
+                        // Per-pair ardışık hata sayacını artır
+                        let failures = pair_failures.entry(combo_idx).or_insert(0);
+                        *failures += 1;
+
+                        if *failures >= config.circuit_breaker_threshold {
+                            // Bu çifti 100 blok boyunca blacklist'e al
+                            let cooldown_until = block_number + 100;
+                            pair_cooldown.insert(combo_idx, cooldown_until);
+                            eprintln!(
+                                "\n  {} CIRCUIT BREAKER: {} {} ardışık başarısızlık — blok #{}'a kadar blacklist'e alındı (~{}s)",
+                                "\u{1f6d1}",
+                                combo.pair_name,
+                                failures,
+                                cooldown_until,
+                                100 * 2, // Base L2 ~2s blok süresi
+                            );
+                            // Global stats'ı da güncelle
+                            stats.consecutive_failures = 0;
+                        }
                     }
                 }
             }

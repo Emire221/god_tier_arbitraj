@@ -1336,7 +1336,7 @@ pub fn find_optimal_amount(
     )
 }
 
-/// Newton-Raphson (TickBitmap destekli).
+/// Newton-Raphson (TickBitmap destekli + Hard Liquidity Cap).
 pub fn find_optimal_amount_with_bitmap(
     sell_pool: &PoolState,
     sell_fee: f64,
@@ -1356,16 +1356,45 @@ pub fn find_optimal_amount_with_bitmap(
     let tolerance = 1e-8;
     let min_amount = 0.0001;
 
-    // ── Likidite tabanlı üst sınır (U256 hassasiyetinde) ────────
+    // ── Hard Liquidity Cap (v11.0) ──────────────────────────────
+    // TickBitmap verisi varsa, havuzun gerçek mevcut likiditesini hesapla.
+    // NR'nin önerebileceği maksimum miktar bu tavan ile sınırlandırılır.
+    // Böylece "50 WETH sat" komutu, sadece 5.5 WETH likidite olan
+    // bir havuza gönderilemez.
+    let hard_cap_sell = exact::hard_liquidity_cap_weth(
+        sell_pool.sqrt_price_x96,
+        sell_pool.liquidity,
+        sell_pool.tick,
+        token0_is_weth,
+        sell_bitmap,
+    );
+    let hard_cap_buy = exact::hard_liquidity_cap_weth(
+        buy_pool.sqrt_price_x96,
+        buy_pool.liquidity,
+        buy_pool.tick,
+        token0_is_weth,
+        buy_bitmap,
+    );
+
+    // Eski single-tick cap (geriye uyumluluk + karşılaştırma)
     let liq_cap_sell = exact::max_safe_swap_amount_u256(
         sell_pool.sqrt_price_x96, sell_pool.liquidity, token0_is_weth,
     );
     let liq_cap_buy = exact::max_safe_swap_amount_u256(
         buy_pool.sqrt_price_x96, buy_pool.liquidity, token0_is_weth,
     );
+
+    // Minimum(hard_cap, single_tick_cap) her iki havuz için
+    let sell_cap = hard_cap_sell.min(liq_cap_sell.max(0.001) * 2.0).max(0.001);
+    let buy_cap = hard_cap_buy.min(liq_cap_buy.max(0.001) * 2.0).max(0.001);
     let effective_max = max_amount_weth
-        .min(liq_cap_sell.max(0.001))
-        .min(liq_cap_buy.max(0.001));
+        .min(sell_cap)
+        .min(buy_cap);
+
+    eprintln!(
+        "     \u{1f4ca} [Liquidity Cap] sell_hard={:.4} buy_hard={:.4} sell_single={:.4} buy_single={:.4} → effective_max={:.4} WETH",
+        hard_cap_sell, hard_cap_buy, liq_cap_sell, liq_cap_buy, effective_max,
+    );
 
     if effective_max <= min_amount {
         return OptimalAmountResult {
@@ -2763,6 +2792,120 @@ pub mod exact {
             let safe_raw = mul_div(capacity_raw, usage_num, usage_den);
             u256_to_f64(safe_raw) / 1e18
         }
+    }
+
+    /// Hard Liquidity Cap — TickBitmap'ten gerçek mevcut likiditeyi hesapla.
+    ///
+    /// Bu fonksiyon, mevcut tick'ten itibaren swap yönündeki tüm başlatılmış
+    /// tick'lerdeki toplam absorbe edilebilir WETH miktarını hesaplar.
+    ///
+    /// Algoritma:
+    ///   1. Swap yönüne göre (zeroForOne veya oneForZero) ilgili tick'leri sırala
+    ///   2. Her tick aralığındaki mevcut likidite ile o aralıkta absorbe
+    ///      edilebilecek maksimum WETH miktarını SqrtPriceMath ile hesapla
+    ///   3. Tick sınırında liquidityNet ile aktif likiditeyi güncelle
+    ///   4. Tüm aralıklardaki kapasiteleri topla
+    ///
+    /// Bu sayede NR, havuzda gerçekten mevcut olmayan likiditeyi
+    /// kullanmaya çalışmaz. Örn: 5.5 WETH likidite varsa max 5.5 WETH önerilir.
+    ///
+    /// # Dönüş
+    /// Toplam absorbe edilebilir WETH miktarı (f64, human-readable).
+    /// Bitmap yoksa veya boşsa, `max_safe_swap_amount_u256` fallback kullanılır.
+    pub fn hard_liquidity_cap_weth(
+        sqrt_price_x96: U256,
+        liquidity: u128,
+        current_tick: i32,
+        token0_is_weth: bool,
+        bitmap: Option<&TickBitmapData>,
+    ) -> f64 {
+        // Bitmap yoksa single-tick fallback
+        let bitmap = match bitmap {
+            Some(bm) if !bm.ticks.is_empty() => bm,
+            _ => return max_safe_swap_amount_u256(sqrt_price_x96, liquidity, token0_is_weth),
+        };
+
+        if sqrt_price_x96.is_zero() || liquidity == 0 {
+            return 0.0;
+        }
+
+        // WETH satışı: zeroForOne (token0_is_weth=true → sola git) veya
+        //               oneForZero (token0_is_weth=false → sağa git)
+        // Bot WETH giriyor → swap yönü WETH→USDC
+        let zero_for_one = token0_is_weth;
+
+        // Tick'leri swap yönüne göre sırala
+        let ordered_ticks: Vec<(i32, i128)> = {
+            let mut ticks: Vec<(i32, i128)> = bitmap.ticks.iter()
+                .filter(|(_, info)| info.initialized)
+                .map(|(&t, info)| (t, info.liquidity_net))
+                .collect();
+
+            if zero_for_one {
+                ticks.retain(|(t, _)| *t <= current_tick);
+                ticks.sort_by(|a, b| b.0.cmp(&a.0)); // büyükten küçüğe
+            } else {
+                ticks.retain(|(t, _)| *t > current_tick);
+                ticks.sort_by_key(|(t, _)| *t); // küçükten büyüğe
+            }
+            ticks
+        };
+
+        let mut state_sqrt_price = sqrt_price_x96;
+        let mut state_liquidity = liquidity;
+        let mut total_weth_capacity = U256::ZERO;
+        let max_crossings = 50u32;
+
+        for (i, &(next_tick, liquidity_net)) in ordered_ticks.iter().enumerate() {
+            if i as u32 >= max_crossings || state_liquidity == 0 {
+                break;
+            }
+
+            let sqrt_price_target = get_sqrt_ratio_at_tick(next_tick);
+
+            // Bu aralıkta absorbe edilebilecek WETH miktarı
+            let weth_in_range = if zero_for_one {
+                // token0(WETH) girdi: amount0 = L × Q96 × (1/target - 1/current)
+                if sqrt_price_target < state_sqrt_price {
+                    get_amount0_delta(sqrt_price_target, state_sqrt_price, state_liquidity, false)
+                } else {
+                    U256::ZERO
+                }
+            } else {
+                // token1(WETH) girdi: amount1 = L × (target - current) / Q96
+                if sqrt_price_target > state_sqrt_price {
+                    get_amount1_delta(state_sqrt_price, sqrt_price_target, state_liquidity, false)
+                } else {
+                    U256::ZERO
+                }
+            };
+
+            total_weth_capacity += weth_in_range;
+            state_sqrt_price = sqrt_price_target;
+
+            // Tick sınırında likiditeyi güncelle
+            if zero_for_one {
+                if state_liquidity as i128 >= liquidity_net {
+                    state_liquidity = (state_liquidity as i128 - liquidity_net) as u128;
+                } else {
+                    state_liquidity = 0;
+                }
+            } else {
+                let new_liq = state_liquidity as i128 + liquidity_net;
+                state_liquidity = if new_liq > 0 { new_liq as u128 } else { 0 };
+            }
+        }
+
+        // Son tick'ten sonra kalan likiditede de bir miktar daha absorbe edilebilir
+        // ama muhafazakâr olalım — sadece başlatılmış tick'lere kadar hesapla
+
+        let cap_weth = u256_to_f64(total_weth_capacity) / 1e18;
+
+        // Minimum: single-tick fallback ile karşılaştır, büyük olanı al
+        // (bitmap'te çok az tick varsa fallback daha iyi olabilir)
+        let single_tick_cap = max_safe_swap_amount_u256(sqrt_price_x96, liquidity, token0_is_weth);
+
+        cap_weth.max(single_tick_cap)
     }
 
     // ── Test ─────────────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 # ── Asenkron Çalışma Zamanı ──
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
 
 # ── Blockchain Etkileşimi (Alloy — En Hızlı Rust EVM Kütüphanesi) ──
 alloy = { version = "0.1", features = ["full"] }

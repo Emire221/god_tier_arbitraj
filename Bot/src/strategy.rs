@@ -119,7 +119,7 @@ pub fn check_arbitrage_opportunity(
                     "\u{23ed}\u{fe0f}",
                     spread_pct,
                     reason,
-                    (pools[0].fee_fraction + pools[1].fee_fraction + config.flash_loan_fee_bps / 10_000.0) * 100.0,
+                    (pre_filter.fee_a + pre_filter.fee_b + config.flash_loan_fee_bps / 10_000.0) * 100.0,
                     prefilter_gas_cost_weth,
                 );
                 return None;

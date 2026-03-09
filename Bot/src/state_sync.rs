@@ -42,6 +42,30 @@ use crate::math::compute_eth_price;
 use crate::types::{DexType, PoolConfig, SharedPoolState, TickBitmapData, TickInfo};
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Base L2 GasPriceOracle — L1 Data Fee Tahmin Kontratı
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// OP Stack (Base) üzerindeki her TX, L2 yürütme ücretine ek olarak
+// L1'e veri yayınlama ücreti öder. Bu ücret TX boyutuna bağlıdır.
+//
+// GasPriceOracle kontratı (0x420...00F) işlemin calldata'sını alıp
+// L1 veri ücretini wei cinsinden döndürür.
+//
+// Adres: 0x420000000000000000000000000000000000000F (Base, OP Mainnet, vb.)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Base GasPriceOracle adresi (tüm OP Stack ağlarında standart)
+const GAS_PRICE_ORACLE_ADDRESS: Address = address!("420000000000000000000000000000000000000F");
+
+sol! {
+    #[sol(rpc)]
+    interface IGasPriceOracle {
+        /// Verilen calldata için L1 data fee'sini wei cinsinden döndürür.
+        function getL1Fee(bytes memory _data) external view returns (uint256);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Multicall3 — Standart Çok-Çağrı Kontratı (Tüm EVM Zincirlerde Aynı Adres)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -636,6 +660,51 @@ pub async fn sync_all_tick_bitmaps<T: Transport + Clone, P: Provider<T, Ethereum
         .map(|(config, state)| sync_tick_bitmap(provider, config, state, block_number, scan_range))
         .collect();
     join_all(futures).await
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// L1 Data Fee Tahmini (Base / OP Stack)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Arbitraj TX'inin L1 data fee'sini tahmin et (wei cinsinden).
+///
+/// GasPriceOracle.getL1Fee() çağrısı ile 134-byte kompakt calldata'nın
+/// L1'e yayınlanma maliyetini sorguler. Blok başına 1 kez çağrılması yeterlidir.
+///
+/// # Dönüş
+/// L1 data fee (wei). Hata durumunda 0 döner (fallback: sadece L2 ücreti kullanılır).
+pub async fn estimate_l1_data_fee<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
+    provider: &P,
+) -> u128 {
+    // 134-byte representative calldata (mostly non-zero for worst case estimate)
+    // Gerçek calldata adresleri ve miktarları değişir ama boyut sabittir.
+    // Non-zero byte'lar 16 gas, zero byte'lar 4 gas maliyetlidir (EIP-2028).
+    // Worst case: tamamı non-zero → konservatif tahmin.
+    let representative_calldata: Vec<u8> = vec![0xFFu8; 134];
+
+    let oracle = IGasPriceOracle::new(GAS_PRICE_ORACLE_ADDRESS, provider);
+    match oracle
+        .getL1Fee(representative_calldata.into())
+        .call()
+        .await
+    {
+        Ok(result) => {
+            let fee = result._0;
+            // U256 → u128 safe conversion
+            if fee > alloy::primitives::U256::from(u128::MAX) {
+                u128::MAX
+            } else {
+                fee.to::<u128>()
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "  ⚠️ L1 data fee tahmini başarısız (fallback: 0): {}",
+                e
+            );
+            0
+        }
+    }
 }
 
 pub async fn cache_all_bytecodes<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(

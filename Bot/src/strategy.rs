@@ -1,7 +1,13 @@
 // ============================================================================
-//  STRATEGY v9.0 — Arbitraj Strateji Motoru + 134-Byte Calldata + Dinamik Fee
+//  STRATEGY v18.0 — Arbitraj Strateji Motoru + L1 Data Fee + Fire-and-Forget
 //
-//  v9.0 Yenilikler:
+//  v18.0 Yenilikler:
+//  ✓ L1 Data Fee (OP Stack) entegrasyonu — total_gas = L2 + L1
+//  ✓ GasPriceOracle.getL1Fee() ile doğru maliyet tahmini
+//  ✓ Fire-and-forget TX receipt bekleme (4s timeout, pipeline bloke olmaz)
+//  ✓ PGA fallback uyumlu bribe hesabı
+//
+//  v9.0 (korunuyor):
 //  ✓ 134-byte kompakt calldata (kontrat v9.0 uyumlu, deadlineBlock dahil)
 //  ✓ Deadline block hesaplama (current_block + config.deadline_blocks)
 //  ✓ Dinamik bribe/priority fee modeli (beklenen kârın %25'i)
@@ -56,6 +62,7 @@ pub fn check_arbitrage_opportunity(
     config: &BotConfig,
     block_base_fee: u64,
     last_simulated_gas: Option<u64>,
+    l1_data_fee_wei: u128,
 ) -> Option<ArbitrageOpportunity> {
     if pools.len() < 2 || states.len() < 2 {
         return None;
@@ -104,16 +111,20 @@ pub fn check_arbitrage_opportunity(
         return None;
     };
 
+    // L1 data fee → WETH (tüm gas hesaplarında kullanılacak)
+    let l1_data_fee_weth = l1_data_fee_wei as f64 / 1e18;
+
     // ─── O(1) PreFilter — NR'ye girmeden hızlı eleme ─────────
     // Spread'in fee'leri kurtarıp kurtaramayacağını mikrosaniyede kontrol eder.
     // Kurtaramıyorsa NR'nin ~90 iterasyonluk hesaplama maliyetinden kaçınılır.
     {
-        // Dinamik gas cost (PreFilter için)
+        // Dinamik gas cost (PreFilter için) — L2 + L1
         let gas_estimate: u64 = last_simulated_gas.unwrap_or(150_000);
         let prefilter_gas_cost_weth = if block_base_fee > 0 {
-            ((gas_estimate as f64 * block_base_fee as f64) / 1e18).max(0.00001)
+            let l2 = (gas_estimate as f64 * block_base_fee as f64) / 1e18;
+            (l2 + l1_data_fee_weth).max(0.00001)
         } else {
-            config.gas_cost_fallback_weth
+            (config.gas_cost_fallback_weth + l1_data_fee_weth).max(0.00001)
         };
 
         let pre_filter = math::PreFilter {
@@ -205,20 +216,21 @@ pub fn check_arbitrage_opportunity(
         }
     }
 
-    // ─── Dinamik Gas Cost (v14.0) ─────────────────────────────────
-    // Formül: gas_cost_weth = (gas_estimate * base_fee) / 1e18
-    // Base_fee 0 ise (pre-EIP1559 veya hata) fallback: config.gas_cost_fallback_weth
+    // ─── Dinamik Gas Cost (v18.0) ─────────────────────────────────
+    // Formül: total_gas = L2_execution_fee + L1_data_fee
+    //   L2: gas_cost_weth = (gas_estimate * base_fee) / 1e18
+    //   L1: l1_data_fee_wei (GasPriceOracle.getL1Fee() sonucu)
     //
-    // v14.0: Hardcoded 150K kaldırıldı — önceki REVM simülasyonundan
-    // dönen gerçek gas değeri kullanılır. İlk blokta (henüz simülasyon
-    // yapılmamışken) 150K fallback korunur.
+    // OP Stack ağlarında (Base) asıl maliyet L1 data fee'dir.
+    // L2 execution fee genelde çok düşüktür (~0.001 Gwei base_fee).
+    // L1 data fee'yi hesaba katmamak botun zararına işlem yapmasına yol açar.
     let dynamic_gas_cost_weth = if block_base_fee > 0 {
         let gas_estimate: u64 = last_simulated_gas.unwrap_or(150_000);
-        let gas_cost_weth = (gas_estimate as f64 * block_base_fee as f64) / 1e18;
-        // Minimum floor: 0.00001 WETH (sıfır gas cost'u engellemek için)
-        gas_cost_weth.max(0.00001)
+        let l2_gas_cost_weth = (gas_estimate as f64 * block_base_fee as f64) / 1e18;
+        // Toplam: L2 execution + L1 data fee
+        (l2_gas_cost_weth + l1_data_fee_weth).max(0.00001)
     } else {
-        config.gas_cost_fallback_weth
+        (config.gas_cost_fallback_weth + l1_data_fee_weth).max(0.00001)
     };
 
     // Gas cost'u quote cinsine çevir (NR için)
@@ -255,7 +267,7 @@ pub fn check_arbitrage_opportunity(
     // v15.0 DEBUG: NR sonuç detayları — fırsat filtreleme nedenini göster
     // (Bu loglar canlıya geçiş onayına kadar kaldırılmamalı)
     eprintln!(
-        "     {} [DEBUG NR] spread={:.4}% | nr_profit_weth={:.8} | min_required={:.8} | nr_amount={:.6} | converged={} | gas_cost_weth={:.8}",
+        "     {} [DEBUG NR] spread={:.4}% | nr_profit_weth={:.8} | min_required={:.8} | nr_amount={:.6} | converged={} | gas_cost_weth={:.8} (L1={:.8})",
         "\u{1f52c}",
         spread_pct,
         expected_profit_weth,
@@ -263,6 +275,7 @@ pub fn check_arbitrage_opportunity(
         nr_result.optimal_amount,
         nr_result.converged,
         dynamic_gas_cost_weth,
+        l1_data_fee_weth,
     );
 
     // Kârlı değilse fırsatı atla
@@ -310,6 +323,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
     block_timestamp: u64,
     block_base_fee: u64,
     block_latency_ms: f64,
+    l1_data_fee_wei: u128,
 ) -> Option<u64> {
     let _buy_pool = &pools[opportunity.buy_pool_idx];
     let _sell_pool = &pools[opportunity.sell_pool_idx];
@@ -480,9 +494,11 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         );
 
         let bribe_wei = {
-            // v14.0: Gas maliyeti WETH — REVM simülasyonundan gelen dinamik gas kullanılır
+            // v18.0: Gas maliyeti WETH — L2 execution + L1 data fee
             let gas_cost_weth = {
-                (simulated_gas_used as f64 * block_base_fee as f64) / 1e18
+                let l2 = (simulated_gas_used as f64 * block_base_fee as f64) / 1e18;
+                let l1 = l1_data_fee_wei as f64 / 1e18;
+                l2 + l1
             };
 
             // Kâr/Gas oranı (profit margin ratio) — tamamen WETH cinsinden
@@ -906,19 +922,40 @@ async fn execute_inner(
         .await
         .map_err(|e| eyre::eyre!("TX gönderme hatası: {}", e))?;
     let tx_hash = format!("{:?}", pending.tx_hash());
+    let tx_hash_alloy = *pending.tx_hash();
     println!("  {} TX yayınlandı: {}", "📡".blue(), &tx_hash);
 
-    match tokio::time::timeout(Duration::from_secs(60), pending.get_receipt()).await {
-        Ok(Ok(receipt)) => {
-            println!(
-                "  {} Blok: #{}",
-                "✅".green(),
-                receipt.block_number.unwrap_or_default()
-            );
+    // Fire-and-forget: Receipt bekleme arka plana taşınır.
+    // Base L2 blok süresi 2s → 4s timeout = 2 blok yeterli.
+    // Ana execution pipeline bloke olmaz, bir sonraki fırsat hemen değerlendirilebilir.
+    // pending'i drop edip provider'ı spawn'a taşıyoruz (lifetime: 'static).
+    drop(pending);
+    tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+        loop {
+            if tokio::time::Instant::now() > deadline {
+                println!("  {} Zaman aşımı (4s)", "⏰".yellow());
+                break;
+            }
+            match provider.get_transaction_receipt(tx_hash_alloy).await {
+                Ok(Some(receipt)) => {
+                    println!(
+                        "  {} Blok: #{}",
+                        "✅".green(),
+                        receipt.block_number.unwrap_or_default()
+                    );
+                    break;
+                }
+                Ok(None) => {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Err(e) => {
+                    println!("  {} Onay hatası: {}", "⚠️".yellow(), e);
+                    break;
+                }
+            }
         }
-        Ok(Err(e)) => println!("  {} Onay hatası: {}", "⚠️".yellow(), e),
-        Err(_) => println!("  {} Zaman aşımı (60s)", "⏰".yellow()),
-    }
+    });
 
     Ok(tx_hash)
 }
@@ -1250,7 +1287,7 @@ mod gas_spike_tests {
         // Küçük spread → Newton-Raphson çok düşük optimal miktar hesaplar
         // → kârın gas'ı karşılayıp karşılamayacağı NR'a bağlı
         let result_normal = check_arbitrage_opportunity(
-            &pools, &states, &config, normal_base_fee, last_sim_gas,
+            &pools, &states, &config, normal_base_fee, last_sim_gas, 0,
         );
         // Not: NR sonucu spread'e ve likiditeye bağlı — bu test gas etkisini ölçer
 
@@ -1261,7 +1298,7 @@ mod gas_spike_tests {
         let spike_base_fee: u64 = 500_000_000_000_000; // 500K Gwei (aşırı spike)
 
         let result_spike = check_arbitrage_opportunity(
-            &pools, &states, &config, spike_base_fee, last_sim_gas,
+            &pools, &states, &config, spike_base_fee, last_sim_gas, 0,
         );
 
         // Gas spike durumunda fırsat kesinlikle reddedilmeli
@@ -1275,14 +1312,14 @@ mod gas_spike_tests {
         // 150K gas → 0.000015 WETH, 1.5M gas → 0.00015 WETH
         let high_gas = Some(1_500_000u64); // 10x daha fazla gas
         let result_high_gas = check_arbitrage_opportunity(
-            &pools, &states, &config, normal_base_fee, high_gas,
+            &pools, &states, &config, normal_base_fee, high_gas, 0,
         );
 
         // Yüksek gas tahminiyle maliyet artar → bazı fırsatlar reddedilir
         // Bu testin amacı: last_simulated_gas'ın gerçekten kullanıldığını kanıtlamak
         // Eğer hâlâ hardcoded 150K kullanılsaydı, high_gas parametresi etkisiz olurdu
         let result_low_gas = check_arbitrage_opportunity(
-            &pools, &states, &config, normal_base_fee, Some(10_000u64), // Çok düşük gas
+            &pools, &states, &config, normal_base_fee, Some(10_000u64), 0, // Çok düşük gas
         );
 
         // Düşük gas → düşük maliyet → fırsat bulma olasılığı ARTAR
@@ -1324,7 +1361,7 @@ mod gas_spike_tests {
         let last_sim_gas = Some(150_000u64);
 
         let result = check_arbitrage_opportunity(
-            &pools, &states, &config, spike_base_fee, last_sim_gas,
+            &pools, &states, &config, spike_base_fee, last_sim_gas, 0,
         );
 
         // Büyük spread gas spike'ını karşılamalı
@@ -1358,7 +1395,7 @@ mod gas_spike_tests {
 
         // base_fee = 0 → config.gas_cost_fallback_weth (0.00005 WETH)
         let result = check_arbitrage_opportunity(
-            &pools, &states, &config, 0, Some(150_000),
+            &pools, &states, &config, 0, Some(150_000), 0,
         );
 
         assert!(

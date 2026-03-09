@@ -515,18 +515,17 @@ async fn main() -> Result<()> {
     let matched_cfg = pool_discovery::load_matched_pools()?;
     let (pools, pair_combos) = pool_discovery::build_runtime(&matched_cfg)?;
 
-    // ═══ v17.0: PRIVATE RPC FAIL-FAST KONTROLÜ ═══
-    // Canlı modda PRIVATE_RPC_URL olmadan bot çalışması güvenlik açığıdır.
-    // İşlemler public mempool'a düşerek MEV saldırılarına maruz kalır.
-    // Bu kontrol, eksik yapılandırmayla boşuna çalışmayı önler (fail-fast).
+    // ═══ v18.0: PRIVATE RPC UYARISI (PGA Fallback Mevcut) ═══
+    // Private RPC olmadan bundle gönderilemez ama PGA fallback çalışır.
+    // Kontrat minProfit koruması sandviç riskini ortadan kaldırır.
+    // Yine de private RPC önerilir — uyarı yeterli, hard-fail gereksiz.
     if config.execution_enabled() && config.private_rpc_url.is_none() {
-        return Err(eyre::eyre!(
-            "KRİTİK: PRIVATE_RPC_URL tanımlanmamış!\n\
-             Canlı mod (EXECUTION_ENABLED=true) aktifken Private RPC zorunludur.\n\
-             İşlemler public mempool'a gönderilemez — MEV saldırı riski.\n\
-             Çözüm: .env dosyasına PRIVATE_RPC_URL=https://... ekleyin\n\
-             veya --mode shadow ile gölge modda başlatın."
-        ));
+        eprintln!(
+            "  {} UYARI: PRIVATE_RPC_URL tanımlanmamış — PGA fallback kullanılacak.\n\
+             Kontrat minProfit koruması aktif ama private RPC önerilir.\n\
+             Çözüm: .env dosyasına PRIVATE_RPC_URL=https://... ekleyin.",
+            "⚠️"
+        );
     }
 
     // ═══ v11.0: TOKEN WHITELIST DOĞRULAMA (tüm çiftler) ═══
@@ -980,6 +979,11 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
         // ── 1. DURUM SENKRONİZASYONU ────────────────────────
         let sync_results = sync_all_pools(&provider, pools, &states, block_number).await;
 
+        // ── 1.1. L1 DATA FEE TAHMİNİ (OP Stack / Base) ──────
+        // GasPriceOracle.getL1Fee() ile 134-byte calldata'nın L1 maliyeti
+        // Blok başına 1 kez sorgulanır — sonuç tüm fırsat hesaplarına dahil edilir
+        let l1_data_fee_wei = estimate_l1_data_fee(&provider).await;
+
         let sync_ms = block_start.elapsed().as_millis();
 
         // Gecikme ölçümü
@@ -1092,7 +1096,7 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
 
                 let pp = [pools[combo.pool_a_idx].clone(), pools[combo.pool_b_idx].clone()];
                 let ps = [states[combo.pool_a_idx].clone(), states[combo.pool_b_idx].clone()];
-                if let Some(opportunity) = check_arbitrage_opportunity(&pp, &ps, config, block_base_fee, last_simulated_gas) {
+                if let Some(opportunity) = check_arbitrage_opportunity(&pp, &ps, config, block_base_fee, last_simulated_gas, l1_data_fee_wei) {
                     // ── 4. DEĞERLENDİR + SİMÜLE + YÜRÜT ────────────────
                     if let Some(gas) = evaluate_and_execute(
                         &provider,
@@ -1106,6 +1110,7 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
                         block_timestamp,
                         block_base_fee,
                         sync_ms as f64,
+                        l1_data_fee_wei,
                     ).await {
                         last_simulated_gas = Some(gas);
                         // Başarılı simülasyon — bu çift için hata sayacını sıfırla

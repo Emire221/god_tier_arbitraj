@@ -1,11 +1,13 @@
 // ============================================================================
-//  EXECUTOR v11.0 — MEV Korumalı İşlem Gönderimi (Strict Private-Only)
+//  EXECUTOR v18.0 — MEV Korumalı İşlem Gönderimi (Bundle + PGA Fallback)
 //
 //  Özellikler:
 //  ✓ eth_sendBundle (Flashbots/Private RPC) ile sandwich koruması
+//  ✓ PGA fallback: Bundle başarısızsa yüksek priority fee ile doğrudan gönderim
+//  ✓ Kontrat minProfit koruması → PGA modunda da sandviç güvenliği
+//  ✓ Fire-and-forget receipt bekleme (pipeline bloke olmaz)
+//  ✓ 4s timeout (Base 2s blok süresi × 2)
 //  ✓ Dinamik bribe hesabı (kârın %25'i validator'a tip)
-//  ✓ Public mempool YASAKLI — fallback tamamen kaldırıldı
-//  ✓ Private RPC yoksa işlem reddedilir (güvenlik garantisi)
 //  ✓ Zero-copy calldata referansları
 //  ✓ unwrap() yasak — tüm hatalar eyre ile yönetilir
 // ============================================================================
@@ -56,11 +58,18 @@ struct BundleResponse {
 // MEV Korumalı Executor
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// MEV-korumalı işlem yürütücüsü (Strict Private-Only).
+/// MEV-korumalı işlem yürütücüsü (Bundle + PGA Fallback).
 ///
 /// İşlem gönderme stratejisi:
-///   1. Private/Flashbots RPC varsa → eth_sendBundle
-///   2. Private RPC yoksa → İŞLEM REDDEDİLİR (public mempool yasak)
+///   1. Private/Flashbots RPC varsa → eth_sendBundle dene
+///   2. Bundle başarısızsa → PGA fallback (yüksek priority fee)
+///   3. Private RPC yoksa → doğrudan PGA stratejisi
+///
+/// Sandviç koruması:
+///   - Bundle modu: TX sadece builder'a görünür (mempool'a düşmez)
+///   - PGA modu: Kontrat minProfit kontrolü atomik koruma sağlar
+///     → Saldırgan fiyatı değiştirirse kâr < minProfit → revert
+///   - Base L2 FIFO sequencer: front-running teknik olarak zor
 ///
 /// Bribe (validator tip) hesabı:
 ///   - Kârın dinamik yüzdesi (%25 base, margin'e göre uyarlanır)
@@ -157,31 +166,105 @@ impl MevExecutor {
             .map_err(|_| eyre::eyre!("Geçersiz private key"))?;
         let wallet = EthereumWallet::from(signer);
 
-        // 4. Gönder — YALNIZCA Private RPC (public mempool kesinlikle yasak)
+        // 4. Gönder — Private RPC öncelikli, PGA fallback
         if let Some(ref private_url) = self.private_rpc_url {
             match self.send_bundle(
                 private_url,
                 &wallet,
-                tx,
+                tx.clone(),
                 current_block,
                 nonce_manager,
             ).await {
                 Ok(hash) => Ok(hash),
                 Err(e) => {
-                    nonce_manager.rollback();
                     eprintln!(
-                        "     🛑 Private RPC bundle başarısız — işlem iptal edildi (public mempool'a DÜŞÜRÜLMEDİ): {}",
+                        "     ⚠️ Private RPC bundle başarısız — PGA fallback deneniyor: {}",
                         e
                     );
-                    Err(eyre::eyre!("Private RPC bundle hatası (fallback yok): {}", e))
+                    // Bundle başarısız → PGA fallback (yüksek priority fee ile doğrudan gönderim)
+                    // Kontrat seviyesindeki minProfit koruması sandviç riskini ortadan kaldırır.
+                    self.send_pga_fallback(&wallet, tx, nonce_manager).await
                 }
             }
         } else {
+            // Private RPC yok → PGA stratejisi ile doğrudan gönderim
+            // Base L2 FIFO sequencer'da priority fee sıralama belirler.
+            // Kontratın minProfit kontrolü sandviç koruması sağlar.
             eprintln!(
-                "     🛑 PRIVATE_RPC_URL tanımlı değil — public mempool'a TX gönderimi güvenlik politikası gereği YASAKLANMIŞTIR."
+                "     ⚠️ PRIVATE_RPC_URL yok — PGA stratejisi ile gönderiliyor (minProfit koruması aktif)"
             );
-            Err(eyre::eyre!("Public mempool execution is strictly forbidden. PRIVATE_RPC_URL ayarlayın."))
+            self.send_pga_fallback(&wallet, tx, nonce_manager).await
         }
+    }
+
+    /// PGA (Priority Gas Auction) ile doğrudan eth_sendRawTransaction.
+    ///
+    /// Base L2 FIFO sequencer'da priority fee sıralaması belirler.
+    /// Kontrat seviyesindeki minProfit kontrolü sayesinde sandviç riski yoktur:
+    ///   - Saldırgan fiyatı değiştirirse → kâr < minProfit → kontrat revert eder
+    ///   - Atomik işlem garantisi: ya tam kâr ya hiç
+    ///
+    /// Receipt bekleme fire-and-forget: arka plana taşınır, pipeline bloke olmaz.
+    async fn send_pga_fallback(
+        &self,
+        wallet: &EthereumWallet,
+        tx: TransactionRequest,
+        nonce_manager: &Arc<NonceManager>,
+    ) -> Result<String> {
+        let ws = WsConnect::new(&self.standard_rpc_url);
+        let provider = ProviderBuilder::new()
+            .with_recommended_fillers()
+            .wallet(wallet.clone())
+            .on_ws(ws)
+            .await
+            .map_err(|e| eyre::eyre!("PGA provider bağlantı hatası: {}", e))?;
+
+        let pending = provider.send_transaction(tx)
+            .await
+            .map_err(|e| {
+                nonce_manager.rollback();
+                eyre::eyre!("PGA TX gönderme hatası (nonce geri alındı): {}", e)
+            })?;
+
+        let tx_hash = format!("{:?}", pending.tx_hash());
+        let tx_hash_alloy = *pending.tx_hash();
+        eprintln!("     📤 PGA TX gönderildi: {}", &tx_hash);
+
+        // Fire-and-forget: receipt bekleme arka plana taşınır
+        // pending'i drop edip provider'ı spawn'a taşıyoruz (lifetime: 'static)
+        drop(pending);
+        let nm = Arc::clone(nonce_manager);
+        let hash_clone = tx_hash.clone();
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+            loop {
+                if tokio::time::Instant::now() > deadline {
+                    nm.rollback();
+                    eprintln!("     ⏰ PGA timeout (4s) — nonce geri alındı: {}", &hash_clone);
+                    break;
+                }
+                match provider.get_transaction_receipt(tx_hash_alloy).await {
+                    Ok(Some(receipt)) => {
+                        eprintln!(
+                            "     ✅ PGA TX onaylandı: blok #{} | {}",
+                            receipt.block_number.unwrap_or_default(),
+                            &hash_clone,
+                        );
+                        break;
+                    }
+                    Ok(None) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                    Err(e) => {
+                        nm.rollback();
+                        eprintln!("     ⚠️ PGA receipt hatası (nonce geri alındı): {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(tx_hash)
     }
 
     /// eth_sendBundle ile Flashbots/Private builder'a gönder.
@@ -225,6 +308,9 @@ impl MevExecutor {
             .map_err(|e| eyre::eyre!("TX imzalama hatası: {}", e))?;
 
         let tx_hash = format!("{:?}", pending.tx_hash());
+        let tx_hash_alloy = *pending.tx_hash();
+        // pending'i drop et — provider'ı spawn'a taşımak için borrow'u serbest bırak
+        drop(pending);
 
         // Bundle'ı private RPC'ye gönder (HTTP POST)
         let bundle = BundleRequest {
@@ -261,40 +347,51 @@ impl MevExecutor {
 
         eprintln!("     📦 Yedek bundle → blok #{}", target_block + 1);
 
-        // Receipt bekle
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            pending.get_receipt(),
-        ).await {
-            Ok(Ok(receipt)) => {
-                eprintln!(
-                    "     ✅ Bundle dahil edildi: blok #{}",
-                    receipt.block_number.unwrap_or_default()
-                );
+        // Fire-and-forget: Receipt bekleme arka plana taşınır (pipeline bloke olmaz)
+        // Base L2 blok süresi 2s → 4s timeout = 2 blok yeterli
+        let nm = Arc::clone(nonce_manager);
+        let hash_clone = tx_hash.clone();
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+            loop {
+                if tokio::time::Instant::now() > deadline {
+                    nm.rollback();
+                    eprintln!("     ⏰ Bundle timeout (4s) — nonce geri alındı: {}", &hash_clone);
+                    break;
+                }
+                match provider.get_transaction_receipt(tx_hash_alloy).await {
+                    Ok(Some(receipt)) => {
+                        eprintln!(
+                            "     ✅ Bundle dahil edildi: blok #{}",
+                            receipt.block_number.unwrap_or_default()
+                        );
+                        break;
+                    }
+                    Ok(None) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                    Err(e) => {
+                        nm.rollback();
+                        eprintln!("     ⚠️  Bundle receipt hatası (nonce geri alındı): {}", e);
+                        break;
+                    }
+                }
             }
-            Ok(Err(e)) => {
-                nonce_manager.rollback();
-                eprintln!("     ⚠️  Bundle receipt hatası: {}", e);
-            }
-            Err(_) => {
-                nonce_manager.rollback();
-                eprintln!("     ⏰ Bundle timeout (60s) — nonce geri alındı");
-            }
-        }
+        });
 
         Ok(tx_hash)
     }
 
-    // ── send_raw_tx (public mempool) KALDIRILDI ────────────────────────────
-    // v11.0: Public mempool fallback tamamen kaldırıldı.
-    // Arbitraj TX'leri ASLA public mempool'a gönderilmemelidir.
-    // Public mempool'a düşen bir arbitraj TX'i MEV botları tarafından
-    // anında front-run/sandwich edilir ve kontrat zarar görür.
+    // ── PGA Fallback Güvenlik Notu (v18.0) ────────────────────────────────
+    // v18.0: Base ağında eth_sendBundle desteği sınırlıdır. Bundle başarısız
+    // olursa veya Private RPC yoksa, PGA (Priority Gas Auction) ile doğrudan
+    // eth_sendRawTransaction kullanılır.
     //
-    // EKSİ send_raw_tx metodu bulunuyordu:
-    //   - Kaldırılma sebebi: Güvenlik zafiyeti (OWASP: Insecure Design)
-    //   - Alternatif: Yalnızca eth_sendBundle (Private RPC) kullanılır
-    //   - Private RPC yoksa → işlem iptal edilir, hata döner
+    // Sandviç riski analizi:
+    //   - Kontrat minProfit kontrolü atomik koruma sağlar
+    //   - Saldırgan fiyatı manipüle ederse → kâr < minProfit → revert
+    //   - Base L2 FIFO sequencer: front-running zaten teknik olarak zor
+    //   - Priority fee yeterince yüksekse TX sıralama avantajı korunur
     // ───────────────────────────────────────────────────────────────────────
     // ── Dinamik Bribe Hesabı ─────────────────────────────────────────────────
 

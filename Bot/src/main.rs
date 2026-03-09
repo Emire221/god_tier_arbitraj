@@ -374,7 +374,7 @@ STATS_INTERVAL=10
 MAX_RETRIES=0
 
 # ─── Havuz Komisyon Filtresi ───
-MAX_POOL_FEE_BPS=10
+MAX_POOL_FEE_BPS=100
 
 # ─── TickBitmap Derinlik Ayarları ───
 TICK_BITMAP_RANGE=10

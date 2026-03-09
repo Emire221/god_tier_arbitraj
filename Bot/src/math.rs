@@ -43,12 +43,15 @@ pub struct PreFilter {
     pub fee_a: f64,
     /// Havuz B fee oranı (ör: 0.0001 = %0.01)
     pub fee_b: f64,
-    /// Tahmini gas maliyeti (WETH cinsinden)
+    /// Tahmini gas maliyeti (WETH cinsinden) — L2 + L1 + güvenlik marjı
     pub estimated_gas_cost_weth: f64,
     /// Minimum kâr eşiği (WETH cinsinden)
     pub min_profit_weth: f64,
     /// Flash loan fee oranı (ör: 0.0005 = 5 bps)
     pub flash_loan_fee_rate: f64,
+    /// Builder bribe yüzdesi (ör: 0.25 = %25)
+    /// v19.0: Brüt kârdan bribe düşüldükten sonra net kâr hesaplanır
+    pub bribe_pct: f64,
 }
 
 /// PreFilter sonucu
@@ -121,10 +124,13 @@ impl PreFilter {
             };
         }
 
-        // Tahmini brüt kâr (WETH cinsinden)
-        // profit ≈ (spread_ratio - total_fee_ratio) × amount - gas_cost
-        let estimated_profit = (spread_ratio - total_fee_ratio) * trade_amount_weth
-            - self.estimated_gas_cost_weth;
+        // v19.0: Tahmini net kâr (WETH cinsinden)
+        // Brüt kâr = (spread_ratio - total_fee_ratio) × amount
+        // Net kâr = brüt_kâr × (1 - bribe_pct) - gas_cost
+        // Bu formül komisyon + gas + bribe'ı tek seferde değerlendirir.
+        let gross_profit = (spread_ratio - total_fee_ratio) * trade_amount_weth;
+        let net_after_bribe = gross_profit * (1.0 - self.bribe_pct);
+        let estimated_profit = net_after_bribe - self.estimated_gas_cost_weth;
 
         if estimated_profit < self.min_profit_weth {
             return PreFilterResult::Unprofitable {

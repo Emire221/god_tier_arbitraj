@@ -84,18 +84,27 @@ pub fn check_arbitrage_opportunity(
         return None;
     }
 
-    // ─── v17.0: Havuz Komisyon Tavan Filtresi ────────────────────
-    // Yüksek komisyonlu havuzlar arbitraj marjını eritir.
-    // max_pool_fee_bps üzerindeki havuzlar erken elenir (NR'ye girmez).
+    // ─── v19.0: Havuz Komisyon Güvenlik Tavanı (Sadece Uyarı) ─────
+    // v19.0: Statik fee reddi kaldırıldı. Komisyon filtresi artık
+    // PreFilter'ın dinamik net kârlılık hesabının parçası.
+    // Sadece çok yüksek fee'li havuzlarda (>max_pool_fee_bps) güvenlik reddi.
     {
         let fee_a_bps = state_a.live_fee_bps.unwrap_or(pools[0].fee_bps);
         let fee_b_bps = state_b.live_fee_bps.unwrap_or(pools[1].fee_bps);
         if fee_a_bps > config.max_pool_fee_bps || fee_b_bps > config.max_pool_fee_bps {
             eprintln!(
-                "     \u{23ed}\u{fe0f} [FeeFilter] Havuz komisyonu tavan\u{0131} a\u{015f}\u{0131}yor: A={}bps B={}bps (maks={}bps)",
+                "     \u{23ed}\u{fe0f} [FeeFilter] Havuz komisyonu g\u{00fc}venlik tavan\u{0131}n\u{0131} a\u{015f}\u{0131}yor: A={}bps B={}bps (maks={}bps)",
                 fee_a_bps, fee_b_bps, config.max_pool_fee_bps,
             );
             return None;
+        }
+        // v19.0: Yüksek ama kabul edilebilir fee'ler loglansın
+        let total_fee_bps = fee_a_bps + fee_b_bps;
+        if total_fee_bps > 30 {
+            eprintln!(
+                "     \u{2139}\u{fe0f} [FeeInfo] Y\u{00fc}ksek toplam komisyon: A={}bps + B={}bps = {}bps \u{2192} dinamik k\u{00e2}rl\u{0131}l\u{0131}k kontrol\u{00fc}ne devrediliyor",
+                fee_a_bps, fee_b_bps, total_fee_bps,
+            );
         }
     }
 
@@ -114,25 +123,30 @@ pub fn check_arbitrage_opportunity(
     // L1 data fee → WETH (tüm gas hesaplarında kullanılacak)
     let l1_data_fee_weth = l1_data_fee_wei as f64 / 1e18;
 
-    // ─── O(1) PreFilter — NR'ye girmeden hızlı eleme ─────────
-    // Spread'in fee'leri kurtarıp kurtaramayacağını mikrosaniyede kontrol eder.
-    // Kurtaramıyorsa NR'nin ~90 iterasyonluk hesaplama maliyetinden kaçınılır.
+    // ─── v19.0: O(1) PreFilter — NR'ye girmeden hızlı eleme ───
+    // Spread'in fee + gas + bribe maliyetlerini kurtarıp kurtaramayacağını
+    // mikrosaniyede kontrol eder. v19.0: Gas maliyetine %20 güvenlik marjı
+    // eklendi ve bribe maliyeti de hesaba katıldı → kârsız işlemler
+    // en erken safhada elenir.
     {
-        // Dinamik gas cost (PreFilter için) — L2 + L1
-        let gas_estimate: u64 = last_simulated_gas.unwrap_or(150_000);
+        // Dinamik gas cost (PreFilter için) — L2 + L1 + %20 güvenlik marjı
+        let gas_estimate: u64 = last_simulated_gas.unwrap_or(200_000);
         let prefilter_gas_cost_weth = if block_base_fee > 0 {
             let l2 = (gas_estimate as f64 * block_base_fee as f64) / 1e18;
-            (l2 + l1_data_fee_weth).max(0.00001)
+            // v19.0: %20 güvenlik marjı (gas tahminindeki belirsizlik)
+            ((l2 + l1_data_fee_weth) * 1.20).max(0.00002)
         } else {
-            (config.gas_cost_fallback_weth + l1_data_fee_weth).max(0.00001)
+            ((config.gas_cost_fallback_weth + l1_data_fee_weth) * 1.20).max(0.00002)
         };
 
         let pre_filter = math::PreFilter {
             fee_a: state_a.live_fee_bps.map(|b| b as f64 / 10_000.0).unwrap_or(pools[0].fee_fraction),
             fee_b: state_b.live_fee_bps.map(|b| b as f64 / 10_000.0).unwrap_or(pools[1].fee_fraction),
+            // v19.0: Gas + bribe maliyeti (bribe = kârın %25'i, en kötü senaryo)
             estimated_gas_cost_weth: prefilter_gas_cost_weth,
             min_profit_weth: config.min_net_profit_weth,
             flash_loan_fee_rate: config.flash_loan_fee_bps / 10_000.0,
+            bribe_pct: config.bribe_pct,
         };
 
         // Kaba tarama miktarı: max trade size'ın %50'si (konservatif tahmin)
@@ -216,21 +230,22 @@ pub fn check_arbitrage_opportunity(
         }
     }
 
-    // ─── Dinamik Gas Cost (v18.0) ─────────────────────────────────
-    // Formül: total_gas = L2_execution_fee + L1_data_fee
+    // ─── Dinamik Gas Cost (v19.0) ─────────────────────────────────
+    // Formül: total_gas = L2_execution_fee + L1_data_fee + güvenlik marjı
     //   L2: gas_cost_weth = (gas_estimate * base_fee) / 1e18
     //   L1: l1_data_fee_wei (GasPriceOracle.getL1Fee() sonucu)
     //
     // OP Stack ağlarında (Base) asıl maliyet L1 data fee'dir.
     // L2 execution fee genelde çok düşüktür (~0.001 Gwei base_fee).
     // L1 data fee'yi hesaba katmamak botun zararına işlem yapmasına yol açar.
+    // v19.0: %20 güvenlik marjı eklendi — gas spike'larında zarara girmemek için.
     let dynamic_gas_cost_weth = if block_base_fee > 0 {
-        let gas_estimate: u64 = last_simulated_gas.unwrap_or(150_000);
+        let gas_estimate: u64 = last_simulated_gas.unwrap_or(200_000);
         let l2_gas_cost_weth = (gas_estimate as f64 * block_base_fee as f64) / 1e18;
-        // Toplam: L2 execution + L1 data fee
-        (l2_gas_cost_weth + l1_data_fee_weth).max(0.00001)
+        // Toplam: (L2 execution + L1 data fee) × 1.20 güvenlik marjı
+        ((l2_gas_cost_weth + l1_data_fee_weth) * 1.20).max(0.00002)
     } else {
-        (config.gas_cost_fallback_weth + l1_data_fee_weth).max(0.00001)
+        ((config.gas_cost_fallback_weth + l1_data_fee_weth) * 1.20).max(0.00002)
     };
 
     // Gas cost'u quote cinsine çevir (NR için)

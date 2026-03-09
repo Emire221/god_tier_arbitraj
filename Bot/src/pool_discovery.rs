@@ -215,13 +215,21 @@ async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> 
                 .as_ref()
                 .and_then(|l| l.usd)
                 .unwrap_or(0.0)
-                >= 50_000.0
+                >= 25_000.0
         })
-        // Stratejik komisyon filtresi — keşif aşamasında geniş filtre,
-        // strateji aşamasında max_pool_fee_bps ile ince filtre uygulanır.
-        // v17.0: 0.01 → 0.30 genişletildi (%0.30 = 30 bps tavanı).
-        // Yüksek fee'li havuzlar keşfedilir ama düşük öncelikle eşleştirilir.
-        .filter(|p| p.fee_tier.map_or(true, |fee| fee <= 0.30))
+        // v19.0: Minimum 24h hacim filtresi — düşük hacimli havuzlar
+        // yeterli volatilite sunmaz, arbitraj fırsatı nadir olur.
+        .filter(|p| {
+            p.volume
+                .as_ref()
+                .and_then(|v| v.h24)
+                .unwrap_or(0.0)
+                >= 10_000.0
+        })
+        // v19.0: Keşif komisyon filtresi: 0.30 → 1.00 genişletildi.
+        // 100 bps'e kadar olan havuzlar keşfedilir, strateji katmanında
+        // dinamik net kârlılık hesabı ile süzülür.
+        .filter(|p| p.fee_tier.map_or(true, |fee| fee <= 1.00))
         .map(|p| DiscoveredPool {
             address: p.pair_address,
             dex: p.dex_id,

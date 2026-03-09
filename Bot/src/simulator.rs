@@ -28,7 +28,7 @@ use revm::{
     },
 };
 
-use crate::types::{PoolConfig, SharedPoolState, SimulationResult};
+use crate::types::{DexType, PoolConfig, SharedPoolState, SimulationResult};
 use crate::math;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -44,6 +44,103 @@ fn to_revm_addr(addr: Address) -> RevmAddress {
 fn to_revm_u256(val: U256) -> RevmU256 {
     let bytes = val.to_be_bytes::<32>();
     RevmU256::from_be_bytes(bytes)
+}
+
+/// Uniswap V3 / PancakeSwap V3 / Aerodrome slot0 storage paketleme.
+///
+/// v17.0 KRİTİK DÜZELTME: DEX'e özel storage layout farkları.
+///
+/// UniV3 slot0 (7 alan, uint8 feeProtocol — 248 bit, TEK slot):
+///   [bits 0..159]   sqrtPriceX96 (uint160)
+///   [bits 160..183] tick (int24, two's complement)
+///   [bits 184..199] observationIndex (uint16) — 0
+///   [bits 200..215] observationCardinality (uint16) — 0
+///   [bits 216..231] observationCardinalityNext (uint16) — 0
+///   [bits 232..239] feeProtocol (uint8) — 0
+///   [bits 240..247] unlocked (bool) — TRUE
+///
+/// PancakeSwap V3 slot0 (7 alan, uint32 feeProtocol — 272 bit > 256, İKİ slot!):
+///   Storage Slot N:   sqrtPriceX96 + tick + observation alanları (232 bit)
+///   Storage Slot N+1: feeProtocol (uint32, bit 0-31) + unlocked (bool, bit 32)
+///   ÖNCEKİ BUG: unlocked slot N'de bit 240'a yazılıyordu → Pool Locked revert!
+///
+/// Aerodrome CLPool slot0 (6 alan, feeProtocol YOK — 240 bit, TEK slot):
+///   [bits 0..159]   sqrtPriceX96 (uint160)
+///   [bits 160..183] tick (int24)
+///   [bits 184..231] observation alanları (48 bit)
+///   [bits 232..239] unlocked (bool) — TRUE
+fn pack_slot0(sqrt_price_x96: U256, tick: i32, dex: DexType) -> RevmU256 {
+    let mut packed = U256::ZERO;
+
+    // sqrtPriceX96 — lower 160 bits
+    let mask_160 = (U256::from(1u64) << 160) - U256::from(1u64);
+    packed = packed | (sqrt_price_x96 & mask_160);
+
+    // tick — int24 at bit 160 (two's complement, masked to 24 bits)
+    let tick_bits = if tick >= 0 {
+        U256::from(tick as u32)
+    } else {
+        // Two's complement for negative: 0xFFFFFF & tick
+        let abs_val = (-tick) as u32;
+        let twos = 0x01_000_000u32.wrapping_sub(abs_val);
+        U256::from(twos)
+    };
+    let mask_24 = U256::from(0x00FF_FFFFu32);
+    packed = packed | ((tick_bits & mask_24) << 160);
+
+    // unlocked = true (1) — position depends on DEX type
+    // PCS V3: uint32 feeProtocol (32 bit) slot 0'a SIĞMAZ (232+32=264 > 256)
+    //         feeProtocol + unlocked → slot N+1'e taşar
+    //         Bu yüzden slot 0'a unlocked yazılMAZ
+    match dex {
+        DexType::PancakeSwapV3 => {
+            // PCS V3: unlocked slot 0'da değil, slot N+1'de (bit 32)
+            // Burada sadece sqrtPriceX96 + tick yazılır
+        }
+        DexType::Aerodrome => {
+            // Aerodrome: feeProtocol yok, unlocked bit 232
+            packed = packed | (U256::from(1u64) << 232);
+        }
+        _ => {
+            // UniV3 / SushiSwap V3: uint8 feeProtocol, unlocked bit 240
+            packed = packed | (U256::from(1u64) << 240);
+        }
+    }
+
+    to_revm_u256(packed)
+}
+
+/// PancakeSwap V3 slot0 ikinci storage slot'u (slot N+1).
+///
+/// PCS V3 Slot0 struct'ında uint32 feeProtocol 256 bit sınırını aştığı için
+/// feeProtocol + unlocked ayrı bir slot'a taşar:
+///   [bits 0..31]  feeProtocol (uint32) — 0 yazılır
+///   [bits 32..39] unlocked (bool) — TRUE olmalı
+fn pack_pcs_v3_slot1_unlocked() -> RevmU256 {
+    to_revm_u256(U256::from(1u64) << 32)
+}
+
+/// DEX tipine göre slot0 storage slot indeksi.
+///
+/// UniV3/PCS: Slot0 ilk state variable → storage slot 0
+/// Aerodrome CLPool: gauge (address) + nft+fee packed → slot0 storage slot 2
+fn slot0_storage_index(dex: DexType) -> RevmU256 {
+    match dex {
+        DexType::Aerodrome => RevmU256::from(2),
+        _ => RevmU256::ZERO,
+    }
+}
+
+/// DEX tipine göre liquidity storage slot indeksi.
+///
+/// UniV3: Slot0(1 slot) + feeGrowth0 + feeGrowth1 + protocolFees → slot 4
+/// PCS V3: Slot0(2 slot!) + feeGrowth0 + feeGrowth1 + protocolFees → slot 5
+/// Aerodrome: gauge + nft+fee + Slot0(1 slot) + feeGrowth0 + feeGrowth1 → slot 5
+fn liquidity_storage_index(dex: DexType) -> RevmU256 {
+    match dex {
+        DexType::PancakeSwapV3 | DexType::Aerodrome => RevmU256::from(5),
+        _ => RevmU256::from(4),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -126,13 +223,24 @@ impl SimulationEngine {
             let state = state_lock.read();
             let addr = to_revm_addr(config.address);
 
-            // Slot 0: slot0 (sqrtPriceX96, tick, vb. — packed)
-            let slot0_value = to_revm_u256(state.sqrt_price_x96);
-            let _ = db.insert_account_storage(addr, RevmU256::ZERO, slot0_value);
+            // slot0 packed — DEX'e göre doğru storage slot'a yaz
+            let s0_idx = slot0_storage_index(config.dex);
+            let slot0_value = pack_slot0(state.sqrt_price_x96, state.tick, config.dex);
+            let _ = db.insert_account_storage(addr, s0_idx, slot0_value);
 
-            // Slot 4: liquidity
+            // PCS V3: unlocked, slot0'dan ayrı slot'ta (slot N+1)
+            if config.dex == DexType::PancakeSwapV3 {
+                let _ = db.insert_account_storage(
+                    addr,
+                    s0_idx + RevmU256::from(1),
+                    pack_pcs_v3_slot1_unlocked(),
+                );
+            }
+
+            // liquidity — DEX'e göre doğru slot
+            let liq_idx = liquidity_storage_index(config.dex);
             let liquidity_value = RevmU256::from(state.liquidity);
-            let _ = db.insert_account_storage(addr, RevmU256::from(4), liquidity_value);
+            let _ = db.insert_account_storage(addr, liq_idx, liquidity_value);
         }
 
         db
@@ -165,14 +273,24 @@ impl SimulationEngine {
                 db.insert_account_info(addr, info);
             }
 
-            // Kritik storage slot'ları
-            // Slot 0: slot0 (sqrtPriceX96, tick, vb. — packed)
-            let slot0_value = to_revm_u256(state.sqrt_price_x96);
-            let _ = db.insert_account_storage(addr, RevmU256::ZERO, slot0_value);
+            // Kritik storage slot'ları — DEX'e göre doğru slot indeksleri
+            let s0_idx = slot0_storage_index(config.dex);
+            let slot0_value = pack_slot0(state.sqrt_price_x96, state.tick, config.dex);
+            let _ = db.insert_account_storage(addr, s0_idx, slot0_value);
 
-            // Slot 4: liquidity
+            // PCS V3: unlocked, slot0'dan ayrı slot'ta (feeProtocol uint32 taşması)
+            if config.dex == DexType::PancakeSwapV3 {
+                let _ = db.insert_account_storage(
+                    addr,
+                    s0_idx + RevmU256::from(1),
+                    pack_pcs_v3_slot1_unlocked(),
+                );
+            }
+
+            // liquidity — DEX'e göre doğru slot
+            let liq_idx = liquidity_storage_index(config.dex);
             let liquidity_value = RevmU256::from(state.liquidity);
-            let _ = db.insert_account_storage(addr, RevmU256::from(4), liquidity_value);
+            let _ = db.insert_account_storage(addr, liq_idx, liquidity_value);
         }
 
         // ── Caller Hesabı (Test ETH Bakiyesi) ─────────────────────

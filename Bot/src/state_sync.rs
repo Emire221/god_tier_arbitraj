@@ -205,12 +205,69 @@ sol! {
 // Tek Havuz Durum Senkronizasyonu
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// RPC durum sorgulama zaman aşımı (milisaniye).
+/// 500ms içinde yanıt gelmezse sorgu başarısız sayılır ve yeniden denenir.
+/// Base L2 ~2s blok süresi → 500ms timeout makul (1 RTT + işlem süresi).
+const SYNC_TIMEOUT_MS: u64 = 500;
+
+/// Maksimum yeniden deneme sayısı (timeout sonrası)
+const SYNC_MAX_RETRIES: u32 = 2;
+
 /// Tek bir havuzun durumunu RPC üzerinden oku ve SharedPoolState'e yaz
+///
+/// v17.0: Sıkı timeout (500ms) + yeniden deneme (2 kez) mekanizması.
+///        RPC gecikmesi spike'ı (>500ms) durumunda eski veriyle devam etmek
+///        yerine hızlıca yeniden dener. 2 deneme sonrası hata döner.
 ///
 /// v10.0: slot0 ve liquidity sorguları artık paralel (tokio::join!)
 ///        Eski: 2 sıralı RPC çağrısı (2 RTT)
 ///        Yeni: 1 paralel çağrı (1 RTT) — blok başına ~2-5ms kazanç
 pub async fn sync_pool_state<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
+    provider: &P,
+    pool_config: &PoolConfig,
+    pool_state: &SharedPoolState,
+    block_number: u64,
+) -> Result<()> {
+    let mut last_err: Option<eyre::Report> = None;
+
+    for attempt in 0..=SYNC_MAX_RETRIES {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(SYNC_TIMEOUT_MS),
+            sync_pool_state_inner(provider, pool_config, pool_state, block_number),
+        ).await {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(e)) => {
+                // RPC hatası (timeout değil) — yeniden deneme
+                if attempt < SYNC_MAX_RETRIES {
+                    eprintln!(
+                        "  \u{26a1} [{}] Sync hatası (deneme {}/{}): {}",
+                        pool_config.name, attempt + 1, SYNC_MAX_RETRIES + 1, e
+                    );
+                }
+                last_err = Some(e);
+            }
+            Err(_elapsed) => {
+                // Timeout — yeniden deneme
+                if attempt < SYNC_MAX_RETRIES {
+                    eprintln!(
+                        "  \u{26a1} [{}] Sync timeout ({}ms, deneme {}/{})",
+                        pool_config.name, SYNC_TIMEOUT_MS,
+                        attempt + 1, SYNC_MAX_RETRIES + 1,
+                    );
+                }
+                last_err = Some(eyre::eyre!(
+                    "[{}] sync_pool_state timeout ({}ms)",
+                    pool_config.name, SYNC_TIMEOUT_MS
+                ));
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| eyre::eyre!("[{}] sync başarısız", pool_config.name)))
+}
+
+/// sync_pool_state iç implementasyonu (timeout wrapper'sız)
+async fn sync_pool_state_inner<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
     provider: &P,
     pool_config: &PoolConfig,
     pool_state: &SharedPoolState,
@@ -512,8 +569,52 @@ pub async fn sync_all_pools<T: Transport + Clone, P: Provider<T, Ethereum> + Syn
     states: &[SharedPoolState],
     block_number: u64,
 ) -> Vec<Result<()>> {
+    // v17.0: Sıkı timeout (500ms) + hızlı retry (1 kez)
+    // RPC gecikmesi 500ms'yi aşarsa ilk deneme iptal edilir ve yeniden denenir.
+    // İkinci deneme de başarısız olursa hata döner.
+    // Amaç: 1.8s spike'lardan kaçınıp eski fiyatla işlem yapmayı önlemek.
+    const SYNC_TIMEOUT_MS: u64 = 500;
+    const MAX_RETRIES: u32 = 1;
+
     let futures: Vec<_> = pools.iter().zip(states.iter())
-        .map(|(config, state)| sync_pool_state(provider, config, state, block_number))
+        .map(|(config, state)| {
+            let config = config.clone();
+            let state = state.clone();
+            async move {
+                for attempt in 0..=MAX_RETRIES {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_millis(SYNC_TIMEOUT_MS),
+                        sync_pool_state(provider, &config, &state, block_number),
+                    ).await {
+                        Ok(Ok(())) => return Ok(()),
+                        Ok(Err(e)) => {
+                            if attempt < MAX_RETRIES {
+                                eprintln!(
+                                    "     \u{26a1} [{}] Sync hatası, yeniden deneniyor ({}/{}): {}",
+                                    config.name, attempt + 1, MAX_RETRIES, e,
+                                );
+                                continue;
+                            }
+                            return Err(e);
+                        }
+                        Err(_elapsed) => {
+                            if attempt < MAX_RETRIES {
+                                eprintln!(
+                                    "     \u{26a1} [{}] Sync timeout ({}ms), yeniden deneniyor ({}/{})",
+                                    config.name, SYNC_TIMEOUT_MS, attempt + 1, MAX_RETRIES,
+                                );
+                                continue;
+                            }
+                            return Err(eyre::eyre!(
+                                "[{}] Sync timeout: {}ms i\u{00e7}inde yan\u{0131}t al\u{0131}namad\u{0131} ({} deneme)",
+                                config.name, SYNC_TIMEOUT_MS, MAX_RETRIES + 1,
+                            ));
+                        }
+                    }
+                }
+                unreachable!()
+            }
+        })
         .collect();
     join_all(futures).await
 }

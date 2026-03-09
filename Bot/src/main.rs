@@ -373,6 +373,9 @@ MAX_STALENESS_MS=2000
 STATS_INTERVAL=10
 MAX_RETRIES=0
 
+# ─── Havuz Komisyon Filtresi ───
+MAX_POOL_FEE_BPS=10
+
 # ─── TickBitmap Derinlik Ayarları ───
 TICK_BITMAP_RANGE=10
 TICK_BITMAP_MAX_AGE_BLOCKS=5
@@ -511,6 +514,20 @@ async fn main() -> Result<()> {
 
     let matched_cfg = pool_discovery::load_matched_pools()?;
     let (pools, pair_combos) = pool_discovery::build_runtime(&matched_cfg)?;
+
+    // ═══ v17.0: PRIVATE RPC FAIL-FAST KONTROLÜ ═══
+    // Canlı modda PRIVATE_RPC_URL olmadan bot çalışması güvenlik açığıdır.
+    // İşlemler public mempool'a düşerek MEV saldırılarına maruz kalır.
+    // Bu kontrol, eksik yapılandırmayla boşuna çalışmayı önler (fail-fast).
+    if config.execution_enabled() && config.private_rpc_url.is_none() {
+        return Err(eyre::eyre!(
+            "KRİTİK: PRIVATE_RPC_URL tanımlanmamış!\n\
+             Canlı mod (EXECUTION_ENABLED=true) aktifken Private RPC zorunludur.\n\
+             İşlemler public mempool'a gönderilemez — MEV saldırı riski.\n\
+             Çözüm: .env dosyasına PRIVATE_RPC_URL=https://... ekleyin\n\
+             veya --mode shadow ile gölge modda başlatın."
+        ));
+    }
 
     // ═══ v11.0: TOKEN WHITELIST DOĞRULAMA (tüm çiftler) ═══
     {

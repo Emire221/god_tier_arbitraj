@@ -197,15 +197,18 @@ async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> 
     let mut discovered: Vec<DiscoveredPool> = pairs
         .into_iter()
         .filter(|p| p.chain_id == "base")
-        // ── DEX Beyaz Listesi (Uniswap V3 ABI uyumlu) ──────────
-        // Sadece slot0() ABI'si Uniswap V3 referansıyla birebir uyumlu
-        // DEX'ler kabul edilir. Algebra V3 (quickswap), Aerodrome vb.
-        // farklı slot0 yapısı kullanır → state_sync revert → spike.
+        // ── DEX Beyaz Listesi (V3 ABI uyumlu) ───────────────
+        // Uniswap V3 swap() / slot0() ABI’si ile uyumlu DEX’ler.
+        // Her DEX'in slot0 struct farkları state_sync.rs ve
+        // simulator.rs'de DEX-özel olarak ele alınır.
+        // v17.0: Aerodrome Slipstream (CLPool) eklendi —
+        //        slot0 6 alan, callback=uniswapV3SwapCallback
         .filter(|p| {
             let dex = p.dex_id.to_lowercase();
             dex.contains("uniswap")
                 || dex.contains("pancakeswap")
                 || dex.contains("sushiswap")
+                || dex.contains("aerodrome")
         })
         .filter(|p| {
             p.liquidity
@@ -214,8 +217,11 @@ async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> 
                 .unwrap_or(0.0)
                 >= 50_000.0
         })
-        // Stratejik komisyon filtresi — sadece ≤%0.01 fee'li havuzlar geçer
-        .filter(|p| p.fee_tier.map_or(true, |fee| fee <= 0.01))
+        // Stratejik komisyon filtresi — keşif aşamasında geniş filtre,
+        // strateji aşamasında max_pool_fee_bps ile ince filtre uygulanır.
+        // v17.0: 0.01 → 0.30 genişletildi (%0.30 = 30 bps tavanı).
+        // Yüksek fee'li havuzlar keşfedilir ama düşük öncelikle eşleştirilir.
+        .filter(|p| p.fee_tier.map_or(true, |fee| fee <= 0.30))
         .map(|p| DiscoveredPool {
             address: p.pair_address,
             dex: p.dex_id,
@@ -272,8 +278,16 @@ fn match_arbitrage_pairs(pools: &[DiscoveredPool]) -> Vec<MatchedPair> {
         }
 
         let mut selected: Vec<&DiscoveredPool> = dex_best.into_values().collect();
+        // v17.0: En düşük fee'li havuzu öne al, eşit fee'de en yüksek likiditeyi tercih et
         selected.sort_by(|a, b| {
-            b.liquidity_usd.partial_cmp(&a.liquidity_usd).unwrap_or(std::cmp::Ordering::Equal)
+            let fee_a = a.fee_tier.unwrap_or(f64::MAX);
+            let fee_b = b.fee_tier.unwrap_or(f64::MAX);
+            fee_a.partial_cmp(&fee_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    b.liquidity_usd.partial_cmp(&a.liquidity_usd)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
         });
 
         // WETH ve quote token belirleme

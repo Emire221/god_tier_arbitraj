@@ -77,6 +77,21 @@ pub fn check_arbitrage_opportunity(
         return None;
     }
 
+    // ─── v17.0: Havuz Komisyon Tavan Filtresi ────────────────────
+    // Yüksek komisyonlu havuzlar arbitraj marjını eritir.
+    // max_pool_fee_bps üzerindeki havuzlar erken elenir (NR'ye girmez).
+    {
+        let fee_a_bps = state_a.live_fee_bps.unwrap_or(pools[0].fee_bps);
+        let fee_b_bps = state_b.live_fee_bps.unwrap_or(pools[1].fee_bps);
+        if fee_a_bps > config.max_pool_fee_bps || fee_b_bps > config.max_pool_fee_bps {
+            eprintln!(
+                "     \u{23ed}\u{fe0f} [FeeFilter] Havuz komisyonu tavan\u{0131} a\u{015f}\u{0131}yor: A={}bps B={}bps (maks={}bps)",
+                fee_a_bps, fee_b_bps, config.max_pool_fee_bps,
+            );
+            return None;
+        }
+    }
+
     let price_a = state_a.eth_price_usd;
     let price_b = state_b.eth_price_usd;
 
@@ -1137,6 +1152,7 @@ mod gas_spike_tests {
             latency_spike_threshold_ms: 200.0,
             private_rpc_url: None,
             rpc_wss_url_extra: Vec::new(),
+            max_pool_fee_bps: 200, // Test: yüksek tavan — gas spike testleri fee filtresinden etkilenmesin
         }
     }
 

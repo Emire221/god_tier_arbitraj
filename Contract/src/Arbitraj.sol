@@ -365,28 +365,66 @@ contract ArbitrajBotu {
     //  CALLBACK — Uniswap V3 / Aerodrome Slipstream Ortak Geri Çağrısı
     // ═════════════════════════════════════════════════════════════════════════
     //
-    //  Bu tek fonksiyon İKİ farklı havuzdan gelen callback'leri yönetir:
+    //  Aşağıdaki fonksiyonlar DEX'lerin callback standartlarına göre
+    //  adlandırılmıştır. Her biri aynı iç mantığı (_handleCallback) çağırır:
     //
-    //  A) UniV3 Callback (msg.sender == expectedPool):
+    //  A) Flash Swap Kaynak (msg.sender == expectedPool):
     //     1. Borçlu ve alınan miktarları belirle
-    //     2. Alınan token'larla Slipstream'de swap yap
-    //     3. Slipstream callback'i tetiklenir (B)
-    //     4. UniV3 borcunu geri öde
+    //     2. Alınan token'larla hedef havuzda (Pool B) swap yap
+    //     3. Hedef havuz callback'i tetiklenir (B)
+    //     4. Kaynak havuza borcunu geri öde
     //
-    //  B) Slipstream Callback (msg.sender == aeroPool):
+    //  B) Hedef Havuz Callback (msg.sender == aeroPool):
     //     1. Borçlu miktarı belirle (pozitif delta)
-    //     2. receivedToken'ı Slipstream'e transfer et (borç öde)
+    //     2. receivedToken'ı hedef havuza transfer et (borç öde)
     //
     //  Güvenlik: Her iki yol da transient storage ile doğrulanır.
-    //            Ne UniV3 ne Slipstream olmayan çağrıcılar reddedilir.
+    //            Tanınmayan çağrıcılar reddedilir (InvalidCaller).
     //
     // ═════════════════════════════════════════════════════════════════════════
 
+    // ── Uniswap V3 Callback ──────────────────────────────────────────────
     function uniswapV3SwapCallback(
         int256 amount0Delta,
         int256 amount1Delta,
-        bytes calldata /* data — kullanılmıyor, TLOAD kullanılıyor */
+        bytes calldata
     ) external {
+        _handleCallback(amount0Delta, amount1Delta);
+    }
+
+    // ── PancakeSwap V3 Callback ──────────────────────────────────────────
+    //    PancakeSwap V3 havuzları swap sonrası bu fonksiyonu çağırır.
+    //    İmza farklı, mantık aynı — transient storage doğrulaması yapılır.
+    function pancakeV3SwapCallback(
+        int256 amount0Delta,
+        int256 amount1Delta,
+        bytes calldata
+    ) external {
+        _handleCallback(amount0Delta, amount1Delta);
+    }
+
+    // ── Aerodrome Slipstream (CL) Callback ───────────────────────────────
+    //    Aerodrome CLPool swap sonrası uniswapV3SwapCallback çağırır
+    //    (UniV3 fork'u olduğu için). Bu fonksiyon gelecekte Aerodrome'un
+    //    callback adını değiştirmesi durumunda yedek olarak korunur.
+    //    Mevcut durumda uniswapV3SwapCallback zaten Aerodrome'u karşılar.
+    //    v17.0: SushiSwap V3 de uniswapV3SwapCallback kullanır → kapsanır.
+    function aerodromeSwapCallback(
+        int256 amount0Delta,
+        int256 amount1Delta,
+        bytes calldata
+    ) external {
+        _handleCallback(amount0Delta, amount1Delta);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  INTERNAL — Ortak Callback Mantığı
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function _handleCallback(
+        int256 amount0Delta,
+        int256 amount1Delta
+    ) internal {
         // ── TRANSIENT STORAGE'DAN BAĞLAM OKU ─────────────────────────────
         address expectedPool;
         address aeroPool;
@@ -403,7 +441,7 @@ contract ArbitrajBotu {
         }
 
         // ═════════════════════════════════════════════════════════════════
-        //  YOL A: UniV3 Flash Swap Callback
+        //  YOL A: Kaynak Havuz (Flash Swap) Callback
         // ═════════════════════════════════════════════════════════════════
         if (msg.sender == expectedPool) {
             // ── Borçlu ve alınan miktarları belirle ──────────────────────
@@ -422,10 +460,9 @@ contract ArbitrajBotu {
                 amountReceived = amount0Delta < 0 ? uint256(-amount0Delta) : 0;
             }
 
-            // ── Slipstream'de Sat (V3 Concentrated Liquidity Swap) ───────
-            //    Alınan token'ları (receivedToken) Slipstream'de owedToken'a çevir.
-            //    Slipstream, UniV3 fork — aynı swap mekanizması.
-            //    Slipstream callback'i (Yol B) tetiklenecek ve borç ödenecek.
+            // ── Hedef Havuzda Sat ────────────────────────────────────────
+            //    Alınan token'ları (receivedToken) hedef havuzda owedToken'a çevir.
+            //    Hedef havuz callback'i (Yol B) tetiklenecek ve borç ödenecek.
             bool aeroZeroForOne = (aeroDir == 0);
             uint160 aeroLimit = aeroZeroForOne
                 ? MIN_SQRT_RATIO_PLUS_1
@@ -433,36 +470,30 @@ contract ArbitrajBotu {
 
             ICLPool(aeroPool).swap(
                 address(this),           // recipient: biz
-                aeroZeroForOne,          // Slipstream swap yönü
+                aeroZeroForOne,          // swap yönü
                 int256(amountReceived),  // exact input (alınan miktar)
                 aeroLimit,               // fiyat sınırı
                 hex"01"                  // data: ≥1 byte → callback tetiklenir (TLOAD kullanılır)
             );
 
-            // ── UniV3 Borcunu Öde ────────────────────────────────────────
-            //    owedToken → UniV3 havuzuna borçlu miktarı transfer et.
-            //    Slipstream swap'tan elde edilen owedToken bu ödemeye yeter.
-            //    Kalan fazlalık = kâr (fallback() bakiye kontrolü ile doğrular).
+            // ── Kaynak Havuz Borcunu Öde ─────────────────────────────────
             _safeTransfer(owedToken, msg.sender, amountOwed);
 
         // ═════════════════════════════════════════════════════════════════
-        //  YOL B: Slipstream (Aerodrome CL) Callback
+        //  YOL B: Hedef Havuz Callback
         // ═════════════════════════════════════════════════════════════════
         } else if (msg.sender == aeroPool) {
-            // ── Slipstream'e Borç Öde ────────────────────────────────────
-            //    Pozitif delta = borçlu miktar. receivedToken'ı transfer et.
-            //    receivedToken = UniV3'ten aldığımız token = Slipstream'in input'u
+            // ── Hedef Havuza Borç Öde ────────────────────────────────────
             // Güvenli delta seçimi: pozitif taraf = borçlu miktar
-            // Her iki delta da negatif/sıfır ise 0 döner → safeTransfer(0) sessizce geçer
-            uint256 amountOwedToSlipstream;
+            uint256 amountOwedToTarget;
             if (amount0Delta > 0) {
-                amountOwedToSlipstream = uint256(amount0Delta);
+                amountOwedToTarget = uint256(amount0Delta);
             } else if (amount1Delta > 0) {
-                amountOwedToSlipstream = uint256(amount1Delta);
+                amountOwedToTarget = uint256(amount1Delta);
             } else {
-                amountOwedToSlipstream = 0;
+                amountOwedToTarget = 0;
             }
-            _safeTransfer(receivedToken, msg.sender, amountOwedToSlipstream);
+            _safeTransfer(receivedToken, msg.sender, amountOwedToTarget);
 
         // ═════════════════════════════════════════════════════════════════
         //  REDDET: Bilinmeyen Çağrıcı

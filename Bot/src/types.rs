@@ -631,6 +631,10 @@ pub struct BotConfig {
     /// v10.0: Ek WSS RPC URL'leri (Round-Robin havuz için)
     /// Primary + backup dışında 3. endpoint
     pub rpc_wss_url_extra: Vec<String>,
+    /// v17.0: Maksimum havuz komisyon tavanı (basis points)
+    /// Bu değerin üzerindeki fee'ye sahip havuzlar strateji değerlendirmesinde atlanır.
+    /// Varsayılan: 10 bps (%0.10). .env'den MAX_POOL_FEE_BPS ile ayarlanabilir.
+    pub max_pool_fee_bps: u32,
 }
 
 impl BotConfig {
@@ -803,6 +807,10 @@ impl BotConfig {
                 }
                 extras
             },
+            max_pool_fee_bps: std::env::var("MAX_POOL_FEE_BPS")
+                .unwrap_or_else(|_| "10".into())
+                .parse::<u32>()
+                .unwrap_or(10),
         })
     }
 

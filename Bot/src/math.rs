@@ -1118,17 +1118,19 @@ pub fn compute_arbitrage_profit(
     gas_cost_usd: f64,
     flash_loan_fee_bps: f64,
     eth_price_usd: f64,
-    token0_is_weth: bool,
+    sell_token0_is_weth: bool,
     sell_tick_spacing: i32,
     buy_tick_spacing: i32,
+    buy_token0_is_weth: bool,
 ) -> f64 {
     compute_arbitrage_profit_with_bitmap(
         amount_in_weth,
         sell_pool, sell_fee_fraction,
         buy_pool, buy_fee_fraction,
         gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-        token0_is_weth, sell_tick_spacing, buy_tick_spacing,
+        sell_token0_is_weth, sell_tick_spacing, buy_tick_spacing,
         None, None,
+        buy_token0_is_weth,
     )
 }
 
@@ -1155,11 +1157,12 @@ pub fn compute_arbitrage_profit_with_bitmap(
     gas_cost_usd: f64,
     flash_loan_fee_bps: f64,
     eth_price_usd: f64,
-    token0_is_weth: bool,
+    sell_token0_is_weth: bool,
     sell_tick_spacing: i32,
     buy_tick_spacing: i32,
     sell_bitmap: Option<&TickBitmapData>,
     buy_bitmap: Option<&TickBitmapData>,
+    buy_token0_is_weth: bool,
 ) -> f64 {
     if amount_in_weth <= 0.0 {
         return f64::NEG_INFINITY;
@@ -1180,7 +1183,8 @@ pub fn compute_arbitrage_profit_with_bitmap(
     let buy_fee_pips = exact::fee_fraction_to_pips(buy_fee_fraction);
 
     // 1. WETH'i pahalı havuzda sat → USDC al (exact U256 swap)
-    let sell_zero_for_one = token0_is_weth;
+    // v20.0: Her havuzun kendi token0_is_weth değeri kullanılır
+    let sell_zero_for_one = sell_token0_is_weth;
     let sell_result = exact::compute_exact_swap(
         sell_pool.sqrt_price_x96,
         sell_pool.liquidity,
@@ -1197,7 +1201,8 @@ pub fn compute_arbitrage_profit_with_bitmap(
     }
 
     // 2. USDC → WETH geri al (exact U256 swap)
-    let buy_zero_for_one = !token0_is_weth;
+    // v20.0: buy pool'un kendi token sıralaması kullanılır
+    let buy_zero_for_one = !buy_token0_is_weth;
     let buy_result = exact::compute_exact_swap(
         buy_pool.sqrt_price_x96,
         buy_pool.liquidity,
@@ -1245,11 +1250,12 @@ fn profit_derivative(
     gas_cost_usd: f64,
     flash_loan_fee_bps: f64,
     eth_price_usd: f64,
-    token0_is_weth: bool,
+    sell_token0_is_weth: bool,
     sell_ts: i32,
     buy_ts: i32,
     sell_bitmap: Option<&TickBitmapData>,
     buy_bitmap: Option<&TickBitmapData>,
+    buy_token0_is_weth: bool,
 ) -> f64 {
     let h = (amount_in_weth * 1e-7).max(1e-10);
 
@@ -1257,15 +1263,17 @@ fn profit_derivative(
         amount_in_weth + h,
         sell_pool, sell_fee, buy_pool, buy_fee,
         gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-        token0_is_weth, sell_ts, buy_ts,
+        sell_token0_is_weth, sell_ts, buy_ts,
         sell_bitmap, buy_bitmap,
+        buy_token0_is_weth,
     );
     let f_minus = compute_arbitrage_profit_with_bitmap(
         amount_in_weth - h,
         sell_pool, sell_fee, buy_pool, buy_fee,
         gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-        token0_is_weth, sell_ts, buy_ts,
+        sell_token0_is_weth, sell_ts, buy_ts,
         sell_bitmap, buy_bitmap,
+        buy_token0_is_weth,
     );
 
     (f_plus - f_minus) / (2.0 * h)
@@ -1280,11 +1288,12 @@ fn profit_second_derivative(
     gas_cost_usd: f64,
     flash_loan_fee_bps: f64,
     eth_price_usd: f64,
-    token0_is_weth: bool,
+    sell_token0_is_weth: bool,
     sell_ts: i32,
     buy_ts: i32,
     sell_bitmap: Option<&TickBitmapData>,
     buy_bitmap: Option<&TickBitmapData>,
+    buy_token0_is_weth: bool,
 ) -> f64 {
     let h = (amount_in_weth * 1e-5).max(1e-8);
 
@@ -1292,15 +1301,17 @@ fn profit_second_derivative(
         amount_in_weth + h,
         sell_pool, sell_fee, buy_pool, buy_fee,
         gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-        token0_is_weth, sell_ts, buy_ts,
+        sell_token0_is_weth, sell_ts, buy_ts,
         sell_bitmap, buy_bitmap,
+        buy_token0_is_weth,
     );
     let fp_minus = profit_derivative(
         amount_in_weth - h,
         sell_pool, sell_fee, buy_pool, buy_fee,
         gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-        token0_is_weth, sell_ts, buy_ts,
+        sell_token0_is_weth, sell_ts, buy_ts,
         sell_bitmap, buy_bitmap,
+        buy_token0_is_weth,
     );
 
     (fp_plus - fp_minus) / (2.0 * h)
@@ -1331,20 +1342,24 @@ pub fn find_optimal_amount(
     flash_loan_fee_bps: f64,
     eth_price_usd: f64,
     max_amount_weth: f64,
-    token0_is_weth: bool,
+    sell_token0_is_weth: bool,
     sell_tick_spacing: i32,
     buy_tick_spacing: i32,
+    buy_token0_is_weth: bool,
 ) -> OptimalAmountResult {
     find_optimal_amount_with_bitmap(
         sell_pool, sell_fee, buy_pool, buy_fee,
         gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-        max_amount_weth, token0_is_weth,
+        max_amount_weth, sell_token0_is_weth,
         sell_tick_spacing, buy_tick_spacing,
         None, None,
+        buy_token0_is_weth,
     )
 }
 
 /// Newton-Raphson (TickBitmap destekli + Hard Liquidity Cap).
+/// v20.0: sell ve buy havuzları farklı token sıralamasına sahip olabilir.
+///        Her havuzun kendi token0_is_weth değeri bağımsız kullanılır.
 pub fn find_optimal_amount_with_bitmap(
     sell_pool: &PoolState,
     sell_fee: f64,
@@ -1354,26 +1369,26 @@ pub fn find_optimal_amount_with_bitmap(
     flash_loan_fee_bps: f64,
     eth_price_usd: f64,
     max_amount_weth: f64,
-    token0_is_weth: bool,
+    sell_token0_is_weth: bool,
     sell_tick_spacing: i32,
     buy_tick_spacing: i32,
     sell_bitmap: Option<&TickBitmapData>,
     buy_bitmap: Option<&TickBitmapData>,
+    buy_token0_is_weth: bool,
 ) -> OptimalAmountResult {
     let max_iterations: u32 = 50;
     let tolerance = 1e-8;
     let min_amount = 0.0001;
 
-    // ── Hard Liquidity Cap (v11.0) ──────────────────────────────
-    // TickBitmap verisi varsa, havuzun gerçek mevcut likiditesini hesapla.
-    // NR'nin önerebileceği maksimum miktar bu tavan ile sınırlandırılır.
-    // Böylece "50 WETH sat" komutu, sadece 5.5 WETH likidite olan
-    // bir havuza gönderilemez.
+    // ── Hard Liquidity Cap (v11.0 + v20.0 decimal normalization) ─
+    // v20.0: Her havuzun kendi token0_is_weth değeri kullanılır.
+    // Farklı token sıralamasına sahip havuzlardan (ör: WETH/USDC vs USDC/WETH)
+    // doğru yönde likidite kapasitesi hesaplanır.
     let hard_cap_sell = exact::hard_liquidity_cap_weth(
         sell_pool.sqrt_price_x96,
         sell_pool.liquidity,
         sell_pool.tick,
-        token0_is_weth,
+        sell_token0_is_weth,
         sell_bitmap,
         sell_tick_spacing,
     );
@@ -1381,18 +1396,18 @@ pub fn find_optimal_amount_with_bitmap(
         buy_pool.sqrt_price_x96,
         buy_pool.liquidity,
         buy_pool.tick,
-        token0_is_weth,
+        buy_token0_is_weth,
         buy_bitmap,
         buy_tick_spacing,
     );
 
     // Eski single-tick cap (geriye uyumluluk + karşılaştırma)
     let liq_cap_sell = exact::max_safe_swap_amount_u256(
-        sell_pool.sqrt_price_x96, sell_pool.liquidity, token0_is_weth,
+        sell_pool.sqrt_price_x96, sell_pool.liquidity, sell_token0_is_weth,
         sell_pool.tick, sell_tick_spacing,
     );
     let liq_cap_buy = exact::max_safe_swap_amount_u256(
-        buy_pool.sqrt_price_x96, buy_pool.liquidity, token0_is_weth,
+        buy_pool.sqrt_price_x96, buy_pool.liquidity, buy_token0_is_weth,
         buy_pool.tick, buy_tick_spacing,
     );
 
@@ -1434,8 +1449,9 @@ pub fn find_optimal_amount_with_bitmap(
             amount,
             sell_pool, sell_fee, buy_pool, buy_fee,
             gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-            token0_is_weth, sell_tick_spacing, buy_tick_spacing,
+            sell_token0_is_weth, sell_tick_spacing, buy_tick_spacing,
             sell_bitmap, buy_bitmap,
+            buy_token0_is_weth,
         );
 
         if profit > best_profit {
@@ -1464,15 +1480,17 @@ pub fn find_optimal_amount_with_bitmap(
         let f_prime = profit_derivative(
             x, sell_pool, sell_fee, buy_pool, buy_fee,
             gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-            token0_is_weth, sell_tick_spacing, buy_tick_spacing,
+            sell_token0_is_weth, sell_tick_spacing, buy_tick_spacing,
             sell_bitmap, buy_bitmap,
+            buy_token0_is_weth,
         );
 
         let f_double_prime = profit_second_derivative(
             x, sell_pool, sell_fee, buy_pool, buy_fee,
             gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-            token0_is_weth, sell_tick_spacing, buy_tick_spacing,
+            sell_token0_is_weth, sell_tick_spacing, buy_tick_spacing,
             sell_bitmap, buy_bitmap,
+            buy_token0_is_weth,
         );
 
         if f_double_prime.abs() < 1e-20 {
@@ -1506,8 +1524,9 @@ pub fn find_optimal_amount_with_bitmap(
     let final_profit = compute_arbitrage_profit_with_bitmap(
         x, sell_pool, sell_fee, buy_pool, buy_fee,
         gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-        token0_is_weth, sell_tick_spacing, buy_tick_spacing,
+        sell_token0_is_weth, sell_tick_spacing, buy_tick_spacing,
         sell_bitmap, buy_bitmap,
+        buy_token0_is_weth,
     );
 
     OptimalAmountResult {
@@ -1715,6 +1734,7 @@ mod tests {
             true,
             10,
             10,
+            true,
         );
 
         println!(
@@ -1823,6 +1843,7 @@ mod tests {
             10,
             Some(&sell_bitmap),
             Some(&buy_bitmap),
+            true,
         );
 
         println!(

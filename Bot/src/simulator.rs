@@ -46,6 +46,84 @@ fn to_revm_u256(val: U256) -> RevmU256 {
     RevmU256::from_be_bytes(bytes)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// v20.0: DEX-Spesifik Storage Layout Şablonları
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Her DEX'in akıllı kontrat mimarisi farklı storage layout kullanır.
+// Bu yapı, her DEX için bağımsız okuma/yazma şablonu sağlar.
+// Storage injection sırasında DEX türüne göre doğru ofsetler kullanılır.
+//
+// Farklar:
+//   UniV3:     slot0 → slot 0 (7 alan, uint8 feeProtocol, 248 bit, 1 slot)
+//              liquidity → slot 4
+//              unlocked → slot 0, bit 240
+//
+//   PCS V3:    slot0 → slot 0 (7 alan, uint32 feeProtocol, 272 bit > 256, 2 slot!)
+//              liquidity → slot 5
+//              unlocked → slot 1, bit 32 (ayrı slot!)
+//
+//   Aerodrome: slot0 → slot 2 (6 alan, feeProtocol YOK, 240 bit, 1 slot)
+//              liquidity → slot 5
+//              unlocked → slot 2, bit 232
+//              öncesinde: gauge (address) + nft+fee packed → slot 0-1
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// DEX-spesifik storage layout tanımı
+struct StorageLayout {
+    /// slot0 storage slot indeksi
+    slot0_index: RevmU256,
+    /// liquidity storage slot indeksi
+    liquidity_index: RevmU256,
+    /// slot0'da unlocked flag'inin bit pozisyonu (None = ayrı slot'ta)
+    #[allow(dead_code)]
+    unlocked_bit_in_slot0: Option<u32>,
+    /// PCS V3 gibi unlocked ayrı slot'taysa: (slot_index, bit_pozisyonu)
+    unlocked_separate_slot: Option<(RevmU256, u32)>,
+}
+
+impl StorageLayout {
+    /// DEX türüne göre doğru storage layout'u döndür
+    fn for_dex(dex: DexType) -> Self {
+        match dex {
+            DexType::UniswapV3 => StorageLayout {
+                slot0_index: RevmU256::ZERO,
+                liquidity_index: RevmU256::from(4),
+                unlocked_bit_in_slot0: Some(240),
+                unlocked_separate_slot: None,
+            },
+            DexType::PancakeSwapV3 => StorageLayout {
+                slot0_index: RevmU256::ZERO,
+                liquidity_index: RevmU256::from(5),
+                unlocked_bit_in_slot0: None, // slot0'a SIĞMAZ (272 bit > 256)
+                unlocked_separate_slot: Some((RevmU256::from(1), 32)), // slot 1, bit 32
+            },
+            DexType::Aerodrome => StorageLayout {
+                slot0_index: RevmU256::from(2),
+                liquidity_index: RevmU256::from(5),
+                unlocked_bit_in_slot0: Some(232), // feeProtocol YOK, unlocked bit 232
+                unlocked_separate_slot: None,
+            },
+        }
+    }
+
+    /// Bu layout'a göre slot0 ve ilişkili storage slot'larını DB'ye yaz
+    fn inject_slot0(&self, db: &mut InMemoryDB, addr: RevmAddress, sqrt_price_x96: U256, tick: i32, dex: DexType) {
+        let slot0_value = pack_slot0(sqrt_price_x96, tick, dex);
+        let _ = db.insert_account_storage(addr, self.slot0_index, slot0_value);
+
+        // PCS V3 gibi unlocked ayrı slot'taysa onu da yaz
+        if let Some((slot_idx, _bit)) = &self.unlocked_separate_slot {
+            let _ = db.insert_account_storage(addr, *slot_idx, pack_pcs_v3_slot1_unlocked());
+        }
+    }
+
+    /// Bu layout'a göre liquidity storage slot'unu DB'ye yaz
+    fn inject_liquidity(&self, db: &mut InMemoryDB, addr: RevmAddress, liquidity: u128) {
+        let _ = db.insert_account_storage(addr, self.liquidity_index, RevmU256::from(liquidity));
+    }
+}
+
 /// Uniswap V3 / PancakeSwap V3 / Aerodrome slot0 storage paketleme.
 ///
 /// v17.0 KRİTİK DÜZELTME: DEX'e özel storage layout farkları.
@@ -118,29 +196,6 @@ fn pack_slot0(sqrt_price_x96: U256, tick: i32, dex: DexType) -> RevmU256 {
 ///   [bits 32..39] unlocked (bool) — TRUE olmalı
 fn pack_pcs_v3_slot1_unlocked() -> RevmU256 {
     to_revm_u256(U256::from(1u64) << 32)
-}
-
-/// DEX tipine göre slot0 storage slot indeksi.
-///
-/// UniV3/PCS: Slot0 ilk state variable → storage slot 0
-/// Aerodrome CLPool: gauge (address) + nft+fee packed → slot0 storage slot 2
-fn slot0_storage_index(dex: DexType) -> RevmU256 {
-    match dex {
-        DexType::Aerodrome => RevmU256::from(2),
-        _ => RevmU256::ZERO,
-    }
-}
-
-/// DEX tipine göre liquidity storage slot indeksi.
-///
-/// UniV3: Slot0(1 slot) + feeGrowth0 + feeGrowth1 + protocolFees → slot 4
-/// PCS V3: Slot0(2 slot!) + feeGrowth0 + feeGrowth1 + protocolFees → slot 5
-/// Aerodrome: gauge + nft+fee + Slot0(1 slot) + feeGrowth0 + feeGrowth1 → slot 5
-fn liquidity_storage_index(dex: DexType) -> RevmU256 {
-    match dex {
-        DexType::PancakeSwapV3 | DexType::Aerodrome => RevmU256::from(5),
-        _ => RevmU256::from(4),
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -218,29 +273,14 @@ impl SimulationEngine {
     ) -> InMemoryDB {
         let mut db = self.base_db.as_ref().unwrap().clone();
 
-        // Sadece değişen storage slot'larını güncelle (bytecode DOKUNULMAZ)
+        // v20.0: StorageLayout şablonu ile DEX-bağımsız storage injection
         for (config, state_lock) in pools.iter().zip(states.iter()) {
             let state = state_lock.read();
             let addr = to_revm_addr(config.address);
+            let layout = StorageLayout::for_dex(config.dex);
 
-            // slot0 packed — DEX'e göre doğru storage slot'a yaz
-            let s0_idx = slot0_storage_index(config.dex);
-            let slot0_value = pack_slot0(state.sqrt_price_x96, state.tick, config.dex);
-            let _ = db.insert_account_storage(addr, s0_idx, slot0_value);
-
-            // PCS V3: unlocked, slot0'dan ayrı slot'ta (slot N+1)
-            if config.dex == DexType::PancakeSwapV3 {
-                let _ = db.insert_account_storage(
-                    addr,
-                    s0_idx + RevmU256::from(1),
-                    pack_pcs_v3_slot1_unlocked(),
-                );
-            }
-
-            // liquidity — DEX'e göre doğru slot
-            let liq_idx = liquidity_storage_index(config.dex);
-            let liquidity_value = RevmU256::from(state.liquidity);
-            let _ = db.insert_account_storage(addr, liq_idx, liquidity_value);
+            layout.inject_slot0(&mut db, addr, state.sqrt_price_x96, state.tick, config.dex);
+            layout.inject_liquidity(&mut db, addr, state.liquidity);
         }
 
         db
@@ -273,24 +313,10 @@ impl SimulationEngine {
                 db.insert_account_info(addr, info);
             }
 
-            // Kritik storage slot'ları — DEX'e göre doğru slot indeksleri
-            let s0_idx = slot0_storage_index(config.dex);
-            let slot0_value = pack_slot0(state.sqrt_price_x96, state.tick, config.dex);
-            let _ = db.insert_account_storage(addr, s0_idx, slot0_value);
-
-            // PCS V3: unlocked, slot0'dan ayrı slot'ta (feeProtocol uint32 taşması)
-            if config.dex == DexType::PancakeSwapV3 {
-                let _ = db.insert_account_storage(
-                    addr,
-                    s0_idx + RevmU256::from(1),
-                    pack_pcs_v3_slot1_unlocked(),
-                );
-            }
-
-            // liquidity — DEX'e göre doğru slot
-            let liq_idx = liquidity_storage_index(config.dex);
-            let liquidity_value = RevmU256::from(state.liquidity);
-            let _ = db.insert_account_storage(addr, liq_idx, liquidity_value);
+            // v20.0: StorageLayout şablonu ile DEX-bağımsız storage injection
+            let layout = StorageLayout::for_dex(config.dex);
+            layout.inject_slot0(&mut db, addr, state.sqrt_price_x96, state.tick, config.dex);
+            layout.inject_liquidity(&mut db, addr, state.liquidity);
         }
 
         // ── Caller Hesabı (Test ETH Bakiyesi) ─────────────────────
@@ -409,14 +435,20 @@ impl SimulationEngine {
     ///
     /// Tam REVM simülasyonu yerine hızlı bir kontrol yapar:
     ///   - Havuz verileri geçerli mi?
-    ///   - Likidite yeterli mi?
+    ///   - Gerçek token kapasitesi (Δx/Δy) yeterli mi?
     ///   - Fiyat makul aralıkta mı?
+    ///
+    /// v20.0 KRİTİK DÜZELTME: Likidite kontrolü artık L parametresi ile
+    /// doğrudan karşılaştırma YAPMAZ. L, token miktarı değil, fiyat eğrisi
+    /// oranıdır. Bunun yerine, SqrtPriceMath formülleri (Δx, Δy) ile
+    /// havuzun mevcut fiyatından hedef fiyata kadar absorbe edebileceği
+    /// gerçek WETH miktarı hesaplanır.
     ///
     /// Bu fonksiyon REVM'in eksik state nedeniyle hatalı sonuç vereceği
     /// durumlar için fallback olarak kullanılır.
     pub fn validate_mathematical(
         &self,
-        _pools: &[PoolConfig],
+        pools: &[PoolConfig],
         states: &[SharedPoolState],
         buy_pool_idx: usize,
         sell_pool_idx: usize,
@@ -435,20 +467,7 @@ impl SimulationEngine {
             };
         }
 
-        // 2. Likidite yeterli mi? (işlem boyutu likiditenin %10'unu aşmasın)
-        let min_liquidity = amount_weth * 1e18 * 10.0; // Minimum 10x likidite
-        if buy_state.liquidity_f64 < min_liquidity || sell_state.liquidity_f64 < min_liquidity {
-            return SimulationResult {
-                success: false,
-                gas_used: 0,
-                error: Some(format!(
-                    "Yetersiz likidite: AL={:.0}, SAT={:.0}, Minimum={:.0}",
-                    buy_state.liquidity_f64, sell_state.liquidity_f64, min_liquidity
-                )),
-            };
-        }
-
-        // 3. Fiyatlar makul aralıkta mı?
+        // 2. Fiyatlar makul aralıkta mı? (Anormal fiyat → önce kontrol et)
         if buy_state.eth_price_usd < 100.0
             || buy_state.eth_price_usd > 100_000.0
             || sell_state.eth_price_usd < 100.0
@@ -464,7 +483,7 @@ impl SimulationEngine {
             };
         }
 
-        // 4. Veri taze mi?
+        // 3. Veri taze mi?
         if buy_state.staleness_ms() > 5000 || sell_state.staleness_ms() > 5000 {
             return SimulationResult {
                 success: false,
@@ -476,13 +495,72 @@ impl SimulationEngine {
             };
         }
 
+        // 4. v20.0: Gerçek token kapasitesi kontrolü (V3 fiyat eğrisi matematiği)
+        //    ESKİ (HATALI): amount_weth * 1e18 * 10.0 vs liquidity_f64
+        //      → L bir token miktarı DEĞİLDİR, bu karşılaştırma her zaman
+        //        geçerli işlemleri "Yetersiz Likidite" olarak reddediyordu.
+        //    YENİ: hard_liquidity_cap_weth() ile mevcut sqrtPriceX96'dan
+        //          itibaren V3 SqrtPriceMath formülleri (Δx = L·Q96·(1/√P_target - 1/√P)
+        //          veya Δy = L·(√P_target - √P)/Q96) kullanılarak havuzun
+        //          gerçek absorbe edebileceği WETH miktarı hesaplanır.
+        {
+            let buy_pool = &pools[buy_pool_idx];
+            let sell_pool = &pools[sell_pool_idx];
+
+            let buy_cap = math::exact::hard_liquidity_cap_weth(
+                buy_state.sqrt_price_x96,
+                buy_state.liquidity,
+                buy_state.tick,
+                buy_pool.token0_is_weth,
+                buy_state.tick_bitmap.as_ref(),
+                buy_pool.tick_spacing,
+            );
+            let sell_cap = math::exact::hard_liquidity_cap_weth(
+                sell_state.sqrt_price_x96,
+                sell_state.liquidity,
+                sell_state.tick,
+                sell_pool.token0_is_weth,
+                sell_state.tick_bitmap.as_ref(),
+                sell_pool.tick_spacing,
+            );
+
+            let effective_cap = buy_cap.min(sell_cap);
+
+            if effective_cap < amount_weth {
+                return SimulationResult {
+                    success: false,
+                    gas_used: 0,
+                    error: Some(format!(
+                        "Yetersiz V3 likidite kapasitesi: AL_cap={:.4} SAT_cap={:.4} WETH, \u{0130}stenen={:.4} WETH",
+                        buy_cap, sell_cap, amount_weth
+                    )),
+                };
+            }
+        }
+
         // Tüm kontroller geçti
-        // Not: validate_mathematical gerçek EVM çalıştırmaz — gas tahmini yapamaz.
-        // Gas değeri yalnızca REVM simulate() çağrısının olmadığı durumda (contract_address=None)
-        // fallback olarak kullanılır. REVM aktifken bu değer revm_result.gas_used ile ezilir.
+        // v20.0: Dinamik gas tahmini — swap adımı sayısına göre.
+        // Tipik V3 single-pool swap: ~130K gas
+        // Çapraz swap (2 havuz): ~260K gas
+        // Tick geçişi başına ~+20K gas ek yük
+        // Kontrat overhead (flash loan + callback): ~50K gas
+        // Toplam tahmini: 260K + 50K = ~310K (minimum taban)
+        let estimated_gas: u64 = {
+            let base_gas: u64 = 310_000; // 2-havuz çapraz swap baz gas
+            // TickBitmap varsa tahmini tick geçişi ekle
+            let buy_tick_crossings = buy_state.tick_bitmap.as_ref()
+                .map(|bm| bm.initialized_tick_count().min(5) as u64)
+                .unwrap_or(1);
+            let sell_tick_crossings = sell_state.tick_bitmap.as_ref()
+                .map(|bm| bm.initialized_tick_count().min(5) as u64)
+                .unwrap_or(1);
+            let tick_cross_gas = (buy_tick_crossings + sell_tick_crossings) * 20_000;
+            base_gas + tick_cross_gas
+        };
+
         SimulationResult {
             success: true,
-            gas_used: 0, // v14.0: Artık 0 döner — gerçek gas yalnızca REVM'den gelir
+            gas_used: estimated_gas,
             error: None,
         }
     }
@@ -1023,10 +1101,17 @@ mod sequencer_reorg_tests {
     }
 
     fn make_active_state(eth_price: f64, liquidity: u128, block: u64) -> SharedPoolState {
+        // v20.0: Gerçekçi sqrtPriceX96 — WETH/USDC (18dec/6dec) formatında
+        let price_ratio = eth_price * 1e-12;
+        let tick = (price_ratio.ln() / 1.0001_f64.ln()).floor() as i32;
+        let sqrt_price_x96_u256 = crate::math::exact::get_sqrt_ratio_at_tick(tick);
+        let q96_f64: f64 = 2.0_f64.powi(96);
+        let sqrt_price_f64 = price_ratio.sqrt() * q96_f64;
+
         Arc::new(RwLock::new(PoolState {
-            sqrt_price_x96: U256::from(1u64) << 96,
-            sqrt_price_f64: 1.0,
-            tick: 0,
+            sqrt_price_x96: sqrt_price_x96_u256,
+            sqrt_price_f64: sqrt_price_f64,
+            tick,
             liquidity,
             liquidity_f64: liquidity as f64,
             eth_price_usd: eth_price,
@@ -1054,10 +1139,14 @@ mod sequencer_reorg_tests {
 
         // Havuz B: bayat state (pending TX düşürüldü → state güncellenmedi)
         // Son güncelleme 6 saniye önceydi → staleness_ms() > 5000
+        let price_ratio_b: f64 = 2510.0 * 1e-12;
+        let tick_b = (price_ratio_b.ln() / 1.0001_f64.ln()).floor() as i32;
+        let sqrt_price_x96_b = crate::math::exact::get_sqrt_ratio_at_tick(tick_b);
+        let q96_f = 2.0_f64.powi(96);
         let state_b = Arc::new(RwLock::new(PoolState {
-            sqrt_price_x96: U256::from(1u64) << 96,
-            sqrt_price_f64: 1.0,
-            tick: 0,
+            sqrt_price_x96: sqrt_price_x96_b,
+            sqrt_price_f64: price_ratio_b.sqrt() * q96_f,
+            tick: tick_b,
             liquidity: 10_000_000_000_000_000_000,
             liquidity_f64: 10_000_000_000_000_000_000.0,
             eth_price_usd: 2510.0,
@@ -1131,10 +1220,14 @@ mod sequencer_reorg_tests {
         let sim = SimulationEngine::new();
 
         let stale_state = |price: f64| -> SharedPoolState {
+            let pr = price * 1e-12;
+            let t = (pr.ln() / 1.0001_f64.ln()).floor() as i32;
+            let sqpx96 = crate::math::exact::get_sqrt_ratio_at_tick(t);
+            let qf = 2.0_f64.powi(96);
             Arc::new(RwLock::new(PoolState {
-                sqrt_price_x96: U256::from(1u64) << 96,
-                sqrt_price_f64: 1.0,
-                tick: 0,
+                sqrt_price_x96: sqpx96,
+                sqrt_price_f64: pr.sqrt() * qf,
+                tick: t,
                 liquidity: 10_000_000_000_000_000_000,
                 liquidity_f64: 10_000_000_000_000_000_000.0,
                 eth_price_usd: price,

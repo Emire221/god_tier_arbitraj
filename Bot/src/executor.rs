@@ -1,10 +1,10 @@
 // ============================================================================
-//  EXECUTOR v18.0 — MEV Korumalı İşlem Gönderimi (Bundle + PGA Fallback)
+//  EXECUTOR v20.0 — MEV Korumalı İşlem Gönderimi (Yalnızca Private RPC)
 //
 //  Özellikler:
 //  ✓ eth_sendBundle (Flashbots/Private RPC) ile sandwich koruması
-//  ✓ PGA fallback: Bundle başarısızsa yüksek priority fee ile doğrudan gönderim
-//  ✓ Kontrat minProfit koruması → PGA modunda da sandviç güvenliği
+//  ✓ v20.0: PGA fallback TAMAMEN KALDIRILDI — L1 Data Fee kanaması önlenir
+//  ✓ Private RPC yoksa veya başarısızsa işlem İPTAL EDİLİR
 //  ✓ Fire-and-forget receipt bekleme (pipeline bloke olmaz)
 //  ✓ 4s timeout (Base 2s blok süresi × 2)
 //  ✓ Dinamik bribe hesabı (kârın %25'i validator'a tip)
@@ -58,18 +58,18 @@ struct BundleResponse {
 // MEV Korumalı Executor
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// MEV-korumalı işlem yürütücüsü (Bundle + PGA Fallback).
+/// MEV-korumalı işlem yürütücüsü (Yalnızca Private RPC).
 ///
 /// İşlem gönderme stratejisi:
 ///   1. Private/Flashbots RPC varsa → eth_sendBundle dene
-///   2. Bundle başarısızsa → PGA fallback (yüksek priority fee)
-///   3. Private RPC yoksa → doğrudan PGA stratejisi
+///   2. Bundle başarısızsa → İşlem İPTAL (v20.0: PGA fallback kaldırıldı)
+///   3. Private RPC yoksa → İşlem İPTAL (gönderilmez)
 ///
-/// Sandviç koruması:
-///   - Bundle modu: TX sadece builder'a görünür (mempool'a düşmez)
-///   - PGA modu: Kontrat minProfit kontrolü atomik koruma sağlar
-///     → Saldırgan fiyatı değiştirirse kâr < minProfit → revert
-///   - Base L2 FIFO sequencer: front-running teknik olarak zor
+/// v20.0 Kritik Değişiklik:
+///   PGA (Public Mempool) fallback tamamen kaldırıldı.
+///   L2 ağlarında (Base) public mempool'da revert olan işlemler
+///   gas ödemese dahi L1 Data Fee ödemek zorundadır.
+///   Bu durum cüzdanın sürekli L1 ücretleriyle kanamasına yol açıyordu.
 ///
 /// Bribe (validator tip) hesabı:
 ///   - Kârın dinamik yüzdesi (%25 base, margin'e göre uyarlanır)
@@ -112,7 +112,13 @@ impl MevExecutor {
     /// 1. TX oluştur (calldata + dinamik bribe priority fee)
     /// 2. TX'i imzala
     /// 3. Private RPC varsa → eth_sendBundle
-    /// 4. Yoksa → eth_sendRawTransaction (uyarı ile)
+    /// 4. Private RPC yoksa veya başarısızsa → İşlem İPTAL EDİLİR
+    ///
+    /// v20.0 KRİTİK DEĞİŞİKLİK: PGA (Public Mempool) fallback TAMAMEN KALDIRILDI.
+    /// L2 ağlarında (Base) public mempool'da sandviç yiyen revert işlemleri
+    /// gas ödemese dahi L1 Data Fee ödemek zorundadır. Bu durum cüzdanın
+    /// sürekli L1 ücretleri ile kanamasına yol açıyordu.
+    /// Artık Private RPC başarısız olursa işlem iptal edilir.
     pub async fn execute_protected(
         &self,
         private_key: &str,
@@ -166,7 +172,14 @@ impl MevExecutor {
             .map_err(|_| eyre::eyre!("Geçersiz private key"))?;
         let wallet = EthereumWallet::from(signer);
 
-        // 4. Gönder — Private RPC öncelikli, PGA fallback
+        // 4. Gönder — YALNIZCA Private RPC. PGA fallback v20.0'da kaldırıldı.
+        //
+        // v20.0: L2 ağlarında (Base) public mempool'a düşen işlemler:
+        //   - Sandviç saldırısına açıktır
+        //   - Revert olsa bile L1 Data Fee ödemek zorundadır (~0.001-0.01 ETH)
+        //   - Bu durum cüzdanın sürekli L1 ücretleri ile kanamasına yol açar
+        //
+        // Çözüm: Private RPC yoksa veya başarısızsa işlem İPTAL EDİLİR.
         if let Some(ref private_url) = self.private_rpc_url {
             match self.send_bundle(
                 private_url,
@@ -177,95 +190,35 @@ impl MevExecutor {
             ).await {
                 Ok(hash) => Ok(hash),
                 Err(e) => {
+                    // v20.0: Bundle başarısız → İşlem İPTAL (PGA fallback YOK)
+                    nonce_manager.rollback();
                     eprintln!(
-                        "     ⚠️ Private RPC bundle başarısız — PGA fallback deneniyor: {}",
+                        "     ❌ [v20.0] Private RPC bundle başarısız — işlem İPTAL EDİLDİ (nonce geri alındı): {}",
                         e
                     );
-                    // Bundle başarısız → PGA fallback (yüksek priority fee ile doğrudan gönderim)
-                    // Kontrat seviyesindeki minProfit koruması sandviç riskini ortadan kaldırır.
-                    self.send_pga_fallback(&wallet, tx, nonce_manager).await
+                    eprintln!(
+                        "     ⛔ [v20.0] PGA fallback devre dışı — L1 Data Fee kanaması önlendi"
+                    );
+                    Err(eyre::eyre!("Private RPC bundle başarısız, PGA fallback devre dışı: {}", e))
                 }
             }
         } else {
-            // Private RPC yok → PGA stratejisi ile doğrudan gönderim
-            // Base L2 FIFO sequencer'da priority fee sıralama belirler.
-            // Kontratın minProfit kontrolü sandviç koruması sağlar.
+            // v20.0: Private RPC yok → İşlem GÖNDERİLMEZ
+            nonce_manager.rollback();
             eprintln!(
-                "     ⚠️ PRIVATE_RPC_URL yok — PGA stratejisi ile gönderiliyor (minProfit koruması aktif)"
+                "     ❌ [v20.0] PRIVATE_RPC_URL tanımlı değil — işlem İPTAL EDİLDİ (nonce geri alındı)"
             );
-            self.send_pga_fallback(&wallet, tx, nonce_manager).await
+            eprintln!(
+                "     ⛔ [v20.0] Public mempool gönderimi devre dışı — L1 Data Fee kanaması önlendi"
+            );
+            Err(eyre::eyre!("Private RPC URL tanımlı değil. Güvenlik nedeniyle public mempool'a gönderilmez."))
         }
     }
 
-    /// PGA (Priority Gas Auction) ile doğrudan eth_sendRawTransaction.
-    ///
-    /// Base L2 FIFO sequencer'da priority fee sıralaması belirler.
-    /// Kontrat seviyesindeki minProfit kontrolü sayesinde sandviç riski yoktur:
-    ///   - Saldırgan fiyatı değiştirirse → kâr < minProfit → kontrat revert eder
-    ///   - Atomik işlem garantisi: ya tam kâr ya hiç
-    ///
-    /// Receipt bekleme fire-and-forget: arka plana taşınır, pipeline bloke olmaz.
-    async fn send_pga_fallback(
-        &self,
-        wallet: &EthereumWallet,
-        tx: TransactionRequest,
-        nonce_manager: &Arc<NonceManager>,
-    ) -> Result<String> {
-        let ws = WsConnect::new(&self.standard_rpc_url);
-        let provider = ProviderBuilder::new()
-            .with_recommended_fillers()
-            .wallet(wallet.clone())
-            .on_ws(ws)
-            .await
-            .map_err(|e| eyre::eyre!("PGA provider bağlantı hatası: {}", e))?;
-
-        let pending = provider.send_transaction(tx)
-            .await
-            .map_err(|e| {
-                nonce_manager.rollback();
-                eyre::eyre!("PGA TX gönderme hatası (nonce geri alındı): {}", e)
-            })?;
-
-        let tx_hash = format!("{:?}", pending.tx_hash());
-        let tx_hash_alloy = *pending.tx_hash();
-        eprintln!("     📤 PGA TX gönderildi: {}", &tx_hash);
-
-        // Fire-and-forget: receipt bekleme arka plana taşınır
-        // pending'i drop edip provider'ı spawn'a taşıyoruz (lifetime: 'static)
-        drop(pending);
-        let nm = Arc::clone(nonce_manager);
-        let hash_clone = tx_hash.clone();
-        tokio::spawn(async move {
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
-            loop {
-                if tokio::time::Instant::now() > deadline {
-                    nm.rollback();
-                    eprintln!("     ⏰ PGA timeout (4s) — nonce geri alındı: {}", &hash_clone);
-                    break;
-                }
-                match provider.get_transaction_receipt(tx_hash_alloy).await {
-                    Ok(Some(receipt)) => {
-                        eprintln!(
-                            "     ✅ PGA TX onaylandı: blok #{} | {}",
-                            receipt.block_number.unwrap_or_default(),
-                            &hash_clone,
-                        );
-                        break;
-                    }
-                    Ok(None) => {
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    }
-                    Err(e) => {
-                        nm.rollback();
-                        eprintln!("     ⚠️ PGA receipt hatası (nonce geri alındı): {}", e);
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(tx_hash)
-    }
+    // v20.0: send_pga_fallback() KALDIRILDI — public mempool gönderimi
+    // L2 ağlarında L1 Data Fee kanama riski oluşturuyordu.
+    // Tüm işlemler yalnızca Private RPC (eth_sendBundle) üzerinden gönderilir.
+    // Bundle başarısız olursa → işlem iptal edilir, nonce geri alınır.
 
     /// eth_sendBundle ile Flashbots/Private builder'a gönder.
     ///
@@ -382,16 +335,16 @@ impl MevExecutor {
         Ok(tx_hash)
     }
 
-    // ── PGA Fallback Güvenlik Notu (v18.0) ────────────────────────────────
-    // v18.0: Base ağında eth_sendBundle desteği sınırlıdır. Bundle başarısız
-    // olursa veya Private RPC yoksa, PGA (Priority Gas Auction) ile doğrudan
-    // eth_sendRawTransaction kullanılır.
+    // ── PGA Fallback Güvenlik Notu (v20.0) ──────────────────────────────
+    // v20.0: PGA (Public Mempool) fallback TAMAMEN KALDIRILDI.
     //
-    // Sandviç riski analizi:
-    //   - Kontrat minProfit kontrolü atomik koruma sağlar
-    //   - Saldırgan fiyatı manipüle ederse → kâr < minProfit → revert
-    //   - Base L2 FIFO sequencer: front-running zaten teknik olarak zor
-    //   - Priority fee yeterince yüksekse TX sıralama avantajı korunur
+    // L2 ağlarında (Base, OP Stack) public mempool riski:
+    //   - Sandviç saldırısına açık TX'ler
+    //   - Revert olsa bile L1 Data Fee ödenmek zorunda (~0.001-0.01 ETH)
+    //   - Sürekli revert + L1 fee = cüzdan kanaması
+    //
+    // Çözüm: Bot, Private/Flashbots RPC olmadan ASLA işlem göndermez.
+    // send_pga_fallback() fonksiyonu kaldırıldı.
     // ───────────────────────────────────────────────────────────────────────
     // ── Dinamik Bribe Hesabı ─────────────────────────────────────────────────
 
@@ -402,7 +355,7 @@ impl MevExecutor {
         simulated_gas: u64,
         block_base_fee: u64,
     ) -> BribeInfo {
-        let expected_profit_wei = safe_f64_to_u128(expected_profit_weth * 1e18);
+        let _expected_profit_wei = safe_f64_to_u128(expected_profit_weth * 1e18);
 
         // Gas maliyeti (WETH cinsinden)
         let gas_cost_weth = (simulated_gas as f64 * block_base_fee as f64) / 1e18;
@@ -414,21 +367,45 @@ impl MevExecutor {
             10.0
         };
 
-        // Adaptatif bribe yüzdesi (kâr marjına göre)
+        // v20.0: Adaptatif bribe yüzdesi — MAKSİMUM %70 (eski: %95)
+        //
+        // L2 ağlarında (Base/OP Stack) L1 Data Fee anlık dalgalanır.
+        // Eski %95 bribe ile kalan %5'lik pay, L1 fee sapmasını
+        // tolere edemiyordu → net zarar.
+        //
+        // Yeni sınırlar:
+        //   margin >= 5x  → %25 (sınırlı rekabet, konservatif)
+        //   margin 3-5x   → %35 (orta rekabet)
+        //   margin 2-3x   → %50 (yüksek rekabet)
+        //   margin 1.5-2x → %65 (çok yüksek rekabet)
+        //   margin < 1.5x → %70 (maksimum agresiflik — eski %95'ten düşürüldü)
         let effective_pct = if profit_margin_ratio >= 5.0 {
             self.base_bribe_pct.max(0.25)
         } else if profit_margin_ratio >= 3.0 {
-            0.40
+            0.35
         } else if profit_margin_ratio >= 2.0 {
-            0.60
+            0.50
         } else if profit_margin_ratio >= 1.5 {
-            0.80
+            0.65
         } else {
-            0.95
+            0.70 // v20.0: Eski %95 → %70 (L1 fee dalgalanma marjı bırak)
+        };
+
+        // v20.0: Minimum mutlak kâr koruması
+        // Bribe sonrası kalan kâr en az 0.0001 WETH (~$0.25) olmalı.
+        // Bu, L1 Data Fee dalgalanmasını karşılayacak statik güvenlik marjıdır.
+        let min_absolute_profit_weth: f64 = 0.0001;
+        let max_bribe_weth = (expected_profit_weth - gas_cost_weth - min_absolute_profit_weth).max(0.0);
+        let computed_bribe_weth = expected_profit_weth * effective_pct;
+        let actual_bribe_weth = computed_bribe_weth.min(max_bribe_weth);
+        let actual_effective_pct = if expected_profit_weth > 0.0 {
+            actual_bribe_weth / expected_profit_weth
+        } else {
+            0.0
         };
 
         // Bribe wei
-        let bribe_wei = safe_f64_to_u128(expected_profit_wei as f64 * effective_pct);
+        let bribe_wei = safe_f64_to_u128(actual_bribe_weth * 1e18);
 
         // Priority fee per gas
         let gas_with_buffer = safe_f64_to_u128((simulated_gas as f64) * 1.10);
@@ -442,7 +419,7 @@ impl MevExecutor {
         BribeInfo {
             bribe_wei,
             priority_fee_per_gas: priority_fee,
-            effective_pct,
+            effective_pct: actual_effective_pct,
             profit_margin_ratio,
             gas_cost_weth,
         }

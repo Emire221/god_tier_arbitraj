@@ -270,6 +270,7 @@ pub fn check_arbitrage_opportunity(
         pools[buy_idx].tick_spacing,
         sell_bitmap,
         buy_bitmap,
+        pools[buy_idx].token0_is_weth,
     );
 
     // NR kârı quote (cbBTC) cinsinden döndü → WETH’e çevir
@@ -525,25 +526,34 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
 
             // Adaptatif bribe yüzdesi:
             //   margin >= 5x  → %25 (sınırlı rekabet, konservatif)
-            //   margin 3-5x   → %40 (orta rekabet)
-            //   margin 2-3x   → %60 (yüksek rekabet)
-            //   margin 1.5-2x → %80 (çok yüksek rekabet)
-            //   margin < 1.5x → %95 (minimum kâr, maximum agresiflik)
+            //   margin 3-5x   → %35 (orta rekabet)
+            //   margin 2-3x   → %50 (yüksek rekabet)
+            //   margin 1.5-2x → %65 (çok yüksek rekabet)
+            //   margin < 1.5x → %70 (v20.0: maksimum — eski %95'ten düşürüldü)
+            //
+            // v20.0: L1 Data Fee dalgalanma marjı bırakmak için
+            // maksimum bribe oranı %70'e düşürüldü. Minimum mutlak kâr
+            // koruması eklendi: bribe sonrası kalan en az 0.0001 WETH.
             let dynamic_bribe_pct: f64 = if profit_margin_ratio >= 5.0 {
                 config.bribe_pct.max(0.25)  // En az %25, config daha yüksekse onu kullan
             } else if profit_margin_ratio >= 3.0 {
-                0.40
+                0.35
             } else if profit_margin_ratio >= 2.0 {
-                0.60
+                0.50
             } else if profit_margin_ratio >= 1.5 {
-                0.80
+                0.65
             } else {
-                // Margin çok dar — kârın neredeyse tamamını bribe yap
-                // 1 dolar kazanmak 0 dolardan iyidir
-                0.95
+                0.70 // v20.0: Eski %95 → %70 (L1 fee dalgalanma güvenlik marjı)
             };
 
-            let bribe = crate::types::safe_f64_to_u128((expected_profit_wei as f64) * dynamic_bribe_pct);
+            // v20.0: Minimum mutlak kâr koruması
+            // Bribe sonrası kalan kâr en az 0.0001 WETH olmalı.
+            // Bu, L1 Data Fee dalgalanmasını karşılayacak statik güvenlik marjıdır.
+            let min_absolute_profit_weth: f64 = 0.0001;
+            let max_bribe_weth = (opportunity.expected_profit_weth - gas_cost_weth - min_absolute_profit_weth).max(0.0);
+            let computed_bribe_weth = (expected_profit_wei as f64) * dynamic_bribe_pct;
+            let actual_bribe_weth = (computed_bribe_weth / 1e18).min(max_bribe_weth);
+            let bribe = crate::types::safe_f64_to_u128(actual_bribe_weth * 1e18);
 
             eprintln!(
                 "     {} Bribe: {:.0}% (marj: {:.1}x, profit: {:.6} WETH, gas: {:.6} WETH)",

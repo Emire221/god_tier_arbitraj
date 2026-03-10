@@ -365,7 +365,7 @@ pub fn swap_weth_to_usdc_exact(
     amount_in_weth: f64,
     fee_fraction: f64,
     token0_is_weth: bool,
-    tick_spacing: i32,
+    _tick_spacing: i32,
     tick_bitmap: Option<&TickBitmapData>,
 ) -> MultiTickSwapResult {
     if amount_in_weth <= 0.0 || pool.liquidity == 0 || pool.sqrt_price_x96.is_zero() {
@@ -393,7 +393,6 @@ pub fn swap_weth_to_usdc_exact(
         amount_in_wei,
         zero_for_one,
         fee_pips,
-        tick_spacing,
         tick_bitmap,
     );
 
@@ -419,7 +418,7 @@ pub fn swap_usdc_to_weth_exact(
     amount_in_usdc: f64,
     fee_fraction: f64,
     token0_is_weth: bool,
-    tick_spacing: i32,
+    _tick_spacing: i32,
     tick_bitmap: Option<&TickBitmapData>,
 ) -> MultiTickSwapResult {
     if amount_in_usdc <= 0.0 || pool.liquidity == 0 || pool.sqrt_price_x96.is_zero() {
@@ -447,7 +446,6 @@ pub fn swap_usdc_to_weth_exact(
         amount_in_wei,
         zero_for_one,
         fee_pips,
-        tick_spacing,
         tick_bitmap,
     );
 
@@ -1158,8 +1156,8 @@ pub fn compute_arbitrage_profit_with_bitmap(
     flash_loan_fee_bps: f64,
     eth_price_usd: f64,
     sell_token0_is_weth: bool,
-    sell_tick_spacing: i32,
-    buy_tick_spacing: i32,
+    _sell_tick_spacing: i32,
+    _buy_tick_spacing: i32,
     sell_bitmap: Option<&TickBitmapData>,
     buy_bitmap: Option<&TickBitmapData>,
     buy_token0_is_weth: bool,
@@ -1192,7 +1190,6 @@ pub fn compute_arbitrage_profit_with_bitmap(
         amount_in_wei,
         sell_zero_for_one,
         sell_fee_pips,
-        sell_tick_spacing,
         sell_bitmap,
     );
 
@@ -1210,7 +1207,6 @@ pub fn compute_arbitrage_profit_with_bitmap(
         sell_result.amount_out,
         buy_zero_for_one,
         buy_fee_pips,
-        buy_tick_spacing,
         buy_bitmap,
     );
 
@@ -2536,7 +2532,6 @@ pub mod exact {
         amount_in: U256,
         zero_for_one: bool,
         fee_pips: u32,
-        _tick_spacing: i32,
         bitmap: Option<&TickBitmapData>,
     ) -> ExactSwapResult {
         if amount_in.is_zero() || liquidity == 0 || sqrt_price_x96.is_zero() {
@@ -2650,71 +2645,9 @@ pub mod exact {
 
     /// İki havuz arasında exact arbitraj kârı hesapla (U256, wei bazında)
     ///
-    /// ⚠ DEPRECATED (v22.1): Bu fonksiyon tek bir `token0_is_weth` parametresi
-    /// kullanır — çapraz-DEX arbitrajında her havuzun token sırası farklı
-    /// olabilir. Üretimde `compute_exact_directional_profit` kullanılır.
-    /// Bu fonksiyon sadece geriye uyumluluk için korunmaktadır.
-    ///
-    /// Akış:
-    ///   1. Pahalı havuzda WETH sat → USDC al (exact V3 swap)
-    ///   2. Ucuz havuzda USDC ile WETH geri al (exact V3 swap)
-    ///   3. Flash loan geri ödeme çıkar
-    ///   4. Kalan = net kâr (owed token cinsinden, wei)
-    ///
-    /// # Dönüş
-    /// (net_profit_wei, amount_received_from_second_swap)
-    /// Kâr yoksa (0, 0) döner.
-    #[deprecated(since = "22.1.0", note = "Tek token0_is_weth parametresi çapraz-DEX'te hatalı. compute_exact_directional_profit kullanın.")]
-    pub fn compute_exact_arbitrage_profit(
-        // Pahalı havuz (satış hedefi)
-        sell_sqrt_price: U256,
-        sell_liquidity: u128,
-        sell_tick: i32,
-        sell_fee_pips: u32,
-        sell_tick_spacing: i32,
-        sell_bitmap: Option<&TickBitmapData>,
-        // Ucuz havuz (alım hedefi)
-        buy_sqrt_price: U256,
-        buy_liquidity: u128,
-        buy_tick: i32,
-        buy_fee_pips: u32,
-        buy_tick_spacing: i32,
-        buy_bitmap: Option<&TickBitmapData>,
-        // İşlem parametreleri
-        amount_in_wei: U256,
-        token0_is_weth: bool,
-    ) -> (U256, U256) {
-        // Adım 1: Pahalı havuzda WETH → USDC
-        let sell_zero_for_one = token0_is_weth; // token0=WETH → zeroForOne=true
-        let sell_result = compute_exact_swap(
-            sell_sqrt_price, sell_liquidity, sell_tick,
-            amount_in_wei, sell_zero_for_one,
-            sell_fee_pips, sell_tick_spacing, sell_bitmap,
-        );
-
-        if sell_result.amount_out.is_zero() {
-            return (U256::ZERO, U256::ZERO);
-        }
-
-        // Adım 2: Ucuz havuzda USDC → WETH
-        let buy_zero_for_one = !token0_is_weth; // USDC girdi → zeroForOne = !token0_is_weth
-        let buy_result = compute_exact_swap(
-            buy_sqrt_price, buy_liquidity, buy_tick,
-            sell_result.amount_out, buy_zero_for_one,
-            buy_fee_pips, buy_tick_spacing, buy_bitmap,
-        );
-
-        if buy_result.amount_out.is_zero() {
-            return (U256::ZERO, U256::ZERO);
-        }
-
-        // Adım 3: Net kâr = WETH alınan - WETH borçlu (flash loan)
-        if buy_result.amount_out > amount_in_wei {
-            (buy_result.amount_out - amount_in_wei, buy_result.amount_out)
-        } else {
-            (U256::ZERO, buy_result.amount_out)
-        }
-    }
+    // v23.0 (D-3): compute_exact_arbitrage_profit tamamen kaldırıldı.
+    // Tek token0_is_weth parametresi çapraz-DEX'te hatalı sonuç veriyordu.
+    // Yerine compute_exact_directional_profit kullanılır.
 
     // ── Yön-Bazlı Exact Kâr Hesaplama (Flash Swap Akışı Birebir Model) ─────
 
@@ -2736,14 +2669,12 @@ pub mod exact {
         pool_a_liquidity: u128,
         pool_a_tick: i32,
         pool_a_fee_pips: u32,
-        pool_a_tick_spacing: i32,
         pool_a_bitmap: Option<&TickBitmapData>,
         // Pool B (Slipstream — satış hedefi)
         pool_b_sqrt_price: U256,
         pool_b_liquidity: u128,
         pool_b_tick: i32,
         pool_b_fee_pips: u32,
-        pool_b_tick_spacing: i32,
         pool_b_bitmap: Option<&TickBitmapData>,
         // Swap parametreleri
         amount_wei: U256,
@@ -2763,7 +2694,6 @@ pub mod exact {
             amount_wei,
             uni_zero_for_one,
             pool_a_fee_pips,
-            pool_a_tick_spacing,
             pool_a_bitmap,
         );
 
@@ -2780,7 +2710,6 @@ pub mod exact {
             univ3_result.amount_out,
             aero_zero_for_one,
             pool_b_fee_pips,
-            pool_b_tick_spacing,
             pool_b_bitmap,
         );
 
@@ -3090,7 +3019,7 @@ pub mod exact {
 
             let result = compute_exact_swap(
                 sqrt_price, liquidity, -200000,
-                amount, true, 500, 10, None,
+                amount, true, 500, None,
             );
 
             assert!(result.amount_out > U256::ZERO, "Swap çıktısı > 0 olmalı");
@@ -3129,7 +3058,7 @@ pub mod exact {
             let amount = U256::from(5_000_000_000_000_000_000u128); // 5 WETH
             let result = compute_exact_swap(
                 sqrt_price, liquidity, tick,
-                amount, true, 500, 10, Some(&bitmap),
+                amount, true, 500, Some(&bitmap),
             );
 
             assert!(result.amount_out > U256::ZERO, "Bitmap swap çıktısı > 0");

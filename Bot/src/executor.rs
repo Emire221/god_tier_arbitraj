@@ -14,7 +14,6 @@
 
 use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder};
-use alloy::providers::WsConnect;
 use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::network::EthereumWallet;
@@ -79,7 +78,8 @@ pub struct MevExecutor {
     /// Private/Flashbots RPC URL (eth_sendBundle için)
     /// Örn: https://relay.flashbots.net veya özel builder endpoint
     private_rpc_url: Option<String>,
-    /// Standart RPC URL (bundle imzalama/gönderim için)
+    /// Standart RPC URL (v23.0: receipt polling private RPC'ye taşındı)
+    #[allow(dead_code)]
     standard_rpc_url: String,
     /// Dinamik bribe yüzde tabanı (0.25 = %25)
     base_bribe_pct: f64,
@@ -168,7 +168,7 @@ impl MevExecutor {
         let signer: PrivateKeySigner = private_key
             .parse()
             .map_err(|_| eyre::eyre!("Geçersiz private key"))?;
-        let wallet = EthereumWallet::from(signer);
+        let wallet = EthereumWallet::from(signer.clone());
 
         // 4. Gönder — YALNIZCA Private RPC. PGA fallback v20.0'da kaldırıldı.
         //
@@ -182,6 +182,7 @@ impl MevExecutor {
             match self.send_bundle(
                 private_url,
                 &wallet,
+                &signer,
                 tx.clone(),
                 current_block,
                 nonce_manager,
@@ -230,6 +231,7 @@ impl MevExecutor {
         &self,
         private_rpc_url: &str,
         wallet: &EthereumWallet,
+        signer: &PrivateKeySigner,
         tx: TransactionRequest,
         current_block: u64,
         _nonce_manager: &Arc<NonceManager>,
@@ -237,12 +239,15 @@ impl MevExecutor {
         let target_block = current_block + 1;
         let target_block_hex = format!("0x{:x}", target_block);
 
-        // v22.1 KRİTİK DÜZELTME: TX YALNIZCA private RPC üzerinden gönderilir
-        // Eski: WsConnect(standard_rpc_url) → public mempool sızıntısı!
-        // Yeni: on_http(private_rpc_url) → TX sadece private endpoint'e gider
+        // v23.0 KRİTİK DÜZELTME (K-1): Bundle txs alanına raw signed TX konulur.
+        // Eski: provider.send_transaction() ile hash alınıp txs'e konuyordu — HATALI.
+        // eth_sendBundle spec'i txs alanında raw signed TX hex'i ister, hash değil.
         //
-        // Private RPC (Flashbots Protect, MEV Blocker, vb.) eth_sendRawTransaction
-        // isteklerini public mempool'a iletmez, doğrudan block builder'a yönlendirir.
+        // Yeni akış:
+        //   1. TX'i private RPC üzerinden gönder (imzala + send)
+        //   2. Aynı TX'i raw hex olarak al
+        //   3. Bundle txs alanına raw hex koy
+        //   4. Bundle'ı private RPC'ye POST et
         let private_url: reqwest::Url = private_rpc_url.parse()
             .map_err(|e| eyre::eyre!("Private RPC URL parse hatası: {}", e))?;
         let provider = ProviderBuilder::new()
@@ -260,8 +265,48 @@ impl MevExecutor {
         let tx_hash_alloy = *pending.tx_hash();
         drop(pending);
 
+        // v23.0 (K-1): raw signed TX'i oluştur ve RLP encode et.
+        // EIP-1559 TX oluştur, PrivateKeySigner ile imzala, raw bytes al.
+        let raw_tx_hex = {
+            use alloy::consensus::{TxEip1559, SignableTransaction, TxEnvelope};
+            use alloy::signers::Signer;
+
+            let input_data = tx.input.input().cloned().unwrap_or_default();
+            // to alanı — TransactionRequest'teki TxKind'dan Address çıkar
+            let to_addr = match tx.to {
+                Some(alloy::primitives::TxKind::Call(addr)) => alloy::primitives::TxKind::Call(addr),
+                other => other.unwrap_or(alloy::primitives::TxKind::Create),
+            };
+
+            let eip1559_tx = TxEip1559 {
+                chain_id: 8453, // Base chain ID
+                nonce: tx.nonce.unwrap_or(0),
+                gas_limit: tx.gas.unwrap_or(100_000),
+                max_fee_per_gas: tx.max_fee_per_gas.unwrap_or(1_000_000_000),
+                max_priority_fee_per_gas: tx.max_priority_fee_per_gas.unwrap_or(1_000_000),
+                to: to_addr,
+                input: input_data,
+                ..Default::default()
+            };
+
+            match signer.sign_hash(&eip1559_tx.signature_hash()).await {
+                Ok(signature) => {
+                    let signed = eip1559_tx.into_signed(signature);
+                    let envelope = TxEnvelope::Eip1559(signed);
+                    let raw_bytes = alloy::eips::eip2718::Encodable2718::encoded_2718(&envelope);
+                    format!("0x{}", alloy::primitives::hex::encode(&raw_bytes))
+                }
+                Err(e) => {
+                    // İmzalama başarısız olursa TX hash'ini kullan (degraded mode)
+                    eprintln!("     ⚠️  Raw TX oluşturma hatası (bundle degraded mode): {}", e);
+                    tx_hash.clone()
+                }
+            }
+        };
+
+        // v23.0: Bundle txs alanına raw signed TX hex konulur (hash değil!)
         let bundle = BundleRequest {
-            txs: vec![tx_hash.clone()],
+            txs: vec![raw_tx_hex.clone()],
             block_number: target_block_hex.clone(),
             min_timestamp: None,
             max_timestamp: None,
@@ -315,7 +360,7 @@ impl MevExecutor {
         // Sonraki blok için de gönder (düşme ihtimaline karşı)
         let next_target_hex = format!("0x{:x}", target_block + 1);
         let next_bundle = BundleRequest {
-            txs: vec![tx_hash.clone()],
+            txs: vec![raw_tx_hex],
             block_number: next_target_hex,
             min_timestamp: None,
             max_timestamp: None,
@@ -341,19 +386,21 @@ impl MevExecutor {
         // Fire-and-forget: Receipt bekleme arka plana taşınır
         // v22.0: Timeout 4s → 10s (5 blok). Nonce rollback kaldırıldı —
         // periyodik nonce sync (50 blokta bir) yeterli, race condition önlenir.
-        let rpc_url_clone = self.standard_rpc_url.clone();
+        // v23.0 (Y-2): Receipt polling private RPC üzerinden yapılır.
+        // Standard RPC kullanmak TX sızıntısına yol açabilir.
+        let rpc_url_clone = private_rpc_url.to_string();
         let hash_clone = tx_hash.clone();
         tokio::spawn(async move {
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-            // Receipt polling için yeni provider
-            let ws = WsConnect::new(&rpc_url_clone);
-            let poll_provider = match ProviderBuilder::new().on_ws(ws).await {
-                Ok(p) => p,
+            // v23.0 (Y-2): Receipt polling private RPC HTTP üzerinden yapılır
+            let poll_url: reqwest::Url = match rpc_url_clone.parse() {
+                Ok(u) => u,
                 Err(e) => {
-                    eprintln!("     ⚠️  Receipt polling provider hatası: {}", e);
+                    eprintln!("     ⚠️  Receipt polling URL parse hatası: {}", e);
                     return;
                 }
             };
+            let poll_provider = ProviderBuilder::new().on_http(poll_url);
             loop {
                 if tokio::time::Instant::now() > deadline {
                     eprintln!("     ⏰ Bundle timeout (10s) — TX dahil edilmemiş olabilir: {}", &hash_clone);

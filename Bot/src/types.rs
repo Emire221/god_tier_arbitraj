@@ -881,6 +881,12 @@ pub struct ArbitrageStats {
     pub max_block_latency_ms: f64,
     /// v15.0: Gecikme spike sayısı (threshold üzerinde)
     pub latency_spikes: u64,
+    /// v23.0 (Y-1): Gölge modunda simülasyon başarılı fırsat sayısı
+    pub shadow_sim_success: u64,
+    /// v23.0 (Y-1): Gölge modunda simülasyon başarısız fırsat sayısı
+    pub shadow_sim_fail: u64,
+    /// v23.0 (Y-1): Gölge modunda kümülatif potansiyel kâr (WETH)
+    pub shadow_cumulative_profit: f64,
 }
 
 impl ArbitrageStats {
@@ -902,6 +908,9 @@ impl ArbitrageStats {
             consecutive_failures: 0,
             max_block_latency_ms: 0.0,
             latency_spikes: 0,
+            shadow_sim_success: 0,
+            shadow_sim_fail: 0,
+            shadow_cumulative_profit: 0.0,
         }
     }
 

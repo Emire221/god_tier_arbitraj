@@ -609,6 +609,7 @@ async fn main() -> Result<()> {
 
         // v13.0: Akıllı reconnect — ilk 3 deneme hızlı, sonra exponential backoff
         // İlk kopmalarda hızlı geri dönüş, uzun süren kesintilerde rate-limit koruması.
+        // v23.0 (D-4): Jitter eklendi — thundering herd / rate-limit koruması
         let delay_ms = if retry_count <= 3 {
             100u64 // İlk 3 deneme: 100ms (agresif)
         } else {
@@ -616,6 +617,10 @@ async fn main() -> Result<()> {
             let exp_delay = 100u64 * (1u64 << (retry_count - 3).min(8));
             exp_delay.min(30_000) // v22.1: Üst sınır: 30 saniye (eski: 10s)
         };
+        // v23.0 (D-4): Random jitter eklendi (0..%50 delay veya max 2s)
+        let jitter_range = (delay_ms / 2).min(2000).max(1);
+        let jitter = rand::random::<u64>() % jitter_range;
+        let delay_ms = delay_ms + jitter;
         println!(
             "  {} {}ms sonra yeniden bağlanılıyor... (deneme #{})",
             "⚡".yellow(), delay_ms, retry_count

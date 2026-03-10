@@ -466,11 +466,32 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
     // ─── KONTRAT TETİKLEME VEYA GÖLGE MOD LOGLAMA ─────────────
     if config.shadow_mode() {
         // ═══ GÖLGE MODU: İşlem atlanır, detaylar loglanır ═══
+
+        // v23.0 (Y-1): Gölge modu ekonomik uygulanabilirlik istatistikleri
+        if sim_result.success {
+            stats.shadow_sim_success += 1;
+            stats.shadow_cumulative_profit += opportunity.expected_profit_weth;
+        } else {
+            stats.shadow_sim_fail += 1;
+        }
+
         println!(
             "  {} {}",
             "👻".yellow(),
             "GÖLGE MODU: İşlem atlandı — detaylar shadow_analytics.jsonl'e kaydediliyor".yellow().bold()
         );
+        // v23.0 (Y-1): Periyodik ekonomik özet (her 10 fırsatta bir)
+        let total_shadow = stats.shadow_sim_success + stats.shadow_sim_fail;
+        if total_shadow > 0 && total_shadow % 10 == 0 {
+            let success_rate = (stats.shadow_sim_success as f64 / total_shadow as f64) * 100.0;
+            println!(
+                "  {} Gölge Özet: {} fırsat | Sim başarı: {:.1}% | Kümülatif kâr: {:.6} WETH",
+                "📊".cyan(),
+                total_shadow,
+                success_rate,
+                stats.shadow_cumulative_profit,
+            );
+        }
 
         // Dinamik bribe hesabı (loglama için)
         let dynamic_bribe_weth = opportunity.expected_profit_weth * config.bribe_pct;
@@ -541,13 +562,11 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
                 pool_a_state.liquidity,
                 pool_a_state.tick,
                 pool_a_fee_pips,
-                pools[0].tick_spacing,
                 pool_a_state.tick_bitmap.as_ref(),
                 pool_b_state.sqrt_price_x96,
                 pool_b_state.liquidity,
                 pool_b_state.tick,
                 pool_b_fee_pips,
-                pools[1].tick_spacing,
                 pool_b_state.tick_bitmap.as_ref(),
                 sim_amount_wei,
                 uni_zero_for_one,

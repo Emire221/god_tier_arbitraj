@@ -153,31 +153,31 @@ fn infer_token_decimals(address: &str) -> u8 {
     else { 18 }
 }
 
-/// v22.0: DEX tipi çıkarımı — sağlamlaştırılmış eşleştirme.
-/// Bilinen DEX ID'leri tam eşleşme ile kontrol edilir (substring yerine).
-/// Bilinmeyen DEX'ler UniswapV3 olarak varsayılır (en yaygın ABI).
-fn infer_dex_type(dex_id: &str) -> DexType {
+/// v23.0 (Y-3): Bilinmeyen DEX ID'leri artık `None` döner (eski: UniswapV3 varsayımı).
+/// Bilinmeyen DEX'ler farklı slot0 struct yapısına sahip olabilir;
+/// yanlış ABI ile state parse etmek hatalı fiyat ve zarar riski doğurur.
+fn infer_dex_type(dex_id: &str) -> Option<DexType> {
     let lower = dex_id.to_lowercase();
     
     // Tam eşleşme öncelikli — DexScreener'ın bilinen DEX ID formatları
     match lower.as_str() {
-        "pancakeswap" | "pancakeswap-v3" | "pancakeswap_v3" => DexType::PancakeSwapV3,
-        "aerodrome" | "aerodrome-slipstream" | "aerodrome_slipstream" | "aerodrome-cl" => DexType::Aerodrome,
-        "uniswap" | "uniswap-v3" | "uniswap_v3" | "uniswapv3" => DexType::UniswapV3,
-        "sushiswap" | "sushiswap-v3" | "sushiswap_v3" => DexType::UniswapV3,
+        "pancakeswap" | "pancakeswap-v3" | "pancakeswap_v3" => Some(DexType::PancakeSwapV3),
+        "aerodrome" | "aerodrome-slipstream" | "aerodrome_slipstream" | "aerodrome-cl" => Some(DexType::Aerodrome),
+        "uniswap" | "uniswap-v3" | "uniswap_v3" | "uniswapv3" => Some(DexType::UniswapV3),
+        "sushiswap" | "sushiswap-v3" | "sushiswap_v3" => Some(DexType::UniswapV3),
         _ => {
             // Fallback: substring eşleşme (yeni DEX ID'ler için)
             if lower.contains("pancake") {
-                DexType::PancakeSwapV3
+                Some(DexType::PancakeSwapV3)
             } else if lower.contains("aerodrome") || lower.contains("slipstream") {
-                DexType::Aerodrome
+                Some(DexType::Aerodrome)
             } else {
-                // Bilinmeyen DEX — UniswapV3 ABI varsayılır (log uyarısı)
+                // v23.0 (Y-3): Bilinmeyen DEX — havuz atlanır (eski: sessiz UniswapV3 fallback)
                 eprintln!(
-                    "  ⚠️  Bilinmeyen DEX ID '{}' — UniswapV3 ABI varsayılıyor",
+                    "  ⚠️  Bilinmeyen DEX ID '{}' — havuz atlanıyor (güvenli mod)",
                     dex_id
                 );
-                DexType::UniswapV3
+                None
             }
         }
     }
@@ -392,7 +392,18 @@ fn match_arbitrage_pairs(pools: &[DiscoveredPool]) -> Vec<MatchedPair> {
 
 /// Havuzları keşfet, eşleştir ve matched_pools.json olarak yaz
 pub async fn cli_discover_pools() -> Result<()> {
-    let pools = discover_base_pools(50).await?;
+    // v23.0 (O-2): DexScreener API başarısız olursa mevcut matched_pools.json cache'ini kullan
+    let pools = match discover_base_pools(50).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("  ⚠️  DexScreener API hatası: {} — mevcut cache kontrol ediliyor...", e);
+            if std::path::Path::new(MATCHED_POOLS_PATH).exists() {
+                eprintln!("  📦 Mevcut matched_pools.json cache'i kullanılıyor (DexScreener erişilemez)");
+                return Ok(());
+            }
+            return Err(eyre::eyre!("DexScreener API erişilemez ve mevcut cache bulunamadı: {}", e));
+        }
+    };
 
     if pools.is_empty() {
         eprintln!("  {} Hiç havuz bulunamadı.", "⚠️".yellow());
@@ -503,6 +514,12 @@ pub fn build_runtime(config: &MatchedPoolsConfig) -> Result<(Vec<PoolConfig>, Ve
                 let address = pool_entry.address.parse::<Address>()
                     .map_err(|e| eyre::eyre!("Geçersiz havuz adresi '{}': {}", pool_entry.address, e))?;
 
+                // v23.0 (Y-3): Bilinmeyen DEX'ler atlanır
+                let dex_type = match infer_dex_type(&pool_entry.dex_id) {
+                    Some(dt) => dt,
+                    None => continue, // Bilinmeyen DEX — bu havuzu atla
+                };
+
                 let pool_config = PoolConfig {
                     address,
                     name: format!("{}-{}", pool_entry.dex_id, pair.pair_name),
@@ -510,7 +527,7 @@ pub fn build_runtime(config: &MatchedPoolsConfig) -> Result<(Vec<PoolConfig>, Ve
                     fee_fraction: pool_entry.fee_bps as f64 / 10_000.0,
                     token0_decimals: if pair.weth_is_token0 { 18 } else { pair.quote_token.decimals },
                     token1_decimals: if pair.weth_is_token0 { pair.quote_token.decimals } else { 18 },
-                    dex: infer_dex_type(&pool_entry.dex_id),
+                    dex: dex_type,
                     token0_is_weth: pair.weth_is_token0,
                     tick_spacing: pool_entry.tick_spacing,
                     quote_token_address,

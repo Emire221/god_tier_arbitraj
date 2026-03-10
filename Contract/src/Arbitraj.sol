@@ -384,6 +384,14 @@ contract ArbitrajBotu {
     // ═════════════════════════════════════════════════════════════════════════
 
     // ── Uniswap V3 Callback ──────────────────────────────────────────────
+    //    Tetikleyen DEX'ler:
+    //      • Uniswap V3     — doğrudan kendi callback'i
+    //      • SushiSwap V3   — UniV3 fork'u, aynı callback imzasını kullanır
+    //      • Aerodrome Slipstream (CLPool) — UniV3 fork'u, swap sonrası
+    //        uniswapV3SwapCallback çağırır (aerodromeSwapCallback DEĞİL)
+    //
+    //    Dolayısıyla bu tek fonksiyon 3 DEX'in callback'ini karşılar.
+    //    Güvenlik: _handleCallback içinde transient storage doğrulaması yapılır.
     function uniswapV3SwapCallback(
         int256 amount0Delta,
         int256 amount1Delta,
@@ -393,8 +401,10 @@ contract ArbitrajBotu {
     }
 
     // ── PancakeSwap V3 Callback ──────────────────────────────────────────
+    //    Tetikleyen DEX: Yalnızca PancakeSwap V3
     //    PancakeSwap V3 havuzları swap sonrası bu fonksiyonu çağırır.
-    //    İmza farklı, mantık aynı — transient storage doğrulaması yapılır.
+    //    İmza farklı (pancakeV3SwapCallback vs uniswapV3SwapCallback),
+    //    mantık aynı — transient storage doğrulaması yapılır.
     function pancakeV3SwapCallback(
         int256 amount0Delta,
         int256 amount1Delta,
@@ -404,11 +414,21 @@ contract ArbitrajBotu {
     }
 
     // ── Aerodrome Slipstream (CL) Callback ───────────────────────────────
-    //    Aerodrome CLPool swap sonrası uniswapV3SwapCallback çağırır
-    //    (UniV3 fork'u olduğu için). Bu fonksiyon gelecekte Aerodrome'un
-    //    callback adını değiştirmesi durumunda yedek olarak korunur.
-    //    Mevcut durumda uniswapV3SwapCallback zaten Aerodrome'u karşılar.
-    //    v17.0: SushiSwap V3 de uniswapV3SwapCallback kullanır → kapsanır.
+    //    DURUM: Şu anda Aerodrome CLPool swap sonrası uniswapV3SwapCallback
+    //    çağırır (UniV3 fork'u olduğu için). Bu fonksiyon ÇAĞRILMAZ.
+    //
+    //    Bu yedek callback Aerodrome'un gelecekte kendi callback adını
+    //    kullanmaya geçmesi durumunda korunur. Aktif kullanımda DEĞİLDİR.
+    //
+    //    Callback haritası (v23.0):
+    //      ┌──────────────────────┬──────────────────────────────┐
+    //      │ DEX                  │ Çağrılan Callback            │
+    //      ├──────────────────────┼──────────────────────────────┤
+    //      │ Uniswap V3           │ uniswapV3SwapCallback        │
+    //      │ SushiSwap V3         │ uniswapV3SwapCallback        │
+    //      │ Aerodrome Slipstream │ uniswapV3SwapCallback        │
+    //      │ PancakeSwap V3       │ pancakeV3SwapCallback        │
+    //      └──────────────────────┴──────────────────────────────┘
     function aerodromeSwapCallback(
         int256 amount0Delta,
         int256 amount1Delta,

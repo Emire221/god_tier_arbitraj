@@ -39,6 +39,7 @@ use std::time::Instant;
 use futures_util::future::join_all;
 
 use crate::math::compute_eth_price;
+use crate::math::exact::u256_to_f64;
 use crate::types::{DexType, PoolConfig, SharedPoolState, TickBitmapData, TickInfo};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -360,11 +361,8 @@ async fn sync_pool_state_inner<T: Transport + Clone, P: Provider<T, Ethereum> + 
         }
     };
 
-    let sqrt_price_f64: f64 = {
-        let s = sqrt_price_x96.to_string();
-        s.parse::<f64>().unwrap_or(0.0)
-    };
-    let liquidity_f64: f64 = liquidity.to_string().parse::<f64>().unwrap_or(0.0);
+    let sqrt_price_f64: f64 = u256_to_f64(U256::from(sqrt_price_x96));
+    let liquidity_f64: f64 = u256_to_f64(U256::from(liquidity));
 
     let eth_price = compute_eth_price(
         sqrt_price_f64,
@@ -952,11 +950,8 @@ pub async fn optimistic_refresh_pool<T: Transport + Clone, P: Provider<T, Ethere
         }
     };
 
-    let sqrt_price_f64: f64 = {
-        let s = sqrt_price_x96.to_string();
-        s.parse::<f64>().unwrap_or(0.0)
-    };
-    let liquidity_f64: f64 = liquidity.to_string().parse::<f64>().unwrap_or(0.0);
+    let sqrt_price_f64: f64 = u256_to_f64(U256::from(sqrt_price_x96));
+    let liquidity_f64: f64 = u256_to_f64(U256::from(liquidity));
 
     let eth_price = compute_eth_price(
         sqrt_price_f64,
@@ -1070,10 +1065,7 @@ pub fn process_swap_event_log(
     let config = &pools[pool_idx];
 
     // f64 dönüşümleri
-    let sqrt_price_f64: f64 = {
-        let s = sqrt_price_x96.to_string();
-        s.parse::<f64>().unwrap_or(0.0)
-    };
+    let sqrt_price_f64: f64 = u256_to_f64(sqrt_price_x96);
     let liquidity_f64: f64 = liquidity as f64;
 
     // ETH fiyatı hesapla

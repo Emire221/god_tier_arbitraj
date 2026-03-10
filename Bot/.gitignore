@@ -1,6 +1,10 @@
 # Rust build çıktıları
 /target
 
+# Gizli anahtarlar ve yapılandırma
+.env
+*.keystore
+
 # IDE
 .vscode/
 .idea/

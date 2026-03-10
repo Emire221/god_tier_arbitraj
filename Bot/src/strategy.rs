@@ -25,10 +25,8 @@ use alloy::providers::Provider;
 use alloy::transports::Transport;
 use alloy::network::Ethereum;
 use alloy::signers::local::PrivateKeySigner;
-use alloy::network::EthereumWallet;
 use colored::*;
 use chrono::Local;
-use std::time::Duration;
 use std::io::Write;
 use std::sync::Arc;
 
@@ -146,7 +144,11 @@ pub fn check_arbitrage_opportunity(
             estimated_gas_cost_weth: prefilter_gas_cost_weth,
             min_profit_weth: config.min_net_profit_weth,
             flash_loan_fee_rate: config.flash_loan_fee_bps / 10_000.0,
-            bribe_pct: config.bribe_pct,
+            // v22.0: PreFilter konservatif bribe kullanır (en kötü senaryo).
+            // Gerçek bribe oranı 25-70% aralığında değişir. PreFilter'da
+            // düşük bribe kullanmak → kârsız fırsatları NR'ye geçirir,
+            // gereksiz hesaplama maliyeti yaratır. Worst-case %50 kullanılır.
+            bribe_pct: config.bribe_pct.max(0.50),
         };
 
         // Kaba tarama miktarı: max trade size'ın %50'si (konservatif tahmin)
@@ -327,6 +329,9 @@ pub fn check_arbitrage_opportunity(
 ///
 /// Dönüş: REVM simülasyonundan gelen gerçek gas kullanımı (sonraki bloklarda
 /// `check_arbitrage_opportunity`'e beslenir → dinamik gas maliyet hesaplaması).
+///
+/// v21.0: `mev_executor` parametresi eklendi — işlemler yalnızca Private RPC
+/// (eth_sendBundle) üzerinden gönderilir, public mempool kullanılmaz.
 pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
     _provider: &P,
     config: &BotConfig,
@@ -339,7 +344,8 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
     block_timestamp: u64,
     block_base_fee: u64,
     block_latency_ms: f64,
-    l1_data_fee_wei: u128,
+    _l1_data_fee_wei: u128,
+    mev_executor: &Arc<crate::executor::MevExecutor>,
 ) -> Option<u64> {
     let _buy_pool = &pools[opportunity.buy_pool_idx];
     let _sell_pool = &pools[opportunity.sell_pool_idx];
@@ -480,7 +486,6 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
             block_latency_ms,
         );
     } else if config.execution_enabled() {
-        let rpc_url = config.rpc_wss_url.clone();
         let pk = config.private_key.clone()
             .expect("BUG: execution_enabled() true ama private_key None");
         let contract_addr = config.contract_address
@@ -501,70 +506,10 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         let current_block = states[0].read().last_block;
         let deadline_block = current_block as u32 + config.deadline_blocks.max(3);
 
-        // ═══ v12.0: DİNAMİK MEV BRIBE MÜZAYEDESİ ═══
-        //
-        // Tamamen WETH cinsinden bribe hesabı.
-        // Kâr NR'den quote olarak geldi, WETH'e çevrildi.
-        let expected_profit_wei = crate::types::safe_f64_to_u128(
-            opportunity.expected_profit_weth * 1e18
-        );
-
-        let bribe_wei = {
-            // v18.0: Gas maliyeti WETH — L2 execution + L1 data fee
-            let gas_cost_weth = {
-                let l2 = (simulated_gas_used as f64 * block_base_fee as f64) / 1e18;
-                let l1 = l1_data_fee_wei as f64 / 1e18;
-                l2 + l1
-            };
-
-            // Kâr/Gas oranı (profit margin ratio) — tamamen WETH cinsinden
-            let profit_margin_ratio = if gas_cost_weth > 0.00001 {
-                opportunity.expected_profit_weth / gas_cost_weth
-            } else {
-                10.0 // Gas ücretsiz → marj çok yüksek
-            };
-
-            // Adaptatif bribe yüzdesi:
-            //   margin >= 5x  → %25 (sınırlı rekabet, konservatif)
-            //   margin 3-5x   → %35 (orta rekabet)
-            //   margin 2-3x   → %50 (yüksek rekabet)
-            //   margin 1.5-2x → %65 (çok yüksek rekabet)
-            //   margin < 1.5x → %70 (v20.0: maksimum — eski %95'ten düşürüldü)
-            //
-            // v20.0: L1 Data Fee dalgalanma marjı bırakmak için
-            // maksimum bribe oranı %70'e düşürüldü. Minimum mutlak kâr
-            // koruması eklendi: bribe sonrası kalan en az 0.0001 WETH.
-            let dynamic_bribe_pct: f64 = if profit_margin_ratio >= 5.0 {
-                config.bribe_pct.max(0.25)  // En az %25, config daha yüksekse onu kullan
-            } else if profit_margin_ratio >= 3.0 {
-                0.35
-            } else if profit_margin_ratio >= 2.0 {
-                0.50
-            } else if profit_margin_ratio >= 1.5 {
-                0.65
-            } else {
-                0.70 // v20.0: Eski %95 → %70 (L1 fee dalgalanma güvenlik marjı)
-            };
-
-            // v20.0: Minimum mutlak kâr koruması
-            // Bribe sonrası kalan kâr en az 0.0001 WETH olmalı.
-            // Bu, L1 Data Fee dalgalanmasını karşılayacak statik güvenlik marjıdır.
-            let min_absolute_profit_weth: f64 = 0.0001;
-            let max_bribe_weth = (opportunity.expected_profit_weth - gas_cost_weth - min_absolute_profit_weth).max(0.0);
-            let computed_bribe_weth = (expected_profit_wei as f64) * dynamic_bribe_pct;
-            let actual_bribe_weth = (computed_bribe_weth / 1e18).min(max_bribe_weth);
-            let bribe = crate::types::safe_f64_to_u128(actual_bribe_weth * 1e18);
-
-            eprintln!(
-                "     {} Bribe: {:.0}% (marj: {:.1}x, profit: {:.6} WETH, gas: {:.6} WETH)",
-                "💰", dynamic_bribe_pct * 100.0,
-                profit_margin_ratio,
-                opportunity.expected_profit_weth,
-                gas_cost_weth,
-            );
-
-            bribe
-        };
+        // v21.0: Bribe hesabı MevExecutor::compute_dynamic_bribe'a devredildi.
+        // MevExecutor, expected_profit_weth + simulated_gas + block_base_fee
+        // bilgilerini alarak adaptatif bribe yüzdesini kendi içinde hesaplar
+        // ve priority fee olarak TX'e ekler.
 
         // ═══ v11.0: YÖN-BAZLI EXACT minProfit HESAPLAMA ═══
         // Kritik düzeltme: Eski sistem her zaman WETH cinsinden profit hesaplıyordu.
@@ -638,20 +583,24 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         let base_fee_for_exec = block_base_fee;
         let qt_decimals = if pools[0].token0_is_weth { pools[0].token1_decimals } else { pools[0].token0_decimals };
 
+        let expected_profit = opportunity.expected_profit_weth;
+        let mev_exec = Arc::clone(mev_executor);
+
         tokio::spawn(async move {
-            execute_on_chain(
-                rpc_url, pk, contract_addr,
+            execute_on_chain_protected(
+                mev_exec, pk, contract_addr,
                 pool_a_addr, pool_b_addr,
                 owed_token, received_token,
                 trade_weth, uni_dir, aero_dir,
                 min_profit, deadline_block,
-                bribe_wei,
                 sim_gas,
                 nonce, nm_clone,
                 eth_price_for_exec,
                 t0_is_weth,
                 base_fee_for_exec,
                 qt_decimals,
+                expected_profit,
+                current_block as u64,
             ).await;
         });
     }
@@ -745,20 +694,18 @@ fn write_shadow_log(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Kontrat Tetikleme (Zincir Üzeri) — Kompakt 134-Byte Calldata + Dinamik Fee
+// Kontrat Tetikleme (Zincir Üzeri) — MevExecutor Üzerinden Private RPC
 // ─────────────────────────────────────────────────────────────────────────────
 
-use alloy::providers::ProviderBuilder;
-use alloy::rpc::types::TransactionRequest;
+// v21.0: ProviderBuilder ve TransactionRequest artık MevExecutor'da kullanılır.
+// strategy.rs doğrudan TX oluşturmaz.
 
-/// Arbitraj kontratını zincir üzerinde tetikle
+/// v21.0: Arbitraj kontratını MevExecutor üzerinden Private RPC ile tetikle.
 ///
-/// v9.0: 134-byte kompakt payload + deadline block + dinamik priority fee:
-///   [PoolA(20)] + [PoolB(20)] + [owedToken(20)] + [receivedToken(20)]
-///   + [Miktar(32)] + [uniDir(1)] + [aeroDir(1)] + [minProfit(16)]
-///   + [deadlineBlock(4)] = 134 byte
-async fn execute_on_chain(
-    rpc_url: String,
+/// Public mempool kullanılmaz — tüm işlemler eth_sendBundle ile gönderilir.
+/// Private RPC yoksa veya başarısızsa işlem İPTAL EDİLİR (nonce geri alınır).
+async fn execute_on_chain_protected(
+    mev_executor: Arc<crate::executor::MevExecutor>,
     private_key: String,
     contract_address: Address,
     pool_a: Address,
@@ -770,7 +717,6 @@ async fn execute_on_chain(
     aero_direction: u8,
     min_profit: u128,
     deadline_block: u32,
-    bribe_wei: u128,
     simulated_gas: u64,
     nonce: u64,
     nonce_manager: Arc<NonceManager>,
@@ -778,76 +724,15 @@ async fn execute_on_chain(
     token0_is_weth: bool,
     block_base_fee: u64,
     quote_token_decimals: u8,
+    expected_profit_weth: f64,
+    current_block: u64,
 ) {
-    println!("\n  {} {}", "🚀".yellow(), "KONTRAT TETİKLEME BAŞLATILDI".yellow().bold());
+    println!("\n  {} {}", "🚀".yellow(), "KONTRAT TETİKLEME BAŞLATILDI (Private RPC)".yellow().bold());
 
     // v10.0: Private key güvenli bellek yönetimi
-    // İmza sonrası private_key RAM'den silinir (zeroize)
     let mut pk_owned = private_key;
-    let result = execute_inner(
-        &rpc_url, &pk_owned, contract_address,
-        pool_a, pool_b,
-        owed_token, received_token,
-        trade_size_weth, uni_direction, aero_direction,
-        min_profit, deadline_block, bribe_wei, simulated_gas, nonce,
-        eth_price_in_quote, token0_is_weth, block_base_fee,
-        quote_token_decimals,
-    ).await;
 
-    // İmza tamamlandı — private key bellekten güvenle silinir
-    pk_owned.zeroize();
-
-    match result {
-        Ok(hash) => {
-            println!("  {} TX başarılı: {}", "✅".green(), hash.green().bold());
-        }
-        Err(e) => {
-            // TX başarısız — nonce'u geri al
-            nonce_manager.rollback();
-            println!("  {} TX hatası (nonce geri alındı): {}", "❌".red(), format!("{}", e).red());
-        }
-    }
-}
-
-/// Kontrat tetikleme iç mantığı — 134-byte kompakt calldata + dinamik priority fee
-async fn execute_inner(
-    rpc_url: &str,
-    private_key: &str,
-    contract_address: Address,
-    pool_a: Address,
-    pool_b: Address,
-    owed_token: Address,
-    received_token: Address,
-    trade_size_weth: f64,
-    uni_direction: u8,
-    aero_direction: u8,
-    min_profit: u128,
-    deadline_block: u32,
-    bribe_wei: u128,
-    simulated_gas: u64,
-    nonce: u64,
-    eth_price_in_quote: f64,
-    token0_is_weth: bool,
-    block_base_fee: u64,
-    quote_token_decimals: u8,
-) -> eyre::Result<String> {
-    use alloy::providers::WsConnect;
-
-    let signer: PrivateKeySigner = private_key
-        .parse()
-        .map_err(|_| eyre::eyre!("Geçersiz private key"))?;
-    let wallet = EthereumWallet::from(signer);
-
-    let ws = WsConnect::new(rpc_url);
-    let provider = ProviderBuilder::new()
-        .with_recommended_fillers()
-        .wallet(wallet)
-        .on_ws(ws)
-        .await
-        .map_err(|e| eyre::eyre!("TX provider bağlantı hatası: {}", e))?;
-
-    // ═══ v11.0: DİNAMİK DECIMAL AMOUNT HESAPLAMA ═══
-    // Input tokeni WETH mi Quote mi? Decimal buna göre belirlenir.
+    // Calldata oluştur
     let weth_input = crate::types::is_weth_input(uni_direction, token0_is_weth);
     let amount_in_wei = crate::types::weth_amount_to_input_wei(
         trade_size_weth,
@@ -856,7 +741,6 @@ async fn execute_inner(
         quote_token_decimals,
     );
 
-    // ═══ CALLDATA MÜHENDİSLİĞİ: 134-BYTE KOMPAKT PAYLOAD ═══
     let calldata = crate::simulator::encode_compact_calldata(
         pool_a,
         pool_b,
@@ -869,120 +753,43 @@ async fn execute_inner(
         deadline_block,
     );
 
-    // Calldata hex logla (debug)
     let calldata_hex = crate::simulator::format_compact_calldata_hex(&calldata);
     println!(
         "  {} Kompakt calldata (134 byte): {}...{}",
         "🔧".cyan(),
-        &calldata_hex[..22], // 0x + ilk 10 byte
-        &calldata_hex[calldata_hex.len().saturating_sub(10)..], // son 5 byte
+        &calldata_hex[..22],
+        &calldata_hex[calldata_hex.len().saturating_sub(10)..],
     );
-
-    // ═══ DİNAMİK PRİORİTY FEE HESAPLAMA ═══
-    // Beklenen kârın bribe_pct yüzdesi yüksek priority fee olarak verilir
-    // Base L2 FIFO sequencer: priority fee sıralaması belirler
-    // Gas değeri: REVM simülasyonundan gelen kesin değer (sabit 350K DEĞİL)
-    let priority_fee_per_gas = if bribe_wei > 0 {
-        // REVM'den gelen gerçek gas kullanımı (minimum 100K güvenlik tabanı)
-        // v10.0: %10 güvenlik tamponu — REVM simülasyonu bazen %5-10 düşük tahmin eder
-        //        Gerçek zincirde state diff, cold storage access vb. ek gas tüketebilir.
-        //        Bu tampon bribe hesabının güvenli kalmasını sağlar.
-        let gas_with_buffer = crate::types::safe_f64_to_u128((simulated_gas as f64) * 1.10);
-        let actual_gas: u128 = gas_with_buffer.max(100_000);
-        let fee = bribe_wei / actual_gas;
-        let fee = fee.max(1_000_000); // Minimum 1 Gwei
-        println!(
-            "  {} Dinamik Priority Fee: {} Gwei (bribe: {} wei, REVM gas: {} (+10% buffer → {}))",
-            "💰".yellow(),
-            fee / 1_000_000_000,
-            bribe_wei,
-            simulated_gas,
-            actual_gas,
-        );
-        Some(fee)
-    } else {
-        None
-    };
-
-    // ═══ GAS LIMIT: REVM SİMÜLASYONU × 1.10 (%10 GÜVENLİK TAMPONU) ═══
-    // REVM simülasyonundan gelen gas değerine %10 ek marj eklenir.
-    // Sebep: Zincirdeki state, TX'in borsaya ulaşana kadar geçen 2-3ms'de
-    // başka bir küçük swap nedeniyle değişebilir → cold storage access,
-    // state diff vb. ek gas tüketir. Bu tampon "Out of Gas" hatasını önler.
-    let gas_limit_with_buffer = ((simulated_gas as f64) * 1.10) as u64;
-    // v14.0: Minimum taban — REVM simulate() zaten gerçek gas döndürür,
-    // bu floor yalnızca aşırı düşük gas raporlarına karşı güvenlik ağıdır.
-    let gas_limit = gas_limit_with_buffer.max(100_000);
-
-    // ═══ RAW TX GÖNDERİMİ — ATOMIK NONCE + DİNAMİK FEE + GAS LIMIT + BRIBE ═══
-    let mut tx = TransactionRequest::default()
-        .to(contract_address)
-        .input(calldata.into())
-        .nonce(nonce)
-        .gas_limit(gas_limit as u128)
-        .value(alloy::primitives::U256::from(bribe_wei)); // Coinbase bribe: msg.value olarak gönderilir
-
-    // v13.0: max_fee_per_gas — base_fee spike koruması
-    // max_fee = (base_fee × 2) + priority_fee
-    // Base L2 genelde sabit base_fee kullanır ama spike ihtimaline karşı
-    // 2× marj eklenir. Bu olmadan TX "max fee less than block base fee" ile düşer.
-    let max_fee = {
-        let base_component = (block_base_fee as u128).saturating_mul(2);
-        let priority_component = priority_fee_per_gas.unwrap_or(0);
-        let fee = base_component.saturating_add(priority_component);
-        fee.max(1_000_000_000) // Minimum 1 Gwei
-    };
-    tx = tx.max_fee_per_gas(max_fee);
-
-    // Dinamik priority fee ayarla (varsa)
-    if let Some(pf) = priority_fee_per_gas {
-        tx = tx.max_priority_fee_per_gas(pf);
-    }
 
     println!(
-        "  {} TX gönderiliyor... (miktar: {:.6} WETH, nonce: {}, deadline: blok #{}, gas_limit: {} (+10%), payload: 134 byte)",
-        "📤".yellow(), trade_size_weth, nonce, deadline_block, gas_limit
+        "  {} TX gönderiliyor (Private RPC)... (miktar: {:.6} WETH, nonce: {}, deadline: blok #{}, payload: 134 byte)",
+        "📤".yellow(), trade_size_weth, nonce, deadline_block
     );
-    let pending = provider.send_transaction(tx)
-        .await
-        .map_err(|e| eyre::eyre!("TX gönderme hatası: {}", e))?;
-    let tx_hash = format!("{:?}", pending.tx_hash());
-    let tx_hash_alloy = *pending.tx_hash();
-    println!("  {} TX yayınlandı: {}", "📡".blue(), &tx_hash);
 
-    // Fire-and-forget: Receipt bekleme arka plana taşınır.
-    // Base L2 blok süresi 2s → 4s timeout = 2 blok yeterli.
-    // Ana execution pipeline bloke olmaz, bir sonraki fırsat hemen değerlendirilebilir.
-    // pending'i drop edip provider'ı spawn'a taşıyoruz (lifetime: 'static).
-    drop(pending);
-    tokio::spawn(async move {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
-        loop {
-            if tokio::time::Instant::now() > deadline {
-                println!("  {} Zaman aşımı (4s)", "⏰".yellow());
-                break;
-            }
-            match provider.get_transaction_receipt(tx_hash_alloy).await {
-                Ok(Some(receipt)) => {
-                    println!(
-                        "  {} Blok: #{}",
-                        "✅".green(),
-                        receipt.block_number.unwrap_or_default()
-                    );
-                    break;
-                }
-                Ok(None) => {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-                Err(e) => {
-                    println!("  {} Onay hatası: {}", "⚠️".yellow(), e);
-                    break;
-                }
-            }
+    // MevExecutor üzerinden gönder — Private RPC yoksa otomatik iptal
+    let result = mev_executor.execute_protected(
+        &pk_owned,
+        contract_address,
+        &calldata,
+        nonce,
+        expected_profit_weth,
+        simulated_gas,
+        block_base_fee,
+        current_block,
+        &nonce_manager,
+    ).await;
+
+    // İmza tamamlandı — private key bellekten güvenle silinir
+    pk_owned.zeroize();
+
+    match result {
+        Ok(hash) => {
+            println!("  {} TX başarılı (Private RPC): {}", "✅".green(), hash.green().bold());
         }
-    });
-
-    Ok(tx_hash)
+        Err(e) => {
+            println!("  {} TX hatası: {}", "❌".red(), format!("{}", e).red());
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1058,15 +865,19 @@ fn compute_min_profit_exact(exact_profit_wei: U256, slippage_factor_bps: u64) ->
 fn determine_slippage_factor_bps(buy_liquidity: u128, sell_liquidity: u128) -> u64 {
     let min_liquidity = buy_liquidity.min(sell_liquidity);
 
+    // v22.0: Sim vs real divergence koruması artırıldı.
+    // REVM simülasyonu ile gerçek yürütme arasında fiyat kayması olabilir
+    // (aradaki blokta başka swap'lar gerçekleşebilir). Daha konservatif
+    // slippage faktörleri kullanılır.
     if min_liquidity >= 1_000_000_000_000_000_000 {
         // >= 1e18 aktif likidite → derin havuz
-        9990 // %99.9
+        9950 // %99.5 (eski: %99.9)
     } else if min_liquidity >= 10_000_000_000_000_000 {
         // >= 1e16 aktif likidite → orta derinlik
-        9950 // %99.5
+        9900 // %99 (eski: %99.5)
     } else {
         // Sığ havuz — konservatif
-        9500 // %95
+        9500 // %95 (değişmedi)
     }
 }
 

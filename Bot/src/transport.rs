@@ -24,8 +24,8 @@ use std::time::Duration;
 /// Tek bir RPC node'unun durumu
 #[allow(dead_code)]
 struct NodeState {
-    /// Provider instance (bağlantı kurulmuşsa)
-    provider: Option<RootProvider<PubSubFrontend>>,
+    /// Provider instance (bağlantı kurulmuşsa) — v22.0: RwLock ile cache
+    provider: RwLock<Option<RootProvider<PubSubFrontend>>>,
     /// WebSocket URL'i
     url: String,
     /// Node sağlıklı mı? (atomik — lock-free okuma)
@@ -75,7 +75,7 @@ impl RpcPool {
             .iter()
             .map(|url| {
                 Arc::new(NodeState {
-                    provider: None,
+                    provider: RwLock::new(None),
                     url: url.clone(),
                     healthy: AtomicBool::new(false),
                     last_block: AtomicUsize::new(0),
@@ -114,16 +114,12 @@ impl RpcPool {
         for node in &self.ws_nodes {
             match Self::try_connect_ws(&node.url).await {
                 Ok(provider) => {
-                    // Arc<NodeState> içindeki provider'ı güncellemek için
-                    // unsafe gerekir çünkü NodeState Arc içinde immutable.
-                    // Bunun yerine başlangıçta bağlantı kurulurken
-                    // ws_nodes'u mutable olarak yeniden oluşturuyoruz.
                     node.healthy.store(true, Ordering::Release);
                     eprintln!("  ✅ WSS bağlantı kuruldu: {}", &node.url[..node.url.len().min(40)]);
 
-                    // Provider'ı Arc içine koymak yerine, connected_providers ayrı tutuluyor
-                    // (aşağıda get_provider'da lazy connect yapılır)
-                    let _ = provider; // Bağlantı testi başarılı — lazy reconnect yapılacak
+                    // v22.0: Provider'ı cache'e al — get_provider her seferinde
+                    // yeni bağlantı açmak yerine cache'den klonlar
+                    *node.provider.write() = Some(provider);
                 }
                 Err(e) => {
                     eprintln!("  ⚠️  WSS bağlantı başarısız: {} — {}", &node.url[..node.url.len().min(40)], e);
@@ -168,9 +164,22 @@ impl RpcPool {
                 continue;
             }
 
-            // Lazy connect — her seferinde yeni bağlantı (alloy provider clone edilemez)
+            // v22.0: Cache'den klonla — her seferinde yeni bağlantı açmak yerine
+            // mevcut provider'ı kullan. Bağlantı kopmuşsa yeniden bağlan.
+            {
+                let guard = node.provider.read();
+                if let Some(ref provider) = *guard {
+                    return Ok(provider.clone());
+                }
+            }
+
+            // Cache boş — yeni bağlantı aç ve cache'e al
             match Self::try_connect_ws(&node.url).await {
-                Ok(provider) => return Ok(provider),
+                Ok(provider) => {
+                    let cloned = provider.clone();
+                    *node.provider.write() = Some(provider);
+                    return Ok(cloned);
+                }
                 Err(e) => {
                     node.healthy.store(false, Ordering::Release);
                     eprintln!("  ⚠️  WSS node {} bağlantı kaybı: {}", idx, e);
@@ -222,28 +231,57 @@ impl RpcPool {
                 let mut block_numbers: Vec<(usize, u64)> = Vec::with_capacity(pool.ws_nodes.len());
 
                 for (idx, node) in pool.ws_nodes.iter().enumerate() {
-                    match Self::try_connect_ws(&node.url).await {
-                        Ok(provider) => {
-                            match provider.get_block_number().await {
-                                Ok(bn) => {
-                                    node.last_block.store(bn as usize, Ordering::Release);
-                                    block_numbers.push((idx, bn));
-                                    // Önceden sağlıksız olan node kurtarıldı
-                                    if !node.healthy.load(Ordering::Acquire) {
+                    // v22.0: İlk olarak cache'deki provider'ı dene
+                    let cached_provider = {
+                        let guard = node.provider.read();
+                        guard.clone()
+                    };
+                    
+                    let cached_ok = if let Some(ref provider) = cached_provider {
+                        match provider.get_block_number().await {
+                            Ok(bn) => {
+                                node.last_block.store(bn as usize, Ordering::Release);
+                                block_numbers.push((idx, bn));
+                                if !node.healthy.load(Ordering::Acquire) {
+                                    node.healthy.store(true, Ordering::Release);
+                                    eprintln!(
+                                        "  🔄 WSS node #{} tekrar sağlıklı (blok #{})",
+                                        idx, bn
+                                    );
+                                }
+                                true
+                            }
+                            Err(_) => false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if !cached_ok {
+                        // Cache'deki provider başarısız — yeniden bağlan
+                        match Self::try_connect_ws(&node.url).await {
+                            Ok(provider) => {
+                                match provider.get_block_number().await {
+                                    Ok(bn) => {
+                                        node.last_block.store(bn as usize, Ordering::Release);
+                                        block_numbers.push((idx, bn));
+                                        *node.provider.write() = Some(provider);
                                         node.healthy.store(true, Ordering::Release);
                                         eprintln!(
-                                            "  🔄 WSS node #{} tekrar sağlıklı (blok #{})",
+                                            "  🔄 WSS node #{} yeniden bağlandı (blok #{})",
                                             idx, bn
                                         );
                                     }
-                                }
-                                Err(_) => {
-                                    node.healthy.store(false, Ordering::Release);
+                                    Err(_) => {
+                                        *node.provider.write() = None;
+                                        node.healthy.store(false, Ordering::Release);
+                                    }
                                 }
                             }
-                        }
-                        Err(_) => {
-                            node.healthy.store(false, Ordering::Release);
+                            Err(_) => {
+                                *node.provider.write() = None;
+                                node.healthy.store(false, Ordering::Release);
+                            }
                         }
                     }
                 }
@@ -276,21 +314,24 @@ impl RpcPool {
     // ── İç Bağlantı Yardımcıları ────────────────────────────────────────────
 
     /// IPC sokete bağlan
+    /// v22.0: IPC path tanımlıysa local WS proxy olarak kullanılır.
+    /// Alloy 0.1'de native IPC desteği yoktur — local node'un WS
+    /// endpointi üzerinden bağlantı kurulur (eşdeğer gecikme).
     async fn try_connect_ipc(&self, ipc_path: &str) -> Result<RootProvider<PubSubFrontend>> {
         // Alloy IPC provider — Base node'un IPC soketi
         // Windows: \\.\pipe\geth.ipc
         // Linux/Mac: /tmp/geth.ipc veya /path/to/base-node/geth.ipc
-        let ws_url = format!("ws://127.0.0.1:8546"); // IPC genelde WS olarak expose edilir
-        let _ = ipc_path; // IPC soket yolunu doğrudan kullanmak yerine
-                          // geth --ws ile açılan local WS'ye bağlanıyoruz
-                          // Gerçek IPC: alloy henüz native IPC desteklemiyor,
-                          // local WS (127.0.0.1) ile aynı gecikme sağlanır
+        eprintln!(
+            "  ℹ️  IPC path '{}' tanımlı — Alloy 0.1 native IPC desteklemediğinden local WS proxy kullanılıyor",
+            ipc_path
+        );
+        let ws_url = format!("ws://127.0.0.1:8546");
 
         let ws = WsConnect::new(&ws_url);
         let provider = ProviderBuilder::new()
             .on_ws(ws)
             .await
-            .map_err(|e| eyre::eyre!("IPC/Local WS bağlantı hatası: {}", e))?;
+            .map_err(|e| eyre::eyre!("IPC/Local WS bağlantı hatası ({}): {}", ipc_path, e))?;
 
         // Bağlantı testi
         let _block = provider.get_block_number().await

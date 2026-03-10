@@ -175,7 +175,9 @@ pub fn safe_f64_to_u128(val: f64) -> u128 {
     } else if val >= u128::MAX as f64 {
         u128::MAX
     } else {
-        val as u128
+        // v22.0: Truncation → rounding. Wei cinsinden 0.5+ kaybı önler.
+        // Ör: 1.9999 WETH → 1 WEI (truncation) vs 2 WEI (rounding)
+        val.round() as u128
     }
 }
 
@@ -631,10 +633,11 @@ pub struct BotConfig {
     /// v10.0: Ek WSS RPC URL'leri (Round-Robin havuz için)
     /// Primary + backup dışında 3. endpoint
     pub rpc_wss_url_extra: Vec<String>,
-    /// v19.0: Maksimum havuz komisyon tavanı (basis points)
+    /// v21.0: Maksimum havuz komisyon tavanı (basis points)
     /// Bu değerin üzerindeki fee'ye sahip havuzlar strateji değerlendirmesinde atlanır.
-    /// Varsayılan: 100 bps (%1.00). .env'den MAX_POOL_FEE_BPS ile ayarlanabilir.
-    /// v19.0: 10→100 yükseltildi — 30 bps UniV3 havuzları artık değerlendirilir.
+    /// Varsayılan: 30 bps (%0.30). .env'den MAX_POOL_FEE_BPS ile ayarlanabilir.
+    /// v21.0: 100→30 düşürüldü — shadow mode analizleri yüksek fee'li
+    /// havuzların kârsız olduğunu gösterdi. Düşük fee (%0.01, %0.05) havuzlara odaklanılır.
     pub max_pool_fee_bps: u32,
 }
 
@@ -677,7 +680,8 @@ impl BotConfig {
 
         let gas_cost_fallback_weth = Self::parse_env_f64("GAS_COST_FALLBACK_WETH", 0.00005);
         let flash_loan_fee_bps = Self::parse_env_f64("FLASH_LOAN_FEE_BPS", 5.0);
-        let min_net_profit_weth = Self::parse_env_f64("MIN_NET_PROFIT_WETH", 0.0001);
+        // v22.0: Default 0.0001 → 0.001 WETH (gas maliyetini karşılayacak eşik)
+        let min_net_profit_weth = Self::parse_env_f64("MIN_NET_PROFIT_WETH", 0.001);
         let max_trade_size_weth = Self::parse_env_f64("MAX_TRADE_SIZE_WETH", 50.0);
 
         let stats_interval = std::env::var("STATS_INTERVAL")
@@ -809,9 +813,9 @@ impl BotConfig {
                 extras
             },
             max_pool_fee_bps: std::env::var("MAX_POOL_FEE_BPS")
-                .unwrap_or_else(|_| "100".into())
+                .unwrap_or_else(|_| "30".into())
                 .parse::<u32>()
-                .unwrap_or(100),
+                .unwrap_or(30),
         })
     }
 

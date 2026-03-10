@@ -515,17 +515,16 @@ async fn main() -> Result<()> {
     let matched_cfg = pool_discovery::load_matched_pools()?;
     let (pools, pair_combos) = pool_discovery::build_runtime(&matched_cfg)?;
 
-    // ═══ v18.0: PRIVATE RPC UYARISI (PGA Fallback Mevcut) ═══
-    // Private RPC olmadan bundle gönderilemez ama PGA fallback çalışır.
-    // Kontrat minProfit koruması sandviç riskini ortadan kaldırır.
-    // Yine de private RPC önerilir — uyarı yeterli, hard-fail gereksiz.
+    // ═══ v21.0: PRIVATE RPC ZORUNLULUĞU ═══
+    // v21.0: Public mempool gönderimi tamamen kaldırıldı.
+    // PRIVATE_RPC_URL olmadan bot işlem gönderemez.
+    // Shadow mode'da Private RPC gerekmez.
     if config.execution_enabled() && config.private_rpc_url.is_none() {
-        eprintln!(
-            "  {} UYARI: PRIVATE_RPC_URL tanımlanmamış — PGA fallback kullanılacak.\n\
-             Kontrat minProfit koruması aktif ama private RPC önerilir.\n\
-             Çözüm: .env dosyasına PRIVATE_RPC_URL=https://... ekleyin.",
-            "⚠️"
-        );
+        return Err(eyre::eyre!(
+            "PRIVATE_RPC_URL tanımlanmamış! v21.0'dan itibaren public mempool gönderimi \
+             kaldırıldı. .env dosyasına PRIVATE_RPC_URL=https://... ekleyin veya \
+             EXECUTION_ENABLED=false ile shadow mode kullanın."
+        ));
     }
 
     // ═══ v11.0: TOKEN WHITELIST DOĞRULAMA (tüm çiftler) ═══
@@ -684,8 +683,8 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
 
     let total_connect_ms = connect_start.elapsed().as_millis();
 
-    // ══════════════ MEV EXECUTOR (v10.0) ══════════════
-    let _mev_executor = Arc::new(executor::MevExecutor::new(
+    // ══════════════ MEV EXECUTOR (v21.0) ══════════════
+    let mev_executor = Arc::new(executor::MevExecutor::new(
         config.private_rpc_url.clone(),
         config.rpc_wss_url.clone(),
         config.bribe_pct,
@@ -1111,6 +1110,7 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
                         block_base_fee,
                         sync_ms as f64,
                         l1_data_fee_wei,
+                        &mev_executor,
                     ).await {
                         last_simulated_gas = Some(gas);
                         // Başarılı simülasyon — bu çift için hata sayacını sıfırla

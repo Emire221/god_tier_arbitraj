@@ -94,10 +94,10 @@ error ZeroAddress();
 /// @dev v13.0: ZeroAmount yerine semantik olarak doğru hata
 error InvalidCalldataLength();
 
-/// @dev Coinbase bribe transferi başarısız oldu
-error BribeFailed();
-
 // (v12.0: PoolNotWhitelisted kaldırıldı — off-chain doğrulama)
+// (v22.0: PoolNotWhitelisted geri eklendi — on-chain doğrulama ile güvenlik artırıldı)
+error PoolNotWhitelisted();
+// (v21.0: BribeFailed kaldırıldı — coinbase bribe kaldırıldı, bribe yalnızca priority fee)
 
 // ── MINIMAL INTERFACES ───────────────────────────────────────────────────────
 
@@ -177,12 +177,11 @@ contract ArbitrajBotu {
     event EmergencyETHWithdraw(uint256 amount, address indexed to);
 
     // -----------------------------------------------------------------------
-    //  STORAGE — (v12.0: Whitelist kaldırıldı, off-chain doğrulama yeterli)
-    //  On-chain whitelist 2x Cold SLOAD (~4200 gas) maliyeti yaratmaktaydı.
-    //  executor private key güvenliği = on-chain whitelist ile eşdeğer.
-    //  Havuz doğrulaması artık Rust bot içinde (check_arbitrage_opportunity)
-    //  yapılmaktadır. Bu değişiklik işlem başına ~4200 gas tasarrufu sağlar.
+    //  STORAGE — v22.0: On-chain pool whitelist geri eklendi
+    //  executor key çalınsa bile sadece whitelistteki havuzlara işlem yapılır.
+    //  Gas maliyeti: 1x Warm SLOAD (~100 gas) — güvenlik için kabul edilebilir.
     // -----------------------------------------------------------------------
+    mapping(address => bool) public poolWhitelist;
 
     // ───────────────────────────────────────────────────────────────────────    //  CONSTRUCTOR — executor ve admin immutable olarak bytecode'a yazılır
     // ─────────────────────────────────────────────────────────────────────
@@ -221,7 +220,7 @@ contract ArbitrajBotu {
     //
     // ═════════════════════════════════════════════════════════════════════════
 
-    fallback() external payable {
+    fallback() external {
         // ── 1. EXECUTOR KONTROLÜ ─────────────────────────────────────────
         if (msg.sender != executor) revert Unauthorized();
 
@@ -262,9 +261,12 @@ contract ArbitrajBotu {
 
         if (amount == 0) revert ZeroAmount();
 
-        // ── 3.5. (v12.0: Whitelist kontrolü kaldırıldı — off-chain doğrulama) ─
-        //    Havuz doğrulaması artık Rust bot tarafında yapılır.
-        //    Tasarruf: ~4200 gas/TX (2x Cold SLOAD eliminasyonu)
+        // ── 3.5. ON-CHAIN POOL WHITELIST KONTROLÜ (v22.0) ────────────────
+        //    Executor key çalınsa bile sadece whitelistteki havuzlara işlem
+        //    yapılabilir. İlk erişim Cold SLOAD (~2100 gas), aynı TX'te
+        //    tekrar Warm SLOAD (~100 gas). Güvenlik için kabul edilebilir.
+        if (!poolWhitelist[poolA]) revert PoolNotWhitelisted();
+        if (!poolWhitelist[poolB]) revert PoolNotWhitelisted();
 
         // ── 3.6. DEADLINE KONTROLÜ (Stale TX koruması) ───────────────────
         //    Hedeflenen blokta çalışmayan işlem otomatik revert olur.
@@ -291,7 +293,8 @@ contract ArbitrajBotu {
             mstore(0x00, 0x70a0823100000000000000000000000000000000000000000000000000000000)
             mstore(0x04, address())
             let ok := staticcall(gas(), owedToken, 0x00, 0x24, 0x00, 0x20)
-            if iszero(ok) { revert(0, 0) }
+            // v22.0: returndatasize kontrolü — eksik/bozuk dönüş verisi koruması
+            if or(iszero(ok), lt(returndatasize(), 0x20)) { revert(0, 0) }
             balBefore := mload(0x00)
         }
 
@@ -317,7 +320,8 @@ contract ArbitrajBotu {
             mstore(0x00, 0x70a0823100000000000000000000000000000000000000000000000000000000)
             mstore(0x04, address())
             let ok := staticcall(gas(), owedToken, 0x00, 0x24, 0x00, 0x20)
-            if iszero(ok) { revert(0, 0) }
+            // v22.0: returndatasize kontrolü — eksik/bozuk dönüş verisi koruması
+            if or(iszero(ok), lt(returndatasize(), 0x20)) { revert(0, 0) }
             balAfter := mload(0x00)
         }
 
@@ -332,18 +336,12 @@ contract ArbitrajBotu {
         //    Sandviç saldırısında kâr düştüğünde burası revert atar.
         if (profit < minProfit) revert InsufficientProfit();
 
-        // ── 8.5. COINBASE BRIBE — Validator/Sequencer Tip ────────────────
-        //    msg.value > 0 ise ETH'yi doğrudan block.coinbase'e transfer et.
-        //    Base L2: Sequencer sıralama önceliği için kullanılır.
-        //    Assembly call() ile gas-efficient transfer (~6700 gas).
-        //    Bribe başarısız olursa TX revert olur (BribeFailed).
-        if (msg.value > 0) {
-            bool bribeOk;
-            assembly {
-                bribeOk := call(gas(), coinbase(), callvalue(), 0, 0, 0, 0)
-            }
-            if (!bribeOk) revert BribeFailed();
-        }
+        // ── 8.5. COINBASE BRIBE — KALDIRILDI (v21.0) ──────────────────
+        //    Base (OP Stack) L2'de sequencer sıralaması yalnızca
+        //    max_priority_fee_per_gas ile belirlenir. Doğrudan coinbase'e
+        //    ETH transferi sequencer tarafından rüşvet olarak işlenmez,
+        //    yalnızca gas israfı yaratır. Bribe artık Rust tarafında
+        //    priority fee olarak TX'e eklenir.
 
         // ── 9. KÂR KONTRAT İÇİNDE KALIR ───────────────────────────────
         //    v9.0: Kâr otomatik olarak dışarı gönderilmez.
@@ -504,13 +502,29 @@ contract ArbitrajBotu {
     }
 
     // ═════════════════════════════════════════════════════════════════════════════
-    //  (v12.0: POOL WHITELIST KALDIRILDI — OFF-CHAIN DOĞRULAMA)
-    //  On-chain whitelist 2x Cold SLOAD (~4200 gas) maliyeti yaratmaktaydı.
-    //  Havuz doğrulaması artık Rust bot içinde yapılmaktadır.
+    //  POOL WHITELIST YÖNETİMİ (v22.0: Geri eklendi — güvenlik öncelikli)
+    //  Sadece admin (soğuk cüzdan/multisig) tarafından yönetilir.
     // ═════════════════════════════════════════════════════════════════════════════
 
-    // (v12.0: setPoolWhitelist ve batchSetPoolWhitelist kaldırıldı.
-    //  Havuz doğrulaması off-chain'de yapılır, on-chain SLOAD tasarrufu sağlanır.)
+    /// @notice Tek bir havuzu whiteliste ekle/çıkar
+    /// @param pool Havuz adresi
+    /// @param status true = ekle, false = çıkar
+    function setPoolWhitelist(address pool, bool status) external {
+        if (msg.sender != admin) revert Unauthorized();
+        if (pool == address(0)) revert ZeroAddress();
+        poolWhitelist[pool] = status;
+    }
+
+    /// @notice Birden fazla havuzu whiteliste toplu ekle/çıkar
+    /// @param pools Havuz adresleri dizisi
+    /// @param status true = ekle, false = çıkar
+    function batchSetPoolWhitelist(address[] calldata pools, bool status) external {
+        if (msg.sender != admin) revert Unauthorized();
+        for (uint256 i; i < pools.length; ++i) {
+            if (pools[i] == address(0)) revert ZeroAddress();
+            poolWhitelist[pools[i]] = status;
+        }
+    }
 
     // ═════════════════════════════════════════════════════════════════════════════
     //  ACİL DURUM — Token ve ETH Kurtarma
@@ -525,7 +539,8 @@ contract ArbitrajBotu {
             mstore(0x00, 0x70a0823100000000000000000000000000000000000000000000000000000000)
             mstore(0x04, address())
             let ok := staticcall(gas(), token, 0x00, 0x24, 0x00, 0x20)
-            if iszero(ok) { revert(0, 0) }
+            // v22.0: returndatasize kontrolü
+            if or(iszero(ok), lt(returndatasize(), 0x20)) { revert(0, 0) }
             bal := mload(0x00)
         }
         if (bal == 0) revert ZeroAmount();

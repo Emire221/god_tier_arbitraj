@@ -15,7 +15,8 @@ import {
     TransferFailed,
     DeadlineExpired,
     ZeroAddress,
-    InvalidCalldataLength
+    InvalidCalldataLength,
+    PoolNotWhitelisted
 } from "../src/Arbitraj.sol";
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -193,6 +194,10 @@ contract ArbitrajBotuTest is Test {
 
         // Bot deploy et — executor=deployer, admin=deployer (test kolaylığı)
         bot = new ArbitrajBotu(deployer, deployer);
+
+        // v22.0: Pool whitelist — test havuzlarını whiteliste ekle
+        bot.setPoolWhitelist(address(uniPool), true);
+        bot.setPoolWhitelist(address(slipPool), true);
     }
 
     /// @dev Test kontratının ETH alabilmesi için
@@ -1198,5 +1203,290 @@ contract ArbitrajBotuTest is Test {
         vm.prank(attacker);
         (bool ok, ) = address(bot).call(cd);
         assertFalse(ok, "Attacker cuzdani executor degil, reddedilmeli");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  18. SIĞ LİKİDİTE + EXTREM SLIPPAGE TESTLERİ (Hard Liquidity Cap)
+    // ══════════════════════════════════════════════════════════════════════════
+    //
+    //  Amaç: Bot shadow mode'dan çıkmadan önce, sığ likidite ve sahte token
+    //  senaryolarında kontratın beklenen revert tepkisini verdiğini doğrulamak.
+    //  Bu testler Görev 1 (çifte bribe) ve Görev 2 (MEV koruması) ile birlikte
+    //  çalışır — tüm güvenlik ağlarının tam entegrasyonunu kanıtlar.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// @dev Sığ likidite: Slipstream çıktısı beklenen kârın çok altında
+    ///      minProfit bariyerine takılır → InsufficientProfit revert
+    function test_shallowLiquidity_InsufficientProfit() public {
+        // Senaryo: 10000 USDC borç, 10 WETH alınır
+        // Sığ havuz: Slipstream sadece 10001 USDC döner (1 USDC kâr)
+        // minProfit: 100 USDC → revert
+        uint256 uniOwed = 10_000e6;
+        uint256 uniReceived = 10e18;
+        uint256 aeroOutput = 10_001e6; // Çok sığ → 1 USDC kâr
+
+        uniPool.setMockDeltas(int256(uniOwed), -int256(uniReceived));
+        tokenB.mint(address(uniPool), uniReceived);
+
+        slipPool.setMockDeltas(-int256(aeroOutput), int256(uniReceived));
+        tokenA.mint(address(slipPool), aeroOutput);
+
+        bool ok = _executeArbitrage(
+            address(uniPool),
+            address(slipPool),
+            address(tokenA),
+            address(tokenB),
+            uniReceived,
+            0, 1,
+            100e6,  // minProfit: 100 USDC >> 1 USDC gerçek kâr
+            uint32(block.number)
+        );
+
+        assertFalse(ok, "Sig likidite: kar < minProfit -> revert bekleniyor");
+        assertEq(tokenA.balanceOf(address(bot)), 0, "Revert sonrasi kontratta token olmamali");
+    }
+
+    /// @dev Sığ likidite büyük miktar: Çok büyük swap ile havuz boşalır
+    ///      Aero çıktısı borçtan az → NoProfitRealized revert
+    function test_shallowLiquidity_LargeSwap_NoProfitRevert() public {
+        // Senaryo: Çok büyük swap miktarı, sığ havuz → zarar
+        uint256 uniOwed = 50_000e6;
+        uint256 uniReceived = 50e18;
+        uint256 aeroOutput = 45_000e6; // Havuz sığ → %10 zarar
+
+        uniPool.setMockDeltas(int256(uniOwed), -int256(uniReceived));
+        tokenB.mint(address(uniPool), uniReceived);
+
+        slipPool.setMockDeltas(-int256(aeroOutput), int256(uniReceived));
+        tokenA.mint(address(slipPool), aeroOutput);
+
+        bool ok = _executeArbitrage(
+            address(uniPool),
+            address(slipPool),
+            address(tokenA),
+            address(tokenB),
+            uniReceived,
+            0, 1,
+            0,  // minProfit=0 bile olsa kâr yok
+            uint32(block.number)
+        );
+
+        assertFalse(ok, "Buyuk swap + sig havuz: zarar -> NoProfitRealized revert");
+    }
+
+    /// @dev Sahte likidite: Aero çıktısı minimum kâr eşiğinde
+    ///      Tam sınır testi — 1 wei altında revert, üstünde geçiş
+    function test_shallowLiquidity_BoundaryMinProfit() public {
+        uint256 uniOwed = 1000e6;
+        uint256 uniReceived = 1e18;
+        // Tam sınırda: kâr = 50 USDC, minProfit = 50 USDC + 1 wei
+        uint256 aeroOutput = 1050e6;
+
+        uniPool.setMockDeltas(int256(uniOwed), -int256(uniReceived));
+        tokenB.mint(address(uniPool), uniReceived);
+
+        slipPool.setMockDeltas(-int256(aeroOutput), int256(uniReceived));
+        tokenA.mint(address(slipPool), aeroOutput);
+
+        // minProfit = kâr + 1 → revert
+        bool ok = _executeArbitrage(
+            address(uniPool),
+            address(slipPool),
+            address(tokenA),
+            address(tokenB),
+            uniReceived,
+            0, 1,
+            50e6 + 1,  // 1 wei fazla → InsufficientProfit
+            uint32(block.number)
+        );
+        assertFalse(ok, "Sinir testi: minProfit = kar + 1 wei -> revert");
+    }
+
+    /// @dev Birden fazla sığ likidite döngüsü ardışık — state corruption testi
+    function test_shallowLiquidity_ConsecutiveReverts_NoCorruption() public {
+        // İlk: revert (zarar)
+        {
+            uint256 uniOwed = 1000e6;
+            uint256 uniReceived = 1e18;
+            uint256 aeroOutput = 900e6;
+
+            uniPool.setMockDeltas(int256(uniOwed), -int256(uniReceived));
+            tokenB.mint(address(uniPool), uniReceived);
+            slipPool.setMockDeltas(-int256(aeroOutput), int256(uniReceived));
+            tokenA.mint(address(slipPool), aeroOutput);
+
+            bool ok = _executeArbitrage(
+                address(uniPool), address(slipPool),
+                address(tokenA), address(tokenB),
+                uniReceived, 0, 1, 0,
+                uint32(block.number)
+            );
+            assertFalse(ok, "Ilk revert: zarar");
+        }
+
+        vm.roll(block.number + 1);
+
+        // İkinci: revert (yetersiz kâr)
+        {
+            uint256 uniOwed = 2000e6;
+            uint256 uniReceived = 2e18;
+            uint256 aeroOutput = 2005e6;
+
+            uniPool.setMockDeltas(int256(uniOwed), -int256(uniReceived));
+            tokenB.mint(address(uniPool), uniReceived);
+            slipPool.setMockDeltas(-int256(aeroOutput), int256(uniReceived));
+            tokenA.mint(address(slipPool), aeroOutput);
+
+            bool ok = _executeArbitrage(
+                address(uniPool), address(slipPool),
+                address(tokenA), address(tokenB),
+                uniReceived, 0, 1,
+                100e6,  // minProfit=100 > kâr=5
+                uint32(block.number)
+            );
+            assertFalse(ok, "Ikinci revert: yetersiz kar");
+        }
+
+        vm.roll(block.number + 1);
+
+        // Üçüncü: başarılı (iyi koşullar, state temiz)
+        {
+            bool ok = _runProfitableArbitrage(1000e6, 1e18, 1050e6, 1);
+            assertTrue(ok, "Ucuncu islem basarili olmali (state corruption yok)");
+            assertEq(tokenA.balanceOf(address(bot)), 50e6, "Kar dogru birikmeli");
+        }
+    }
+
+    /// @dev Zero amount edge case — calldata'da amount=0 → ZeroAmount revert
+    function test_shallowLiquidity_ZeroAmountRevert() public {
+        _setupProfitableScenario(1000e6, 1e18, 1050e6);
+
+        bool ok = _executeArbitrage(
+            address(uniPool),
+            address(slipPool),
+            address(tokenA),
+            address(tokenB),
+            0,  // amount = 0
+            0, 1, 0,
+            uint32(block.number)
+        );
+        assertFalse(ok, "Zero amount -> ZeroAmount revert");
+    }
+
+    /// @dev Calldata kısa (134 byte'dan az) → InvalidCalldataLength revert
+    function test_shallowLiquidity_ShortCalldata() public {
+        bytes memory shortPayload = abi.encodePacked(
+            address(uniPool),
+            address(slipPool),
+            address(tokenA)
+        ); // 60 byte < 134 byte
+
+        (bool ok, bytes memory ret) = address(bot).call(shortPayload);
+        assertFalse(ok, "Kisa calldata -> InvalidCalldataLength revert");
+        assertEq(bytes4(ret), InvalidCalldataLength.selector);
+    }
+
+    /// @dev Fuzz: Sığ likidite + değişken minProfit sınır testi
+    function testFuzz_ShallowLiquidity_MinProfitBoundary(uint128 karMarji) public {
+        uint256 baseAmount = 1000e6;
+        // 0-999 USDC arası kâr marjı
+        uint256 actualProfit = uint256(karMarji) % 1000 * 1e6;
+        uint256 aeroOutput = baseAmount + actualProfit;
+
+        // Senaryo kur
+        uniPool.setMockDeltas(int256(baseAmount), -int256(1e18));
+        tokenB.mint(address(uniPool), 1e18);
+        slipPool.setMockDeltas(-int256(aeroOutput), int256(1e18));
+        tokenA.mint(address(slipPool), aeroOutput);
+
+        // minProfit = kâr marjının %80'i (tip güvenlik marjı dahil)
+        uint128 minProfit = uint128(actualProfit * 80 / 100);
+
+        bool ok = _executeArbitrage(
+            address(uniPool),
+            address(slipPool),
+            address(tokenA),
+            address(tokenB),
+            1e18,
+            0, 1,
+            minProfit,
+            uint32(block.number)
+        );
+
+        if (actualProfit == 0) {
+            assertFalse(ok, "Sifir kar -> NoProfitRealized");
+        } else if (actualProfit >= uint256(minProfit)) {
+            assertTrue(ok, "Kar >= minProfit -> basarili");
+        }
+    }
+
+    // ── POOL WHITELIST TESTLERİ (v22.0) ──────────────────────────────
+
+    /// @dev Whitelistte olmayan havuza işlem gönderimi → PoolNotWhitelisted revert
+    function test_poolWhitelist_NonWhitelistedPoolReverts() public {
+        MockUniswapV3Pool fakePool = new MockUniswapV3Pool(address(tokenA), address(tokenB));
+        // fakePool whiteliste EKLENMEDİ
+
+        uniPool.setMockDeltas(int256(1000e6), -int256(1e18));
+        tokenB.mint(address(uniPool), 1e18);
+        slipPool.setMockDeltas(-int256(1050e6), int256(1e18));
+        tokenA.mint(address(slipPool), 1050e6);
+
+        bytes memory cd = _buildCalldata(
+            address(fakePool),   // whitelistte değil!
+            address(slipPool),
+            address(tokenA),
+            address(tokenB),
+            1e18, 0, 1, 0, uint32(block.number)
+        );
+
+        (bool ok, bytes memory ret) = address(bot).call(cd);
+        assertFalse(ok, "Whitelistte olmayan pool -> revert bekleniyor");
+        assertEq(bytes4(ret), PoolNotWhitelisted.selector);
+    }
+
+    /// @dev Admin pool'u whitelist'ten çıkardıktan sonra işlem → revert
+    function test_poolWhitelist_RemovedPoolReverts() public {
+        bot.setPoolWhitelist(address(uniPool), false);
+
+        uniPool.setMockDeltas(int256(1000e6), -int256(1e18));
+        tokenB.mint(address(uniPool), 1e18);
+        slipPool.setMockDeltas(-int256(1050e6), int256(1e18));
+        tokenA.mint(address(slipPool), 1050e6);
+
+        bool ok = _executeArbitrage(
+            address(uniPool),
+            address(slipPool),
+            address(tokenA),
+            address(tokenB),
+            1e18, 0, 1, 0, uint32(block.number)
+        );
+
+        assertFalse(ok, "Whitelistten cikarilan pool -> revert bekleniyor");
+
+        // Tekrar ekle ve başarılı olduğunu doğrula
+        bot.setPoolWhitelist(address(uniPool), true);
+    }
+
+    /// @dev Sadece admin whitelist yönetebilir
+    function test_poolWhitelist_OnlyAdminCanSet() public {
+        vm.prank(attacker);
+        vm.expectRevert(Unauthorized.selector);
+        bot.setPoolWhitelist(address(uniPool), false);
+    }
+
+    /// @dev Batch whitelist ekleme
+    function test_poolWhitelist_BatchSet() public {
+        MockUniswapV3Pool newPool1 = new MockUniswapV3Pool(address(tokenA), address(tokenB));
+        MockUniswapV3Pool newPool2 = new MockUniswapV3Pool(address(tokenA), address(tokenB));
+
+        address[] memory pools = new address[](2);
+        pools[0] = address(newPool1);
+        pools[1] = address(newPool2);
+
+        bot.batchSetPoolWhitelist(pools, true);
+
+        assertTrue(bot.poolWhitelist(address(newPool1)), "Pool1 whitelistte olmali");
+        assertTrue(bot.poolWhitelist(address(newPool2)), "Pool2 whitelistte olmali");
     }
 }

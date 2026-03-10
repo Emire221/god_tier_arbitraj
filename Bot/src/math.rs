@@ -1437,9 +1437,12 @@ pub fn find_optimal_amount_with_bitmap(
     }
 
     // ── AŞAMA 1: Hibrit Kaba Tarama ──────────────────────────────
+    // v22.0: 40 → 25 adım. Quadratic spacing küçük miktarlarda daha yoğun
+    // tarama yapar, büyük miktarlarda seyrekleşir. 25 adım yeterli çözünürlük
+    // sağlar, 15 iterasyon (~0.5ms) tasarruf eder.
     let mut best_amount = 0.0;
     let mut best_profit = f64::NEG_INFINITY;
-    let scan_steps = 40;
+    let scan_steps = 25;
 
     for i in 1..=scan_steps {
         let fraction = i as f64 / scan_steps as f64;
@@ -2793,15 +2796,37 @@ pub mod exact {
     // ── Dönüşüm Yardımcıları ────────────────────────────────────────────────
 
     /// U256'yı f64'e güvenli dönüştür.
-    /// Newton-Raphson optimizer'ın USD karşılaştırması için yeterli hassasiyet.
+    /// v22.0: String conversion → doğrudan bit manipülasyonu.
+    /// Eski: val.to_string().parse::<f64>() — her dönüşümde heap allocation.
+    /// Yeni: U256 limb'lerinden doğrudan f64 hesaplama — zero-alloc.
     /// Not: 2^53 üstü değerlerde düşük bitler kaybolur ama WETH/USD
     /// aralığındaki wei değerleri için sorun oluşturmaz.
     pub fn u256_to_f64(val: U256) -> f64 {
         if val.is_zero() {
             return 0.0;
         }
-        let s = val.to_string();
-        s.parse::<f64>().unwrap_or(0.0)
+        // U256 → [u64; 4] limbs (little-endian)
+        let limbs = val.as_limbs();
+        // En yüksek anlamlı limb'i bul
+        if limbs[3] != 0 {
+            // 192-255 bit aralığında
+            limbs[3] as f64 * (2.0f64).powi(192)
+                + limbs[2] as f64 * (2.0f64).powi(128)
+                + limbs[1] as f64 * (2.0f64).powi(64)
+                + limbs[0] as f64
+        } else if limbs[2] != 0 {
+            // 128-191 bit aralığında
+            limbs[2] as f64 * (2.0f64).powi(128)
+                + limbs[1] as f64 * (2.0f64).powi(64)
+                + limbs[0] as f64
+        } else if limbs[1] != 0 {
+            // 64-127 bit aralığında
+            limbs[1] as f64 * (2.0f64).powi(64)
+                + limbs[0] as f64
+        } else {
+            // 0-63 bit aralığında — tam hassasiyet (f64 mantissa 53 bit)
+            limbs[0] as f64
+        }
     }
 
     /// Fee fraction (ör: 0.0005) → fee pips (ör: 500, 1e6 bazında).

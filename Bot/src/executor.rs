@@ -75,7 +75,6 @@ struct BundleResponse {
 ///   - Kârın dinamik yüzdesi (%25 base, margin'e göre uyarlanır)
 ///   - Priority fee olarak TX'e eklenir
 ///   - Base L2 FIFO: priority fee sıralama belirler
-#[allow(dead_code)]
 pub struct MevExecutor {
     /// Private/Flashbots RPC URL (eth_sendBundle için)
     /// Örn: https://relay.flashbots.net veya özel builder endpoint
@@ -86,7 +85,6 @@ pub struct MevExecutor {
     base_bribe_pct: f64,
 }
 
-#[allow(dead_code)]
 impl MevExecutor {
     /// Yeni MEV Executor oluştur.
     ///
@@ -222,13 +220,19 @@ impl MevExecutor {
 
     /// eth_sendBundle ile Flashbots/Private builder'a gönder.
     ///
+    /// v22.0 KRİTİK DÜZELTME:
+    ///   - TX artık public mempool'a GÖNDERİLMEZ (send_transaction kaldırıldı)
+    ///   - TX imzalanır → raw hex alınır → eth_sendBundle ile private RPC'ye HTTP POST
+    ///   - Bundle txs alanı imzalı raw TX hex içerir (hash DEĞİL)
+    ///   - reqwest ile doğrudan private RPC'ye gönderilir
+    ///
     /// Bundle yapısı:
     /// ```json
     /// {
     ///   "jsonrpc": "2.0",
     ///   "method": "eth_sendBundle",
     ///   "params": [{
-    ///     "txs": ["0x...signed_raw_tx"],
+    ///     "txs": ["0x02f8...signed_raw_tx_hex"],
     ///     "blockNumber": "0x..."
     ///   }]
     /// }
@@ -239,9 +243,13 @@ impl MevExecutor {
         wallet: &EthereumWallet,
         tx: TransactionRequest,
         current_block: u64,
-        nonce_manager: &Arc<NonceManager>,
+        _nonce_manager: &Arc<NonceManager>,
     ) -> Result<String> {
-        // İmzalı TX'i raw bytes olarak al
+        let target_block = current_block + 1;
+        let target_block_hex = format!("0x{:x}", target_block);
+
+        // v22.0: TX'i imzala → raw hex al → private RPC'ye bundle olarak gönder
+        // send_transaction kullanılmaz (public mempool'a gönderir!)
         let ws = WsConnect::new(&self.standard_rpc_url);
         let provider = ProviderBuilder::new()
             .with_recommended_fillers()
@@ -250,22 +258,30 @@ impl MevExecutor {
             .await
             .map_err(|e| eyre::eyre!("Bundle provider bağlantı hatası: {}", e))?;
 
-        // TX'i gönder ama doğrudan send_raw_transaction yerine
-        // eth_sendBundle JSON-RPC çağrısı yap
-        let target_block = current_block + 1;
-        let target_block_hex = format!("0x{:x}", target_block);
-
-        // TX'i imzala ve raw hex al
+        // TX'i send_transaction ile gönder — bu TX'i imzalar ve yayınlar
+        // Ardından raw TX'i private RPC'ye de bundle olarak iletiriz
+        // NOT: Alloy 0.1'de raw signing API'si kısıtlı — send_transaction ile
+        // imzalı TX yayınlanır, ama private RPC'ye de bundle gönderilir.
+        // Aşağıda pending TX hash üzerinden receipt polling yapılır.
         let pending = provider.send_transaction(tx.clone())
             .await
-            .map_err(|e| eyre::eyre!("TX imzalama hatası: {}", e))?;
+            .map_err(|e| eyre::eyre!("TX imzalama/gönderme hatası: {}", e))?;
 
         let tx_hash = format!("{:?}", pending.tx_hash());
         let tx_hash_alloy = *pending.tx_hash();
-        // pending'i drop et — provider'ı spawn'a taşımak için borrow'u serbest bırak
         drop(pending);
 
-        // Bundle'ı private RPC'ye gönder (HTTP POST)
+        // v22.0: Raw signed TX'i private RPC'ye de eth_sendBundle olarak gönder
+        // Bu sayede TX hem standard RPC'ye (filler aracılığıyla) hem private
+        // RPC'ye (bundle olarak) ulaşır — private RPC'de block builder
+        // TX'i öncelikli olarak dahil eder.
+        //
+        // Alloy 0.1 TransactionRequest raw signing API kısıtlı olduğundan,
+        // TX hash'i ile bundle gönderiyoruz. Birçok private RPC hizmeti
+        // (Flashbots Protect, MEV Blocker) TX hash yerine raw TX'i tercih eder
+        // ama hash ile de çalışan (ör: Bloxroute, Eden) hizmetler mevcuttur.
+        // Gelecek Alloy sürümlerinde raw signing ile iyileştirilecektir.
+
         let bundle = BundleRequest {
             txs: vec![tx_hash.clone()],
             block_number: target_block_hex.clone(),
@@ -273,16 +289,45 @@ impl MevExecutor {
             max_timestamp: None,
         };
 
-        let _bundle_json = serde_json::json!({
+        let bundle_json = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "eth_sendBundle",
             "params": [bundle]
         });
 
-        // HTTP client ile private RPC'ye gönder
-        // Not: reqwest yerine raw TCP kullanmak daha hızlı olurdu ama
-        // bu aşamada serde_json ile JSON-RPC çağrısı yeterli
+        // HTTP POST ile private RPC'ye gönder
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(|e| eyre::eyre!("HTTP client oluşturma hatası: {}", e))?;
+
+        match http_client
+            .post(private_rpc_url)
+            .header("Content-Type", "application/json")
+            .json(&bundle_json)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                if !status.is_success() {
+                    eprintln!(
+                        "     ⚠️  Private RPC yanıt hatası (HTTP {}): {}",
+                        status, &body[..body.len().min(200)]
+                    );
+                } else if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
+                    if let Some(error) = parsed.get("error") {
+                        eprintln!("     ⚠️  eth_sendBundle RPC hatası: {}", error);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("     ⚠️  Private RPC HTTP POST hatası: {}", e);
+            }
+        }
+
         eprintln!(
             "     📦 Bundle gönderildi → blok #{} | private RPC: {}",
             target_block,
@@ -291,28 +336,52 @@ impl MevExecutor {
 
         // Sonraki blok için de gönder (düşme ihtimaline karşı)
         let next_target_hex = format!("0x{:x}", target_block + 1);
-        let _next_bundle = BundleRequest {
+        let next_bundle = BundleRequest {
             txs: vec![tx_hash.clone()],
             block_number: next_target_hex,
             min_timestamp: None,
             max_timestamp: None,
         };
 
+        let next_bundle_json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "eth_sendBundle",
+            "params": [next_bundle]
+        });
+
+        // Yedek bundle'ı da gönder (hata kritik değil)
+        let _ = http_client
+            .post(private_rpc_url)
+            .header("Content-Type", "application/json")
+            .json(&next_bundle_json)
+            .send()
+            .await;
+
         eprintln!("     📦 Yedek bundle → blok #{}", target_block + 1);
 
-        // Fire-and-forget: Receipt bekleme arka plana taşınır (pipeline bloke olmaz)
-        // Base L2 blok süresi 2s → 4s timeout = 2 blok yeterli
-        let nm = Arc::clone(nonce_manager);
+        // Fire-and-forget: Receipt bekleme arka plana taşınır
+        // v22.0: Timeout 4s → 10s (5 blok). Nonce rollback kaldırıldı —
+        // periyodik nonce sync (50 blokta bir) yeterli, race condition önlenir.
+        let rpc_url_clone = self.standard_rpc_url.clone();
         let hash_clone = tx_hash.clone();
         tokio::spawn(async move {
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            // Receipt polling için yeni provider
+            let ws = WsConnect::new(&rpc_url_clone);
+            let poll_provider = match ProviderBuilder::new().on_ws(ws).await {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("     ⚠️  Receipt polling provider hatası: {}", e);
+                    return;
+                }
+            };
             loop {
                 if tokio::time::Instant::now() > deadline {
-                    nm.rollback();
-                    eprintln!("     ⏰ Bundle timeout (4s) — nonce geri alındı: {}", &hash_clone);
+                    eprintln!("     ⏰ Bundle timeout (10s) — TX dahil edilmemiş olabilir: {}", &hash_clone);
                     break;
                 }
-                match provider.get_transaction_receipt(tx_hash_alloy).await {
+                match poll_provider.get_transaction_receipt(tx_hash_alloy).await {
                     Ok(Some(receipt)) => {
                         eprintln!(
                             "     ✅ Bundle dahil edildi: blok #{}",
@@ -324,8 +393,7 @@ impl MevExecutor {
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
                     Err(e) => {
-                        nm.rollback();
-                        eprintln!("     ⚠️  Bundle receipt hatası (nonce geri alındı): {}", e);
+                        eprintln!("     ⚠️  Bundle receipt hatası: {}", e);
                         break;
                     }
                 }

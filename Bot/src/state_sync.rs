@@ -230,9 +230,10 @@ sol! {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// RPC durum sorgulama zaman aşımı (milisaniye).
-/// 500ms içinde yanıt gelmezse sorgu başarısız sayılır ve yeniden denenir.
-/// Base L2 ~2s blok süresi → 500ms timeout makul (1 RTT + işlem süresi).
-const SYNC_TIMEOUT_MS: u64 = 500;
+/// v22.0: 500ms → 2000ms. Base L2 ~2s blok süresi, yoğun dönemlerde
+/// RPC gecikmeleri 500ms'yi aşabilir → gereksiz timeout hataları.
+/// 2000ms yeterli süre tanır, 1 blok süresi içinde yanıt beklenir.
+const SYNC_TIMEOUT_MS: u64 = 2000;
 
 /// Maksimum yeniden deneme sayısı (timeout sonrası)
 const SYNC_MAX_RETRIES: u32 = 2;
@@ -593,11 +594,9 @@ pub async fn sync_all_pools<T: Transport + Clone, P: Provider<T, Ethereum> + Syn
     states: &[SharedPoolState],
     block_number: u64,
 ) -> Vec<Result<()>> {
-    // v17.0: Sıkı timeout (500ms) + hızlı retry (1 kez)
-    // RPC gecikmesi 500ms'yi aşarsa ilk deneme iptal edilir ve yeniden denenir.
-    // İkinci deneme de başarısız olursa hata döner.
-    // Amaç: 1.8s spike'lardan kaçınıp eski fiyatla işlem yapmayı önlemek.
-    const SYNC_TIMEOUT_MS: u64 = 500;
+    // v22.0: sync_all_pools timeout 500ms → 2000ms (modül sabiti ile aynı).
+    // Yüksek ağ yoğunluğunda 500ms'lik timeout gereksiz hata üretiyordu.
+    const SYNC_TIMEOUT_MS: u64 = 2000;
     const MAX_RETRIES: u32 = 1;
 
     let futures: Vec<_> = pools.iter().zip(states.iter())
@@ -699,10 +698,14 @@ pub async fn estimate_l1_data_fee<T: Transport + Clone, P: Provider<T, Ethereum>
         }
         Err(e) => {
             eprintln!(
-                "  ⚠️ L1 data fee tahmini başarısız (fallback: 0): {}",
+                "  ⚠️ L1 data fee tahmini başarısız (fallback: konservatif tahmin): {}",
                 e
             );
-            0
+            // v22.0: Fallback 0 → konservatif tahmin.
+            // 0 dönmek gas maliyetini eksik hesaplatır → zararlı işlem riski.
+            // 134-byte non-zero calldata, Base L2'de ~0.0001-0.0005 ETH L1 fee öder.
+            // Konservatif üst sınır: 500_000 gwei = 0.0005 ETH
+            500_000_000_000_000u128 // 0.0005 ETH (wei)
         }
     }
 }
@@ -797,8 +800,21 @@ fn encode_ticks_call(_dex: DexType, tick: i32) -> Vec<u8> {
 ///   [160..192] uint160 secondsPerLiquidityOutsideX128
 ///   [192..224] uint32 secondsOutside
 ///   [224..256] bool   initialized
-///   [256..288] int128 stakedLiquidityNet    (yalnızca Aerodrome)
-///   [288..320] uint256 rewardGrowthOutside  (yalnızca Aerodrome)
+/// ABI decode ticks() raw return data (DEX-agnostik).
+///
+/// Uniswap V3 ticks() → 8 parametre (256 byte)
+/// PancakeSwap V3 ticks() → 8 parametre (256 byte)  
+/// Aerodrome ticks() → 10 parametre (320 byte)
+///
+/// İlk 3 kullanılan alan tüm DEX'lerde aynı offset'tedir:
+///   [0..32]   uint128 liquidityGross      — tüm DEX'lerde 1. alan
+///   [32..64]  int128  liquidityNet         — tüm DEX'lerde 2. alan
+///   [224..256] bool   initialized          — tüm DEX'lerde 8. alan
+///
+/// Aerodrome ek alanları (stakedLiquidityNet, rewardGrowthOutsideX128)
+/// 8. alandan SONRA gelir, dolayısıyla initialized offset'i değişmez.
+///
+/// Dönüş: (liquidityGross, liquidityNet, initialized)
 fn decode_ticks_result(data: &[u8]) -> Option<(u128, i128, bool)> {
     if data.len() < 256 {
         return None;
@@ -811,6 +827,7 @@ fn decode_ticks_result(data: &[u8]) -> Option<(u128, i128, bool)> {
     let liq_net = i128::from_be_bytes(data[48..64].try_into().ok()?);
 
     // initialized: bool (son byte of eighth 32-byte word)
+    // v22.0: Offset doğrulaması — 8. word tüm DEX'lerde aynı (index=7)
     let initialized = data[255] != 0;
 
     Some((liq_gross, liq_net, initialized))

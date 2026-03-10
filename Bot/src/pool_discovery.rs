@@ -153,14 +153,33 @@ fn infer_token_decimals(address: &str) -> u8 {
     else { 18 }
 }
 
+/// v22.0: DEX tipi çıkarımı — sağlamlaştırılmış eşleştirme.
+/// Bilinen DEX ID'leri tam eşleşme ile kontrol edilir (substring yerine).
+/// Bilinmeyen DEX'ler UniswapV3 olarak varsayılır (en yaygın ABI).
 fn infer_dex_type(dex_id: &str) -> DexType {
     let lower = dex_id.to_lowercase();
-    if lower.contains("pancakeswap") || lower.contains("pancake") {
-        DexType::PancakeSwapV3
-    } else if lower.contains("aerodrome") {
-        DexType::Aerodrome
-    } else {
-        DexType::UniswapV3
+    
+    // Tam eşleşme öncelikli — DexScreener'ın bilinen DEX ID formatları
+    match lower.as_str() {
+        "pancakeswap" | "pancakeswap-v3" | "pancakeswap_v3" => DexType::PancakeSwapV3,
+        "aerodrome" | "aerodrome-slipstream" | "aerodrome_slipstream" | "aerodrome-cl" => DexType::Aerodrome,
+        "uniswap" | "uniswap-v3" | "uniswap_v3" | "uniswapv3" => DexType::UniswapV3,
+        "sushiswap" | "sushiswap-v3" | "sushiswap_v3" => DexType::UniswapV3,
+        _ => {
+            // Fallback: substring eşleşme (yeni DEX ID'ler için)
+            if lower.contains("pancake") {
+                DexType::PancakeSwapV3
+            } else if lower.contains("aerodrome") || lower.contains("slipstream") {
+                DexType::Aerodrome
+            } else {
+                // Bilinmeyen DEX — UniswapV3 ABI varsayılır (log uyarısı)
+                eprintln!(
+                    "  ⚠️  Bilinmeyen DEX ID '{}' — UniswapV3 ABI varsayılıyor",
+                    dex_id
+                );
+                DexType::UniswapV3
+            }
+        }
     }
 }
 
@@ -169,6 +188,9 @@ fn infer_dex_type(dex_id: &str) -> DexType {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> {
+    // v22.0: Tek veri kaynağı uyarısı — DexScreener API'si çökerse keşif durur.
+    // Gelecek sürümde on-chain factory event taraması (ek kaynak) eklenecektir.
+    // Mevcut sistem DexScreener başarısız olursa matched_pools.json cache'ini kullanır.
     let url = format!(
         "https://api.dexscreener.com/latest/dex/tokens/{}",
         BASE_WETH_LOWER
@@ -211,11 +233,14 @@ async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> 
                 || dex.contains("aerodrome")
         })
         .filter(|p| {
+            // v22.0: Minimum likidite eşiği $25K → $50K
+            // Düşük likiditeli havuzlarda slippage yüksek, kâr marjı dar.
+            // $50K altındaki havuzlar arbitraj için yeterli derinlik sunmaz.
             p.liquidity
                 .as_ref()
                 .and_then(|l| l.usd)
                 .unwrap_or(0.0)
-                >= 25_000.0
+                >= 50_000.0
         })
         // v19.0: Minimum 24h hacim filtresi — düşük hacimli havuzlar
         // yeterli volatilite sunmaz, arbitraj fırsatı nadir olur.
@@ -226,10 +251,12 @@ async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> 
                 .unwrap_or(0.0)
                 >= 10_000.0
         })
-        // v19.0: Keşif komisyon filtresi: 0.30 → 1.00 genişletildi.
-        // 100 bps'e kadar olan havuzlar keşfedilir, strateji katmanında
-        // dinamik net kârlılık hesabı ile süzülür.
-        .filter(|p| p.fee_tier.map_or(true, |fee| fee <= 1.00))
+        // v21.0: Keşif komisyon filtresi: 1.00 → 0.30 daraltıldı.
+        // Shadow mode analizleri, %0.30+ komisyonlu havuzların spread'lerin
+        // fee'leri tolere edemediğini gösterdi. Düşük komisyonlu havuzlara
+        // (%0.01, %0.05) odaklanmak kârlılığı artırır.
+        // Yüksek fee havuzlar yalnızca aşırı volatilite döneminde faydalı olur.
+        .filter(|p| p.fee_tier.map_or(true, |fee| fee <= 0.30))
         .map(|p| DiscoveredPool {
             address: p.pair_address,
             dex: p.dex_id,
@@ -243,11 +270,19 @@ async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> 
         })
         .collect();
 
-    // Hacme göre azalan sırala
+    // v21.0: Düşük fee'li havuzlara → yüksek öncelik.
+    // Fee'ye göre artan sırala, eşit fee'de en yüksek hacmi tercih et.
+    // %0.01 ve %0.05 havuzlar listenin başına gelir.
     discovered.sort_by(|a, b| {
-        b.volume_24h
-            .partial_cmp(&a.volume_24h)
+        let fee_a = a.fee_tier.unwrap_or(f64::MAX);
+        let fee_b = b.fee_tier.unwrap_or(f64::MAX);
+        fee_a.partial_cmp(&fee_b)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.volume_24h
+                    .partial_cmp(&a.volume_24h)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     });
 
     discovered.truncate(max_results);

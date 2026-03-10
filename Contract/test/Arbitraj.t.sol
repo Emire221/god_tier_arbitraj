@@ -163,6 +163,7 @@ contract ArbitrajBotuTest is Test {
     ArbitrajBotu public bot;
     address public deployer;
     address public attacker;
+    address public adminAddr;
 
     // ── Events (expectEmit için) ───────────────────────────────
     event ArbitrageExecuted(
@@ -183,6 +184,7 @@ contract ArbitrajBotuTest is Test {
     function setUp() public {
         deployer = address(this);
         attacker = makeAddr("attacker");
+        adminAddr = makeAddr("admin");
 
         // Mock token'ları deploy et
         tokenA = new MockERC20("TokenA", 6);   // USDC benzeri
@@ -192,12 +194,16 @@ contract ArbitrajBotuTest is Test {
         uniPool  = new MockUniswapV3Pool(address(tokenA), address(tokenB));
         slipPool = new MockSlipstreamPool(address(tokenA), address(tokenB));
 
-        // Bot deploy et — executor=deployer, admin=deployer (test kolaylığı)
-        bot = new ArbitrajBotu(deployer, deployer);
+        // Bot deploy et — executor=deployer (test kontratı), admin=ayrı adres
+        // v22.1: executor != admin zorunluluğu eklendi
+        bot = new ArbitrajBotu(deployer, adminAddr);
 
         // v22.0: Pool whitelist — test havuzlarını whiteliste ekle
+        // admin olarak çağrılmalı
+        vm.startPrank(adminAddr);
         bot.setPoolWhitelist(address(uniPool), true);
         bot.setPoolWhitelist(address(slipPool), true);
+        vm.stopPrank();
     }
 
     /// @dev Test kontratının ETH alabilmesi için
@@ -516,7 +522,7 @@ contract ArbitrajBotuTest is Test {
 
     function test_immutable_ExecutorAndAdminSetInConstructor() public view {
         assertEq(bot.executor(), deployer, "Executor should be deployer");
-        assertEq(bot.admin(), deployer, "Admin should be deployer");
+        assertEq(bot.admin(), adminAddr, "Admin should be adminAddr");
     }
 
     function test_accessControl_FallbackRevertsIfNotExecutor() public {
@@ -670,11 +676,12 @@ contract ArbitrajBotuTest is Test {
         tokenA.mint(address(bot), 500e6);
 
         vm.expectEmit(true, true, true, true);
-        emit EmergencyTokenWithdraw(address(tokenA), 500e6, deployer);
+        emit EmergencyTokenWithdraw(address(tokenA), 500e6, adminAddr);
+        vm.prank(adminAddr);
         bot.withdrawToken(address(tokenA));
 
         assertEq(tokenA.balanceOf(address(bot)), 0);
-        assertEq(tokenA.balanceOf(deployer), 500e6);
+        assertEq(tokenA.balanceOf(adminAddr), 500e6);
     }
 
     function test_withdrawToken_RevertsIfNotAdmin() public {
@@ -684,20 +691,22 @@ contract ArbitrajBotuTest is Test {
     }
 
     function test_withdrawToken_RevertsIfZeroBalance() public {
+        vm.prank(adminAddr);
         vm.expectRevert(ZeroAmount.selector);
         bot.withdrawToken(address(tokenA));
     }
 
     function test_withdrawETH() public {
         vm.deal(address(bot), 1 ether);
-        uint256 adminBefore = deployer.balance;
+        uint256 adminBefore = adminAddr.balance;
 
         vm.expectEmit(true, true, true, true);
-        emit EmergencyETHWithdraw(1 ether, deployer);
+        emit EmergencyETHWithdraw(1 ether, adminAddr);
+        vm.prank(adminAddr);
         bot.withdrawETH();
 
         assertEq(address(bot).balance, 0);
-        assertEq(deployer.balance, adminBefore + 1 ether);
+        assertEq(adminAddr.balance, adminBefore + 1 ether);
     }
 
     function test_withdrawETH_RevertsIfNotAdmin() public {
@@ -709,6 +718,7 @@ contract ArbitrajBotuTest is Test {
 
     function test_withdrawETH_RevertsIfZeroBalance() public {
         vm.deal(address(bot), 0);
+        vm.prank(adminAddr);
         vm.expectRevert(ZeroAmount.selector);
         bot.withdrawETH();
     }
@@ -728,7 +738,7 @@ contract ArbitrajBotuTest is Test {
 
     function test_constructor_SetsImmutableExecutorAndAdmin() public view {
         assertEq(bot.executor(), deployer, "Executor = deployer");
-        assertEq(bot.admin(), deployer, "Admin = deployer");
+        assertEq(bot.admin(), adminAddr, "Admin = adminAddr");
     }
 
     function test_constructor_DifferentAddresses() public {
@@ -812,10 +822,11 @@ contract ArbitrajBotuTest is Test {
         assertEq(tokenA.balanceOf(address(bot)), 50e6, "Profit in contract");
 
         // 2. Admin kârı çeker
-        uint256 deployerBefore = tokenA.balanceOf(deployer);
+        uint256 adminBefore = tokenA.balanceOf(adminAddr);
+        vm.prank(adminAddr);
         bot.withdrawToken(address(tokenA));
         assertEq(tokenA.balanceOf(address(bot)), 0, "Contract emptied after withdraw");
-        assertEq(tokenA.balanceOf(deployer), deployerBefore + 50e6, "Admin received profit");
+        assertEq(tokenA.balanceOf(adminAddr), adminBefore + 50e6, "Admin received profit");
     }
 
     // ══════════════════════════════════════════════════════════
@@ -824,7 +835,7 @@ contract ArbitrajBotuTest is Test {
 
     function test_removed_NoPausedFunction() public view {
         assertEq(bot.executor(), deployer);
-        assertEq(bot.admin(), deployer);
+        assertEq(bot.admin(), adminAddr);
     }
 
     // ══════════════════════════════════════════════════════════
@@ -1447,6 +1458,7 @@ contract ArbitrajBotuTest is Test {
 
     /// @dev Admin pool'u whitelist'ten çıkardıktan sonra işlem → revert
     function test_poolWhitelist_RemovedPoolReverts() public {
+        vm.prank(adminAddr);
         bot.setPoolWhitelist(address(uniPool), false);
 
         uniPool.setMockDeltas(int256(1000e6), -int256(1e18));
@@ -1465,6 +1477,7 @@ contract ArbitrajBotuTest is Test {
         assertFalse(ok, "Whitelistten cikarilan pool -> revert bekleniyor");
 
         // Tekrar ekle ve başarılı olduğunu doğrula
+        vm.prank(adminAddr);
         bot.setPoolWhitelist(address(uniPool), true);
     }
 
@@ -1484,6 +1497,7 @@ contract ArbitrajBotuTest is Test {
         pools[0] = address(newPool1);
         pools[1] = address(newPool2);
 
+        vm.prank(adminAddr);
         bot.batchSetPoolWhitelist(pools, true);
 
         assertTrue(bot.poolWhitelist(address(newPool1)), "Pool1 whitelistte olmali");

@@ -211,6 +211,11 @@ fn pack_pcs_v3_slot1_unlocked() -> RevmU256 {
 pub struct SimulationEngine {
     /// Havuz bytecode önbellekleri (adres → bytecode)
     bytecode_cache: Vec<(Address, Vec<u8>)>,
+    /// v22.1: Arbitraj kontrat bytecode'u (zincirden alınmış)
+    /// build_db'de kontrat hesabına yüklenir — simülasyon gerçekçi olur
+    contract_bytecode: Option<Vec<u8>>,
+    /// v22.1: Zincir ID'si (config'den alınır, hardcoded değil)
+    chain_id: u64,
     /// v10.0: Kalıcı temel veritabanı (bytecode + hesaplar yüklü)
     /// Her simulate() çağrısında klonlanır, sadece slot'lar güncellenir
     base_db: Option<InMemoryDB>,
@@ -224,10 +229,22 @@ impl SimulationEngine {
     pub fn new() -> Self {
         Self {
             bytecode_cache: Vec::new(),
+            contract_bytecode: None,
+            chain_id: 8453, // Varsayılan: Base
             base_db: None,
             base_caller: None,
             base_contract: None,
         }
+    }
+
+    /// v22.1: Zincir ID'sini ayarla (config'den)
+    pub fn set_chain_id(&mut self, chain_id: u64) {
+        self.chain_id = chain_id;
+    }
+
+    /// v22.1: Kontrat bytecode'unu ayarla (zincirden alınmış)
+    pub fn set_contract_bytecode(&mut self, bytecode: Vec<u8>) {
+        self.contract_bytecode = Some(bytecode);
     }
 
     /// Havuz bytecode'larını önbelleğe al
@@ -325,12 +342,22 @@ impl SimulationEngine {
             AccountInfo::from_balance(RevmU256::from(100_000_000_000_000_000_000u128)), // 100 ETH
         );
 
-        // ── Kontrat Hesabı (Eğer bytecode varsa) ─────────────────
-        // NOT: Gerçek kontrat bytecode'u zincirden alınmalıdır.
-        // Şimdilik boş hesap oluşturulur — kontrat yoksa simülasyon
-        // sadece gas tahmini olarak kullanılır.
-        let contract_info = AccountInfo::from_balance(RevmU256::ZERO);
-        db.insert_account_info(to_revm_addr(contract), contract_info);
+        // ── Kontrat Hesabı ──────────────────────────────────────────
+        // v22.1: Kontrat bytecode'u varsa yükle — simülasyon gerçekçi olur.
+        // Bytecode yoksa boş hesap (sadece gas tahmini olarak kullanılır).
+        if let Some(ref code) = self.contract_bytecode {
+            let bytecode = Bytecode::new_raw(RevmBytes::from(code.clone()));
+            let info = AccountInfo::new(
+                RevmU256::ZERO,
+                0,
+                bytecode.hash_slow(),
+                bytecode,
+            );
+            db.insert_account_info(to_revm_addr(contract), info);
+        } else {
+            let contract_info = AccountInfo::from_balance(RevmU256::ZERO);
+            db.insert_account_info(to_revm_addr(contract), contract_info);
+        }
 
         db
     }
@@ -374,7 +401,7 @@ impl SimulationEngine {
             .with_db(db)
             .with_spec_id(SpecId::CANCUN)
             .modify_cfg_env(|cfg| {
-                cfg.chain_id = 8453; // Base
+                cfg.chain_id = self.chain_id; // v22.1: config'den, hardcoded değil
             })
             .modify_block_env(|block| {
                 block.number = RevmU256::from(current_block);

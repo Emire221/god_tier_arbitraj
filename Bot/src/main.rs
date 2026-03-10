@@ -612,9 +612,9 @@ async fn main() -> Result<()> {
         let delay_ms = if retry_count <= 3 {
             100u64 // İlk 3 deneme: 100ms (agresif)
         } else {
-            // Exponential backoff: 200ms → 400ms → 800ms → ... → max 10s
-            let exp_delay = 100u64 * (1u64 << (retry_count - 3).min(6));
-            exp_delay.min(10_000) // Üst sınır: 10 saniye
+            // Exponential backoff: 200ms → 400ms → 800ms → ... → max 30s
+            let exp_delay = 100u64 * (1u64 << (retry_count - 3).min(8));
+            exp_delay.min(30_000) // v22.1: Üst sınır: 30 saniye (eski: 10s)
         };
         println!(
             "  {} {}ms sonra yeniden bağlanılıyor... (deneme #{})",
@@ -787,7 +787,24 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
 
     // ══════════════ REVM SİMÜLASYON MOTORU ══════════════
     let mut sim_engine = SimulationEngine::new();
+    sim_engine.set_chain_id(config.chain_id);
     sim_engine.cache_bytecodes(pools, &states);
+
+    // v22.1: Kontrat bytecode'unu zincirden al — simülasyonda gerçek kontrat çalışsın
+    if let Some(contract_addr) = config.contract_address {
+        match provider.get_code_at(contract_addr).await {
+            Ok(code) if !code.is_empty() => {
+                println!("  {} Kontrat bytecode yüklendi ({} byte)", "✅".green(), code.len());
+                sim_engine.set_contract_bytecode(code.to_vec());
+            }
+            Ok(_) => {
+                eprintln!("  {} Kontrat bytecode boş — deploy edilmemiş olabilir", "⚠️".yellow());
+            }
+            Err(e) => {
+                eprintln!("  {} Kontrat bytecode alınamadı: {} — simülasyon boş hesap kullanacak", "⚠️".yellow(), e);
+            }
+        }
+    }
 
     // v10.0: Singleton base_db — bytecode bir kez yüklenir, sonra her blokta klonlanır
     {

@@ -188,10 +188,10 @@ impl MevExecutor {
             ).await {
                 Ok(hash) => Ok(hash),
                 Err(e) => {
-                    // v20.0: Bundle başarısız → İşlem İPTAL (PGA fallback YOK)
-                    nonce_manager.rollback();
+                    // v22.1: rollback kaldırıldı — race condition riski.
+                    // Periyodik nonce sync (50 blokta bir) yeterli.
                     eprintln!(
-                        "     ❌ [v20.0] Private RPC bundle başarısız — işlem İPTAL EDİLDİ (nonce geri alındı): {}",
+                        "     ❌ [v20.0] Private RPC bundle başarısız — işlem İPTAL EDİLDİ: {}",
                         e
                     );
                     eprintln!(
@@ -201,10 +201,9 @@ impl MevExecutor {
                 }
             }
         } else {
-            // v20.0: Private RPC yok → İşlem GÖNDERİLMEZ
-            nonce_manager.rollback();
+            // v22.1: rollback kaldırıldı — race condition riski.
             eprintln!(
-                "     ❌ [v20.0] PRIVATE_RPC_URL tanımlı değil — işlem İPTAL EDİLDİ (nonce geri alındı)"
+                "     ❌ [v20.0] PRIVATE_RPC_URL tanımlı değil — işlem İPTAL EDİLDİ"
             );
             eprintln!(
                 "     ⛔ [v20.0] Public mempool gönderimi devre dışı — L1 Data Fee kanaması önlendi"
@@ -216,27 +215,17 @@ impl MevExecutor {
     // v20.0: send_pga_fallback() KALDIRILDI — public mempool gönderimi
     // L2 ağlarında L1 Data Fee kanama riski oluşturuyordu.
     // Tüm işlemler yalnızca Private RPC (eth_sendBundle) üzerinden gönderilir.
-    // Bundle başarısız olursa → işlem iptal edilir, nonce geri alınır.
+    // Bundle başarısız olursa → işlem iptal edilir.
+    // v22.1: nonce rollback kaldırıldı — race condition riski.
+    // Periyodik nonce sync (50 blokta bir) nonce tutarlılığını sağlar.
 
     /// eth_sendBundle ile Flashbots/Private builder'a gönder.
     ///
-    /// v22.0 KRİTİK DÜZELTME:
-    ///   - TX artık public mempool'a GÖNDERİLMEZ (send_transaction kaldırıldı)
-    ///   - TX imzalanır → raw hex alınır → eth_sendBundle ile private RPC'ye HTTP POST
-    ///   - Bundle txs alanı imzalı raw TX hex içerir (hash DEĞİL)
-    ///   - reqwest ile doğrudan private RPC'ye gönderilir
-    ///
-    /// Bundle yapısı:
-    /// ```json
-    /// {
-    ///   "jsonrpc": "2.0",
-    ///   "method": "eth_sendBundle",
-    ///   "params": [{
-    ///     "txs": ["0x02f8...signed_raw_tx_hex"],
-    ///     "blockNumber": "0x..."
-    ///   }]
-    /// }
-    /// ```
+    /// v22.1 KRİTİK DÜZELTME:
+    ///   - TX artık public mempool'a GÖNDERİLMEZ
+    ///   - TX, on_http(private_rpc_url) ile YALNIZCA private endpoint'e gider
+    ///   - Ek olarak eth_sendBundle ile aynı private RPC'ye bundle POST edilir
+    ///   - Standard RPC'ye HİÇBİR TX gönderilmez
     async fn send_bundle(
         &self,
         private_rpc_url: &str,
@@ -248,39 +237,28 @@ impl MevExecutor {
         let target_block = current_block + 1;
         let target_block_hex = format!("0x{:x}", target_block);
 
-        // v22.0: TX'i imzala → raw hex al → private RPC'ye bundle olarak gönder
-        // send_transaction kullanılmaz (public mempool'a gönderir!)
-        let ws = WsConnect::new(&self.standard_rpc_url);
+        // v22.1 KRİTİK DÜZELTME: TX YALNIZCA private RPC üzerinden gönderilir
+        // Eski: WsConnect(standard_rpc_url) → public mempool sızıntısı!
+        // Yeni: on_http(private_rpc_url) → TX sadece private endpoint'e gider
+        //
+        // Private RPC (Flashbots Protect, MEV Blocker, vb.) eth_sendRawTransaction
+        // isteklerini public mempool'a iletmez, doğrudan block builder'a yönlendirir.
+        let private_url: reqwest::Url = private_rpc_url.parse()
+            .map_err(|e| eyre::eyre!("Private RPC URL parse hatası: {}", e))?;
         let provider = ProviderBuilder::new()
             .with_recommended_fillers()
             .wallet(wallet.clone())
-            .on_ws(ws)
-            .await
-            .map_err(|e| eyre::eyre!("Bundle provider bağlantı hatası: {}", e))?;
+            .on_http(private_url);
 
-        // TX'i send_transaction ile gönder — bu TX'i imzalar ve yayınlar
-        // Ardından raw TX'i private RPC'ye de bundle olarak iletiriz
-        // NOT: Alloy 0.1'de raw signing API'si kısıtlı — send_transaction ile
-        // imzalı TX yayınlanır, ama private RPC'ye de bundle gönderilir.
-        // Aşağıda pending TX hash üzerinden receipt polling yapılır.
+        // TX'i private RPC üzerinden gönder (imzala + eth_sendRawTransaction)
+        // TX yalnızca private endpoint'e ulaşır, public mempool'a DÜŞMEZ
         let pending = provider.send_transaction(tx.clone())
             .await
-            .map_err(|e| eyre::eyre!("TX imzalama/gönderme hatası: {}", e))?;
+            .map_err(|e| eyre::eyre!("Private RPC TX gönderim hatası: {}", e))?;
 
         let tx_hash = format!("{:?}", pending.tx_hash());
         let tx_hash_alloy = *pending.tx_hash();
         drop(pending);
-
-        // v22.0: Raw signed TX'i private RPC'ye de eth_sendBundle olarak gönder
-        // Bu sayede TX hem standard RPC'ye (filler aracılığıyla) hem private
-        // RPC'ye (bundle olarak) ulaşır — private RPC'de block builder
-        // TX'i öncelikli olarak dahil eder.
-        //
-        // Alloy 0.1 TransactionRequest raw signing API kısıtlı olduğundan,
-        // TX hash'i ile bundle gönderiyoruz. Birçok private RPC hizmeti
-        // (Flashbots Protect, MEV Blocker) TX hash yerine raw TX'i tercih eder
-        // ama hash ile de çalışan (ör: Bloxroute, Eden) hizmetler mevcuttur.
-        // Gelecek Alloy sürümlerinde raw signing ile iyileştirilecektir.
 
         let bundle = BundleRequest {
             txs: vec![tx_hash.clone()],

@@ -491,6 +491,8 @@ impl NonceManager {
     }
 
     /// TX başarısız olursa nonce'u geri al (decriment)
+    /// v22.1: race condition riski nedeniyle kullanılmıyor — periyodik sync yeterli
+    #[allow(dead_code)]
     pub fn rollback(&self) {
         self.current_nonce.fetch_sub(1, Ordering::SeqCst);
     }

@@ -190,6 +190,8 @@ contract ArbitrajBotu {
     /// @param _admin    Fon yönetimi adresi (soğuk cüzdan/multisig)
     constructor(address _executor, address _admin) {
         if (_executor == address(0) || _admin == address(0)) revert ZeroAddress();
+        // v22.1: executor ve admin aynı adres olamaz — rol ayrımı ihlali
+        if (_executor == _admin) revert ZeroAddress();
         executor = _executor;
         admin = _admin;
     }
@@ -569,7 +571,8 @@ contract ArbitrajBotu {
             mstore(0x00, 0x70a0823100000000000000000000000000000000000000000000000000000000)
             mstore(0x04, address())
             let ok := staticcall(gas(), token, 0x00, 0x24, 0x00, 0x20)
-            if iszero(ok) { revert(0, 0) }
+            // v22.1: returndatasize kontrolü eklendi — eksik/bozuk dönüş verisi koruması
+            if or(iszero(ok), lt(returndatasize(), 0x20)) { revert(0, 0) }
             bal := mload(0x00)
         }
     }

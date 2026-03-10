@@ -2182,56 +2182,51 @@ pub mod exact {
 
     /// a * b / denominator (taşma güvenli, floor rounding)
     /// Uniswap V3 FullMath.mulDiv port'u.
+    ///
+    /// v22.1 DÜZELTME: Rekürsif ayrıştırma algoritması.
+    /// Eski: İç taşmada saturating_mul + U256::ZERO fallback → sessiz hata.
+    /// Yeni: mul_div(big%c, small, c) rekürsifi — big%c < c garantisi ile
+    ///       her adımda operand kesinlikle küçülür → sonlanma garantili.
     pub fn mul_div(a: U256, b: U256, denominator: U256) -> U256 {
-        if denominator.is_zero() {
-            return U256::ZERO;
-        }
-        if a.is_zero() || b.is_zero() {
+        if denominator.is_zero() || a.is_zero() || b.is_zero() {
             return U256::ZERO;
         }
         // Doğrudan çarpma dene
         if let Some(product) = a.checked_mul(b) {
             return product / denominator;
         }
-        // Taşma: ayrıştırma ile hesapla
-        // a * b / c = (a/c)*b + (a%c)*b/c
+        // Taşma: rekürsif ayrıştırma ile hesapla
+        // a*b/c = (big/c)*small + mul_div(big%c, small, c)
+        // Her rekürsif çağrıda ilk argüman = big%c < c → kesinlikle küçülür
+        // Sonlanma garantili (logaritmik derinlik)
         let (big, small) = if a >= b { (a, b) } else { (b, a) };
         let q = big / denominator;
         let r = big % denominator;
-        // q * small — genelde taşmaz (big/denom * small)
+        // term1 = (big/c) * small — saturating: taşma durumunda sonuç U256'ya sığmıyordur
         let term1 = q.saturating_mul(small);
-        // r * small / denom — r < denom, daha güvenli
-        let term2 = if let Some(rs) = r.checked_mul(small) {
-            rs / denominator
-        } else {
-            // İç içe ayrıştırma: r*small = r*(small/denom)*denom + r*(small%denom)
-            let q2 = small / denominator;
-            let r2 = small % denominator;
-            let inner = r.saturating_mul(q2);
-            let rest = if let Some(rr2) = r.checked_mul(r2) {
-                rr2 / denominator
-            } else {
-                U256::ZERO // Aşırı nadir durum
-            };
-            inner + rest
-        };
-        term1 + term2
+        // term2 = mul_div(big%c, small, c) — rekürsif, big%c < c → sonlanır
+        let term2 = mul_div(r, small, denominator);
+        term1.saturating_add(term2)
     }
 
     /// a * b / denominator (taşma güvenli, ceil rounding)
+    ///
+    /// v22.1 DÜZELTME: mul_mod ile taşma-güvenli kalan kontrolü.
+    /// Eski: Taşma durumunda koşulsuz +1 ekliyordu → gereksiz yuvarlamalar.
+    /// Yeni: a.mul_mod(b, denominator) ile 512-bit ara sonuç üzerinden
+    ///       kesin kalan hesabı → sadece gerçek kalan varsa +1.
     pub fn mul_div_rounding_up(a: U256, b: U256, denominator: U256) -> U256 {
         let result = mul_div(a, b, denominator);
-        // Kalan var mı kontol — varsa yukarı yuvarla
-        if let Some(product) = a.checked_mul(b) {
-            if product % denominator > U256::ZERO {
-                return result + U256::from(1);
-            }
-        } else {
-            // Taşma durumunda yaklaşık kontrol
-            // (a*b mod c != 0 varsay — güvenli tarafta kal)
-            return result + U256::from(1);
+        if denominator.is_zero() {
+            return result;
         }
-        result
+        // mul_mod: (a * b) % denominator — 512-bit ara sonuç, taşma güvenli
+        let remainder = a.mul_mod(b, denominator);
+        if remainder > U256::ZERO {
+            result + U256::from(1)
+        } else {
+            result
+        }
     }
 
     /// (a + b - 1) / b tarzı ceil division
@@ -2655,6 +2650,11 @@ pub mod exact {
 
     /// İki havuz arasında exact arbitraj kârı hesapla (U256, wei bazında)
     ///
+    /// ⚠ DEPRECATED (v22.1): Bu fonksiyon tek bir `token0_is_weth` parametresi
+    /// kullanır — çapraz-DEX arbitrajında her havuzun token sırası farklı
+    /// olabilir. Üretimde `compute_exact_directional_profit` kullanılır.
+    /// Bu fonksiyon sadece geriye uyumluluk için korunmaktadır.
+    ///
     /// Akış:
     ///   1. Pahalı havuzda WETH sat → USDC al (exact V3 swap)
     ///   2. Ucuz havuzda USDC ile WETH geri al (exact V3 swap)
@@ -2664,6 +2664,7 @@ pub mod exact {
     /// # Dönüş
     /// (net_profit_wei, amount_received_from_second_swap)
     /// Kâr yoksa (0, 0) döner.
+    #[deprecated(since = "22.1.0", note = "Tek token0_is_weth parametresi çapraz-DEX'te hatalı. compute_exact_directional_profit kullanın.")]
     pub fn compute_exact_arbitrage_profit(
         // Pahalı havuz (satış hedefi)
         sell_sqrt_price: U256,

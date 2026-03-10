@@ -1,0 +1,4 @@
+# Root .gitignore — tüm alt dizinleri kapsar
+.env
+*.env
+*.keystore

@@ -670,11 +670,23 @@ fn write_shadow_log(
         "mode": "shadow",
     });
 
+    // v22.1: Dosya boyutu kontrolü — 50MB'ı aşarsa rotate et
+    let log_path = std::path::Path::new("shadow_analytics.jsonl");
+    const MAX_LOG_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
+    if let Ok(metadata) = std::fs::metadata(log_path) {
+        if metadata.len() >= MAX_LOG_SIZE {
+            let rotated = format!("shadow_analytics.{}.jsonl",
+                chrono::Local::now().format("%Y%m%d_%H%M%S"));
+            let _ = std::fs::rename(log_path, &rotated);
+            eprintln!("  📁 Shadow log rotate edildi → {}", rotated);
+        }
+    }
+
     // Dosyaya append (satır satır)
     match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("shadow_analytics.jsonl")
+        .open(log_path)
     {
         Ok(mut file) => {
             if let Err(e) = writeln!(file, "{}", log_entry) {

@@ -1,4 +1,4 @@
-// ============================================================================
+﻿// ============================================================================
 //  STRATEGY v18.0 — Arbitraj Strateji Motoru + L1 Data Fee + Fire-and-Forget
 //
 //  v18.0 Yenilikler:
@@ -144,11 +144,12 @@ pub fn check_arbitrage_opportunity(
             estimated_gas_cost_weth: prefilter_gas_cost_weth,
             min_profit_weth: config.min_net_profit_weth,
             flash_loan_fee_rate: config.flash_loan_fee_bps / 10_000.0,
-            // v22.0: PreFilter konservatif bribe kullanır (en kötü senaryo).
-            // Gerçek bribe oranı 25-70% aralığında değişir. PreFilter'da
-            // düşük bribe kullanmak → kârsız fırsatları NR'ye geçirir,
-            // gereksiz hesaplama maliyeti yaratır. Worst-case %50 kullanılır.
-            bribe_pct: config.bribe_pct.max(0.50),
+            // v26.0: PreFilter bribe — config değeri + %10 konservatif marj.
+            // Eski v22.0: .max(0.50) → config %25 iken %50 zorluyor, geçerli
+            // tight-spread fırsatlarını haksız yere reddediyordu.
+            // Yeni: config.bribe_pct * 1.10 → %25 config → %27.5 PreFilter.
+            // Gas maliyetinde zaten %20 güvenlik marjı var (üstte).
+            bribe_pct: config.bribe_pct * 1.10,
         };
 
         // Kaba tarama miktarı: max trade size'ın %50'si (konservatif tahmin)
@@ -1112,7 +1113,7 @@ mod gas_spike_tests {
         let sqrt_price = price_ratio.sqrt();
         let sqrt_price_f64 = sqrt_price * (1u128 << 96) as f64;
         // Tick'i sqrtPriceX96'dan doğru hesapla (dampening tutarlılığı için)
-        let tick = math::sqrt_price_x96_to_tick(sqrt_price_f64);
+        let tick = (price_ratio.ln() / 0.000_099_995_000_33_f64).floor() as i32;
         // v7.0: U256 sqrtPriceX96 artık exact tick-bazlı hesaplanır
         let sqrt_price_x96_u256 = math::exact::get_sqrt_ratio_at_tick(tick);
         Arc::new(RwLock::new(PoolState {

@@ -1,97 +1,97 @@
-// ============================================================================
-//  MATH v7.0 — U256 Exact-Math Stabilizasyon + Multi-Tick CL Swap Motoru
+﻿// ============================================================================
+//  MATH v7.0 Ã¢â‚¬â€ U256 Exact-Math Stabilizasyon + Multi-Tick CL Swap Motoru
 //
-//  v7.0 Yenilikler (Faz 1 — Stabilizasyon):
-//  ✓ compute_arbitrage_profit_with_bitmap → U256 exact::compute_exact_swap
-//  ✓ find_optimal_amount_with_bitmap → U256 liq cap (max_safe_swap_amount_u256)
-//  ✓ swap_weth_to_usdc_exact / swap_usdc_to_weth_exact — U256 public API
-//  ✓ max_safe_swap_amount → U256 delegasyonu
-//  ✓ Uniswap V3 FullMath/SqrtPriceMath/SwapMath birebir Rust U256 port'u
-//  ✓ Newton-Raphson optimizer artık U256 swap ile profit değerlendirmesi yapar
-//  ✓ On-chain sonuçla wei bazında eşleşen deterministik kesinlik
+//  v7.0 Yenilikler (Faz 1 Ã¢â‚¬â€ Stabilizasyon):
+//  Ã¢Å“â€œ compute_arbitrage_profit_with_bitmap Ã¢â€ â€™ U256 exact::compute_exact_swap
+//  Ã¢Å“â€œ find_optimal_amount_with_bitmap Ã¢â€ â€™ U256 liq cap (max_safe_swap_amount_u256)
+//  Ã¢Å“â€œ swap_weth_to_usdc_exact / swap_usdc_to_weth_exact Ã¢â‚¬â€ U256 public API
+//  Ã¢Å“â€œ max_safe_swap_amount Ã¢â€ â€™ U256 delegasyonu
+//  Ã¢Å“â€œ Uniswap V3 FullMath/SqrtPriceMath/SwapMath birebir Rust U256 port'u
+//  Ã¢Å“â€œ Newton-Raphson optimizer artÃ„Â±k U256 swap ile profit deÃ„Å¸erlendirmesi yapar
+//  Ã¢Å“â€œ On-chain sonuÃƒÂ§la wei bazÃ„Â±nda eÃ…Å¸leÃ…Å¸en deterministik kesinlik
 //
 //  v6.0 (korunuyor):
-//  ✓ GERÇEK multi-tick swap: TickBitmap verisinden sıralı tick geçişi (legacy f64)
-//  ✓ "50 ETH satarsam hangi 3 tick'i patlatırım?" → mikrosaniye cevap
-//  ✓ Her tick sınırında liquidityNet ile aktif likidite güncelleme
-//  ✓ Fallback: TickBitmap yoksa eski dampening moduna geç
+//  Ã¢Å“â€œ GERÃƒâ€¡EK multi-tick swap: TickBitmap verisinden sÃ„Â±ralÃ„Â± tick geÃƒÂ§iÃ…Å¸i (legacy f64)
+//  Ã¢Å“â€œ "50 ETH satarsam hangi 3 tick'i patlatÃ„Â±rÃ„Â±m?" Ã¢â€ â€™ mikrosaniye cevap
+//  Ã¢Å“â€œ Her tick sÃ„Â±nÃ„Â±rÃ„Â±nda liquidityNet ile aktif likidite gÃƒÂ¼ncelleme
+//  Ã¢Å“â€œ Fallback: TickBitmap yoksa eski dampening moduna geÃƒÂ§
 //
 //  v5.1 (korunuyor):
-//  ✓ Tick ↔ Fiyat çift yönlü dönüşüm ve çapraz doğrulama
-//  ✓ Token sırası farkındalığı (token0_is_weth — Base: WETH < USDC)
-//  ✓ Newton-Raphson'a likidite-tabanlı üst sınır ve tick-impact freni
+//  Ã¢Å“â€œ Tick Ã¢â€ â€ Fiyat ÃƒÂ§ift yÃƒÂ¶nlÃƒÂ¼ dÃƒÂ¶nÃƒÂ¼Ã…Å¸ÃƒÂ¼m ve ÃƒÂ§apraz doÃ„Å¸rulama
+//  Ã¢Å“â€œ Token sÃ„Â±rasÃ„Â± farkÃ„Â±ndalÃ„Â±Ã„Å¸Ã„Â± (token0_is_weth Ã¢â‚¬â€ Base: WETH < USDC)
+//  Ã¢Å“â€œ Newton-Raphson'a likidite-tabanlÃ„Â± ÃƒÂ¼st sÃ„Â±nÃ„Â±r ve tick-impact freni
 // ============================================================================
 
 use crate::types::{PoolState, TickBitmapData};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// O(1) PreFilter — NR'den Önce Hızlı Kârlılık Eleme
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// O(1) PreFilter Ã¢â‚¬â€ NR'den Ãƒâ€“nce HÃ„Â±zlÃ„Â± KÃƒÂ¢rlÃ„Â±lÃ„Â±k Eleme
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-/// O(1) kârlılık ön filtresi.
+/// O(1) kÃƒÂ¢rlÃ„Â±lÃ„Â±k ÃƒÂ¶n filtresi.
 ///
 /// Newton-Raphson (NR) optimizasyonunun ~40 iterasyonluk kaba tarama +
-/// ~50 iterasyonluk ince ayar maliyetini önlemek için, spread'in
-/// fee'leri kurtarıp kurtaramayacağını tek bir çarpma/çıkarma ile kontrol eder.
+/// ~50 iterasyonluk ince ayar maliyetini ÃƒÂ¶nlemek iÃƒÂ§in, spread'in
+/// fee'leri kurtarÃ„Â±p kurtaramayacaÃ„Å¸Ã„Â±nÃ„Â± tek bir ÃƒÂ§arpma/ÃƒÂ§Ã„Â±karma ile kontrol eder.
 ///
-/// Formül:
-///   expected_profit = (spread_ratio × amount) - (fee_a + fee_b + gas_cost)
+/// FormÃƒÂ¼l:
+///   expected_profit = (spread_ratio Ãƒâ€” amount) - (fee_a + fee_b + gas_cost)
 ///
-/// `expected_profit > min_profit_wei` değilse NR'ye hiç girmeden `None` döner.
+/// `expected_profit > min_profit_wei` deÃ„Å¸ilse NR'ye hiÃƒÂ§ girmeden `None` dÃƒÂ¶ner.
 pub struct PreFilter {
-    /// Havuz A fee oranı (ör: 0.0005 = %0.05)
+    /// Havuz A fee oranÃ„Â± (ÃƒÂ¶r: 0.0005 = %0.05)
     pub fee_a: f64,
-    /// Havuz B fee oranı (ör: 0.0001 = %0.01)
+    /// Havuz B fee oranÃ„Â± (ÃƒÂ¶r: 0.0001 = %0.01)
     pub fee_b: f64,
-    /// Tahmini gas maliyeti (WETH cinsinden) — L2 + L1 + güvenlik marjı
+    /// Tahmini gas maliyeti (WETH cinsinden) Ã¢â‚¬â€ L2 + L1 + gÃƒÂ¼venlik marjÃ„Â±
     pub estimated_gas_cost_weth: f64,
-    /// Minimum kâr eşiği (WETH cinsinden)
+    /// Minimum kÃƒÂ¢r eÃ…Å¸iÃ„Å¸i (WETH cinsinden)
     pub min_profit_weth: f64,
-    /// Flash loan fee oranı (ör: 0.0005 = 5 bps)
+    /// Flash loan fee oranÃ„Â± (ÃƒÂ¶r: 0.0005 = 5 bps)
     pub flash_loan_fee_rate: f64,
-    /// Builder bribe yüzdesi (ör: 0.25 = %25)
-    /// v19.0: Brüt kârdan bribe düşüldükten sonra net kâr hesaplanır
+    /// Builder bribe yÃƒÂ¼zdesi (ÃƒÂ¶r: 0.25 = %25)
+    /// v19.0: BrÃƒÂ¼t kÃƒÂ¢rdan bribe dÃƒÂ¼Ã…Å¸ÃƒÂ¼ldÃƒÂ¼kten sonra net kÃƒÂ¢r hesaplanÃ„Â±r
     pub bribe_pct: f64,
 }
 
 /// PreFilter sonucu
 #[derive(Debug, Clone, Copy)]
 pub enum PreFilterResult {
-    /// Spread fee'leri kurtarıyor — NR'ye devam et
+    /// Spread fee'leri kurtarÃ„Â±yor Ã¢â‚¬â€ NR'ye devam et
     Profitable {
-        /// Tahmini brüt kâr (WETH)
+        /// Tahmini brÃƒÂ¼t kÃƒÂ¢r (WETH)
         estimated_profit_weth: f64,
-        /// Spread oranı
+        /// Spread oranÃ„Â±
         spread_ratio: f64,
     },
-    /// Spread fee'leri kurtaramıyor — NR'yi atla
+    /// Spread fee'leri kurtaramÃ„Â±yor Ã¢â‚¬â€ NR'yi atla
     Unprofitable {
-        /// Neden kârsız?
+        /// Neden kÃƒÂ¢rsÃ„Â±z?
         reason: PreFilterRejectReason,
     },
 }
 
-/// Kârsızlık nedeni (debug logları için)
+/// KÃƒÂ¢rsÃ„Â±zlÃ„Â±k nedeni (debug loglarÃ„Â± iÃƒÂ§in)
 #[derive(Debug, Clone, Copy)]
 pub enum PreFilterRejectReason {
-    /// Spread toplam fee'den küçük
+    /// Spread toplam fee'den kÃƒÂ¼ÃƒÂ§ÃƒÂ¼k
     SpreadBelowFees,
-    /// Tahmini kâr minimum eşiğin altında
+    /// Tahmini kÃƒÂ¢r minimum eÃ…Å¸iÃ„Å¸in altÃ„Â±nda
     ProfitBelowThreshold,
-    /// Geçersiz fiyat verisi
+    /// GeÃƒÂ§ersiz fiyat verisi
     InvalidPriceData,
 }
 
 impl PreFilter {
-    /// O(1) kârlılık kontrolü.
+    /// O(1) kÃƒÂ¢rlÃ„Â±lÃ„Â±k kontrolÃƒÂ¼.
     ///
-    /// # Argümanlar
-    /// - `price_a`: Havuz A ETH fiyatı (quote cinsinden)
-    /// - `price_b`: Havuz B ETH fiyatı (quote cinsinden)
-    /// - `trade_amount_weth`: İşlem boyutu (WETH)
+    /// # ArgÃƒÂ¼manlar
+    /// - `price_a`: Havuz A ETH fiyatÃ„Â± (quote cinsinden)
+    /// - `price_b`: Havuz B ETH fiyatÃ„Â± (quote cinsinden)
+    /// - `trade_amount_weth`: Ã„Â°Ã…Å¸lem boyutu (WETH)
     ///
-    /// # Karmaşıklık
-    /// O(1) — sabit sayıda aritmetik operasyon, allocation yok.
+    /// # KarmaÃ…Å¸Ã„Â±klÃ„Â±k
+    /// O(1) Ã¢â‚¬â€ sabit sayÃ„Â±da aritmetik operasyon, allocation yok.
     #[inline]
     pub fn check(
         &self,
@@ -99,7 +99,7 @@ impl PreFilter {
         price_b: f64,
         trade_amount_weth: f64,
     ) -> PreFilterResult {
-        // Geçerlilik kontrolü — NaN/Infinity/sıfır fiyat
+        // GeÃƒÂ§erlilik kontrolÃƒÂ¼ Ã¢â‚¬â€ NaN/Infinity/sÃ„Â±fÃ„Â±r fiyat
         if price_a <= 0.0 || price_b <= 0.0
             || !price_a.is_finite() || !price_b.is_finite()
             || trade_amount_weth <= 0.0
@@ -109,25 +109,25 @@ impl PreFilter {
             };
         }
 
-        // Spread oranı = |price_a - price_b| / min(price_a, price_b)
+        // Spread oranÃ„Â± = |price_a - price_b| / min(price_a, price_b)
         let spread = (price_a - price_b).abs();
         let min_price = price_a.min(price_b);
         let spread_ratio = spread / min_price;
 
-        // Toplam fee oranı = fee_a + fee_b + flash_loan_fee
+        // Toplam fee oranÃ„Â± = fee_a + fee_b + flash_loan_fee
         let total_fee_ratio = self.fee_a + self.fee_b + self.flash_loan_fee_rate;
 
-        // Spread fee'leri kurtarıyor mu?
+        // Spread fee'leri kurtarÃ„Â±yor mu?
         if spread_ratio <= total_fee_ratio {
             return PreFilterResult::Unprofitable {
                 reason: PreFilterRejectReason::SpreadBelowFees,
             };
         }
 
-        // v19.0: Tahmini net kâr (WETH cinsinden)
-        // Brüt kâr = (spread_ratio - total_fee_ratio) × amount
-        // Net kâr = brüt_kâr × (1 - bribe_pct) - gas_cost
-        // Bu formül komisyon + gas + bribe'ı tek seferde değerlendirir.
+        // v19.0: Tahmini net kÃƒÂ¢r (WETH cinsinden)
+        // BrÃƒÂ¼t kÃƒÂ¢r = (spread_ratio - total_fee_ratio) Ãƒâ€” amount
+        // Net kÃƒÂ¢r = brÃƒÂ¼t_kÃƒÂ¢r Ãƒâ€” (1 - bribe_pct) - gas_cost
+        // Bu formÃƒÂ¼l komisyon + gas + bribe'Ã„Â± tek seferde deÃ„Å¸erlendirir.
         let gross_profit = (spread_ratio - total_fee_ratio) * trade_amount_weth;
         let net_after_bribe = gross_profit * (1.0 - self.bribe_pct);
         let estimated_profit = net_after_bribe - self.estimated_gas_cost_weth;
@@ -145,81 +145,28 @@ impl PreFilter {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 // Sabitler
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-/// 2^96 — sqrtPriceX96 çözümleme sabiti
+/// 2^96 Ã¢â‚¬â€ sqrtPriceX96 ÃƒÂ§ÃƒÂ¶zÃƒÂ¼mleme sabiti
 const Q96: f64 = 79_228_162_514_264_337_593_543_950_336.0;
 
-/// WETH decimals (10^18)
-const WETH_DECIMALS: f64 = 1_000_000_000_000_000_000.0;
-
-/// USDC decimals (10^6)
-const USDC_DECIMALS: f64 = 1_000_000.0;
-
-/// ln(1.0001) — tick ↔ fiyat dönüşümü için
+/// ln(1.0001) Ã¢â‚¬â€ tick Ã¢â€ â€ fiyat dÃƒÂ¶nÃƒÂ¼Ã…Å¸ÃƒÂ¼mÃƒÂ¼ iÃƒÂ§in
 const LOG_TICK_BASE: f64 = 0.000_099_995_000_33;
 
-/// Tick sınırı geçiş dampening faktörü (FALLBACK modu).
-/// TickBitmap yoksa her tick_spacing sınırında bu uygulanır.
-const TICK_CROSS_DAMPENING: f64 = 0.997;
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// Tick Ã¢â€ â€ Fiyat DÃƒÂ¶nÃƒÂ¼Ã…Å¸ÃƒÂ¼mleri
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-/// Likidite güvenlik marjı — swap miktarı, havuz kapasitesinin
-/// bu oranını aşmamalı (tick-çapraz hataları önlemek için)
-/// ⚠️ LEGACY: U256 path exact::max_safe_swap_amount_u256 kullanır.
-#[allow(dead_code)]
-const MAX_LIQUIDITY_USAGE_RATIO: f64 = 0.15;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Güvenlik Yardımcıları
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// f64 değerini temizle: NaN veya Infinity ise 0.0 döndür.
-/// Canlı MEV botunun çökmesini engelleyen kritik güvenlik katmanı.
-#[inline]
-fn sanitize_f64(v: f64) -> f64 {
-    if v.is_nan() || v.is_infinite() { 0.0 } else { v }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Tick ↔ Fiyat Dönüşümleri
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Tick'i ham fiyat oranına (token1_raw / token0_raw) çevir.
+/// Tick'i ham fiyat oranÃ„Â±na (token1_raw / token0_raw) ÃƒÂ§evir.
 #[inline]
 pub fn tick_to_price_ratio(tick: i32) -> f64 {
     (tick as f64 * LOG_TICK_BASE).exp()
 }
 
-/// Tick'i sqrtPriceX96 değerine çevir (doğrulama amaçlı).
-#[inline]
-#[allow(dead_code)]
-pub fn tick_to_sqrt_price_x96(tick: i32) -> f64 {
-    let half_tick = tick as f64 * 0.5;
-    (half_tick * LOG_TICK_BASE).exp() * Q96
-}
-
-/// sqrtPriceX96'dan tick hesapla.
-#[inline]
-pub fn sqrt_price_x96_to_tick(sqrt_price_x96: f64) -> i32 {
-    if sqrt_price_x96 <= 0.0 || sqrt_price_x96.is_nan() || sqrt_price_x96.is_infinite() {
-        return 0;
-    }
-    let sqrt_price = sqrt_price_x96 / Q96;
-    let price = sqrt_price * sqrt_price;
-    if price <= 0.0 || price.is_nan() || price.is_infinite() {
-        return 0;
-    }
-    let raw_tick = price.ln() / LOG_TICK_BASE;
-    if raw_tick.is_nan() || raw_tick.is_infinite() {
-        return 0;
-    }
-    // Uniswap V3 geçerli tick aralığına sınırla
-    (raw_tick.floor() as i64).clamp(-887272, 887272) as i32
-}
-
-/// Ham fiyat oranını ETH/USDC fiyatına çevir (token sırası farkındalığı ile).
+/// Tick'i sqrtPriceX96 deÃ„Å¸erine ÃƒÂ§evir (doÃ„Å¸rulama amaÃƒÂ§lÃ„Â±).
+/// Ham fiyat oranÃ„Â±nÃ„Â± ETH/USDC fiyatÃ„Â±na ÃƒÂ§evir (token sÃ„Â±rasÃ„Â± farkÃ„Â±ndalÃ„Â±Ã„Å¸Ã„Â± ile).
 #[inline]
 fn raw_price_to_eth_price(
     price_ratio: f64,
@@ -238,27 +185,11 @@ fn raw_price_to_eth_price(
         let adjusted = price_ratio * decimal_adj;
         if adjusted > 1e-300 { 1.0 / adjusted } else { 0.0 }
     };
-    // NaN veya Infinity asla dışarı sızdırma
+    // NaN veya Infinity asla dÃ„Â±Ã…Å¸arÃ„Â± sÃ„Â±zdÃ„Â±rma
     if result.is_nan() || result.is_infinite() { 0.0 } else { result }
 }
 
-/// Tick'ten ETH fiyatını (USDC cinsinden) hesapla.
-#[allow(dead_code)]
-pub fn tick_to_eth_price(
-    tick: i32,
-    token0_decimals: u8,
-    token1_decimals: u8,
-    token0_is_weth: bool,
-) -> f64 {
-    let price_ratio = tick_to_price_ratio(tick);
-    raw_price_to_eth_price(price_ratio, token0_decimals, token1_decimals, token0_is_weth)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Ana Fiyat Hesaplama — Tick Doğrulamalı
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// sqrtPriceX96 + tick çapraz doğrulaması ile ETH fiyatı hesapla.
+/// sqrtPriceX96 + tick ÃƒÂ§apraz doÃ„Å¸rulamasÃ„Â± ile ETH fiyatÃ„Â± hesapla.
 pub fn compute_eth_price(
     sqrt_price_x96: f64,
     tick: i32,
@@ -285,7 +216,7 @@ pub fn compute_eth_price(
         let deviation = ((price_from_sqrt - price_from_tick) / price_from_tick).abs();
         if deviation > 0.01 {
             eprintln!(
-                "  ⚠️ Fiyat sapması: sqrtPrice={:.2}$, tick={:.2}$ (sapma: {:.2}%)",
+                "  Ã¢Å¡Â Ã¯Â¸Â Fiyat sapmasÃ„Â±: sqrtPrice={:.2}$, tick={:.2}$ (sapma: {:.2}%)",
                 price_from_sqrt, price_from_tick, deviation * 100.0
             );
             return price_from_tick;
@@ -295,857 +226,7 @@ pub fn compute_eth_price(
     price_from_sqrt
 }
 
-/// [Geriye Uyumluluk]
-#[allow(dead_code)]
-pub fn sqrt_price_x96_to_eth_price(
-    sqrt_price_x96: f64,
-    token0_decimals: u8,
-    token1_decimals: u8,
-) -> f64 {
-    if sqrt_price_x96 <= 0.0 {
-        return 0.0;
-    }
-    let sqrt_price = sqrt_price_x96 / Q96;
-    let price_ratio = sqrt_price * sqrt_price;
-    let decimal_diff = token1_decimals as i32 - token0_decimals as i32;
-    price_ratio * 10.0_f64.powi(decimal_diff)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Multi-Tick Swap Sonucu
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Multi-tick swap simülasyonunun detaylı sonucu.
-/// "50 ETH satarsam sırasıyla hangi 3 tick'i patlatırım ve ortalama fiyat ne olur?"
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct MultiTickSwapResult {
-    /// Toplam çıktı miktarı (USDC veya WETH)
-    pub total_output: f64,
-    /// Efektif (ağırlıklı ortalama) fiyat
-    pub effective_price: f64,
-    /// Geçilen tick sınırları ve her birindeki swap detayı
-    pub tick_crossings: Vec<TickCrossing>,
-    /// Son tick (swap sonrası konum)
-    pub final_tick: i32,
-    /// Son sqrtPrice (Q96 formatında)
-    pub final_sqrt_price_x96: f64,
-    /// Son aktif likidite
-    pub final_liquidity: f64,
-    /// Gerçek TickBitmap mı yoksa dampening fallback mı kullanıldı?
-    pub used_real_bitmap: bool,
-}
-
-/// Tek bir tick geçişinin detayı
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct TickCrossing {
-    /// Geçilen tick sınırı
-    pub tick: i32,
-    /// Bu aralıkta kullanılan likidite
-    pub liquidity: f64,
-    /// Bu aralıkta tüketilen girdi miktarı
-    pub input_consumed: f64,
-    /// Bu aralıktan elde edilen çıktı
-    pub output_produced: f64,
-    /// Net likidite değişimi (liquidityNet)
-    pub liquidity_net: i128,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// U256 Multi-Tick Swap — Public API (v7.0)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// WETH → USDC swap (U256 exact math, PoolState doğrudan).
-///
-/// Uniswap V3'ün on-chain swap() fonksiyonunu birebir taklit eder.
-/// Sonuç f64'e dönüştürülür (human-readable USDC).
-pub fn swap_weth_to_usdc_exact(
-    pool: &PoolState,
-    amount_in_weth: f64,
-    fee_fraction: f64,
-    token0_is_weth: bool,
-    _tick_spacing: i32,
-    tick_bitmap: Option<&TickBitmapData>,
-) -> MultiTickSwapResult {
-    if amount_in_weth <= 0.0 || pool.liquidity == 0 || pool.sqrt_price_x96.is_zero() {
-        return MultiTickSwapResult {
-            total_output: 0.0,
-            effective_price: 0.0,
-            tick_crossings: vec![],
-            final_tick: pool.tick,
-            final_sqrt_price_x96: pool.sqrt_price_f64,
-            final_liquidity: pool.liquidity as f64,
-            used_real_bitmap: false,
-        };
-    }
-
-    let amount_in_wei = alloy::primitives::U256::from(
-        crate::types::safe_f64_to_u128(amount_in_weth * 1e18)
-    );
-    let fee_pips = exact::fee_fraction_to_pips(fee_fraction);
-    let zero_for_one = token0_is_weth;
-
-    let result = exact::compute_exact_swap(
-        pool.sqrt_price_x96,
-        pool.liquidity,
-        pool.tick,
-        amount_in_wei,
-        zero_for_one,
-        fee_pips,
-        tick_bitmap,
-    );
-
-    // U256 → f64 dönüşümü (USDC: / 1e6)
-    let total_usdc = exact::u256_to_f64(result.amount_out) / USDC_DECIMALS;
-    let effective_price = if amount_in_weth > 0.0 { total_usdc / amount_in_weth } else { 0.0 };
-
-    MultiTickSwapResult {
-        total_output: sanitize_f64(total_usdc),
-        effective_price: sanitize_f64(effective_price),
-        tick_crossings: vec![], // U256 path detaylı tick log tutmaz
-        final_tick: pool.tick,
-        final_sqrt_price_x96: exact::u256_to_f64(result.final_sqrt_price_x96),
-        final_liquidity: result.final_liquidity as f64,
-        used_real_bitmap: tick_bitmap.is_some(),
-    }
-}
-
-/// USDC → WETH swap (U256 exact math, PoolState doğrudan).
-#[allow(dead_code)]
-pub fn swap_usdc_to_weth_exact(
-    pool: &PoolState,
-    amount_in_usdc: f64,
-    fee_fraction: f64,
-    token0_is_weth: bool,
-    _tick_spacing: i32,
-    tick_bitmap: Option<&TickBitmapData>,
-) -> MultiTickSwapResult {
-    if amount_in_usdc <= 0.0 || pool.liquidity == 0 || pool.sqrt_price_x96.is_zero() {
-        return MultiTickSwapResult {
-            total_output: 0.0,
-            effective_price: 0.0,
-            tick_crossings: vec![],
-            final_tick: pool.tick,
-            final_sqrt_price_x96: pool.sqrt_price_f64,
-            final_liquidity: pool.liquidity as f64,
-            used_real_bitmap: false,
-        };
-    }
-
-    let amount_in_wei = alloy::primitives::U256::from(
-        crate::types::safe_f64_to_u128(amount_in_usdc * 1e6)
-    );
-    let fee_pips = exact::fee_fraction_to_pips(fee_fraction);
-    let zero_for_one = !token0_is_weth; // USDC girdi yönü
-
-    let result = exact::compute_exact_swap(
-        pool.sqrt_price_x96,
-        pool.liquidity,
-        pool.tick,
-        amount_in_wei,
-        zero_for_one,
-        fee_pips,
-        tick_bitmap,
-    );
-
-    // U256 → f64 dönüşümü (WETH: / 1e18)
-    let total_weth = exact::u256_to_f64(result.amount_out) / WETH_DECIMALS;
-    let effective_price = if total_weth > 0.0 { amount_in_usdc / total_weth } else { 0.0 };
-
-    MultiTickSwapResult {
-        total_output: sanitize_f64(total_weth),
-        effective_price: sanitize_f64(effective_price),
-        tick_crossings: vec![],
-        final_tick: pool.tick,
-        final_sqrt_price_x96: exact::u256_to_f64(result.final_sqrt_price_x96),
-        final_liquidity: result.final_liquidity as f64,
-        used_real_bitmap: tick_bitmap.is_some(),
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// LEGACY Multi-Tick Swap Motoru (f64 — Geriye Uyumluluk)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// WETH → USDC multi-tick swap (TickBitmap ile gerçek tick geçişi).
-/// ⚠️ LEGACY: f64 tabanlı. Yeni kod `swap_weth_to_usdc_exact` kullanmalıdır.
-///
-/// Algoritma:
-///   1. Mevcut tick'teki kalan likiditeyle olabildiğince swap yap
-///   2. Girdi tükenmezse, sonraki başlatılmış tick'e ilerle
-///   3. O tick'te liquidityNet'i aktif likiditeye ekle/çıkar
-///   4. Yeni likiditeyle swap'a devam et
-///   5. Girdi tükenene veya başlatılmış tick kalmayana kadar tekrarla
-///
-/// token0=WETH → WETH girdi, USDC çıktı → sqrtPrice AZALIR → sola git
-/// token0=USDC → WETH girdi (token1), USDC çıktı (token0) → sqrtPrice ARTAR → sağa git
-pub fn swap_weth_to_usdc_multitick(
-    sqrt_price_f64: f64,
-    liquidity: f64,
-    current_tick: i32,
-    amount_in_weth: f64,
-    fee_fraction: f64,
-    token0_is_weth: bool,
-    tick_spacing: i32,
-    tick_bitmap: Option<&TickBitmapData>,
-) -> MultiTickSwapResult {
-    if sqrt_price_f64 <= 0.0 || liquidity <= 0.0 || amount_in_weth <= 0.0 {
-        return MultiTickSwapResult {
-            total_output: 0.0,
-            effective_price: 0.0,
-            tick_crossings: vec![],
-            final_tick: current_tick,
-            final_sqrt_price_x96: sqrt_price_f64,
-            final_liquidity: liquidity,
-            used_real_bitmap: false,
-        };
-    }
-
-    // Fee'yi düş
-    let total_effective = amount_in_weth * (1.0 - fee_fraction);
-
-    match tick_bitmap {
-        Some(bitmap) if !bitmap.ticks.is_empty() => {
-            // ─── GERÇEK Multi-Tick Engine ─────────────────────────
-            real_multitick_swap_weth_to_usdc(
-                sqrt_price_f64, liquidity, current_tick,
-                total_effective, token0_is_weth, tick_spacing, bitmap,
-            )
-        }
-        _ => {
-            // ─── FALLBACK: Dampening Modu ─────────────────────────
-            let output = dampened_swap_weth_to_usdc(
-                sqrt_price_f64, liquidity, current_tick,
-                total_effective, token0_is_weth, tick_spacing,
-            );
-            let eff_price = if amount_in_weth > 0.0 { output / amount_in_weth } else { 0.0 };
-            MultiTickSwapResult {
-                total_output: sanitize_f64(output),
-                effective_price: sanitize_f64(eff_price),
-                tick_crossings: vec![],
-                final_tick: current_tick,
-                final_sqrt_price_x96: sqrt_price_f64,
-                final_liquidity: liquidity,
-                used_real_bitmap: false,
-            }
-        }
-    }
-}
-
-/// USDC → WETH multi-tick swap (TickBitmap ile gerçek tick geçişi).
-pub fn swap_usdc_to_weth_multitick(
-    sqrt_price_f64: f64,
-    liquidity: f64,
-    current_tick: i32,
-    amount_in_usdc: f64,
-    fee_fraction: f64,
-    token0_is_weth: bool,
-    tick_spacing: i32,
-    tick_bitmap: Option<&TickBitmapData>,
-) -> MultiTickSwapResult {
-    if sqrt_price_f64 <= 0.0 || liquidity <= 0.0 || amount_in_usdc <= 0.0 {
-        return MultiTickSwapResult {
-            total_output: 0.0,
-            effective_price: 0.0,
-            tick_crossings: vec![],
-            final_tick: current_tick,
-            final_sqrt_price_x96: sqrt_price_f64,
-            final_liquidity: liquidity,
-            used_real_bitmap: false,
-        };
-    }
-
-    let total_effective = amount_in_usdc * (1.0 - fee_fraction);
-
-    match tick_bitmap {
-        Some(bitmap) if !bitmap.ticks.is_empty() => {
-            real_multitick_swap_usdc_to_weth(
-                sqrt_price_f64, liquidity, current_tick,
-                total_effective, token0_is_weth, tick_spacing, bitmap,
-            )
-        }
-        _ => {
-            let output = dampened_swap_usdc_to_weth(
-                sqrt_price_f64, liquidity, current_tick,
-                total_effective, token0_is_weth, tick_spacing,
-            );
-            let eff_price = if output > 0.0 { amount_in_usdc / output } else { 0.0 };
-            MultiTickSwapResult {
-                total_output: sanitize_f64(output),
-                effective_price: sanitize_f64(eff_price),
-                tick_crossings: vec![],
-                final_tick: current_tick,
-                final_sqrt_price_x96: sqrt_price_f64,
-                final_liquidity: liquidity,
-                used_real_bitmap: false,
-            }
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Gerçek Multi-Tick Swap — İç Motor
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// WETH → USDC gerçek multi-tick swap.
-///
-/// token0=WETH → token0 girdi → sqrtPrice AZALIR → sola (negatif tick yönünde) ilerle
-/// token0=USDC → token1 girdi → sqrtPrice ARTAR → sağa (pozitif tick yönünde) ilerle
-fn real_multitick_swap_weth_to_usdc(
-    sqrt_price_f64: f64,
-    liquidity: f64,
-    current_tick: i32,
-    amount_in_effective: f64,
-    token0_is_weth: bool,
-    _tick_spacing: i32,
-    bitmap: &TickBitmapData,
-) -> MultiTickSwapResult {
-    // WETH girişi: human-readable (ör: 5.0) → raw (5e18)
-    let mut remaining_input = amount_in_effective * WETH_DECIMALS;
-    let mut total_output = 0.0;
-    let mut sqrt_p = sqrt_price_f64 / Q96; // Normalize
-    let mut active_liq = liquidity;
-    let mut curr_tick = current_tick;
-    let mut crossings: Vec<TickCrossing> = Vec::new();
-
-    // WETH girdi yönü: token0=WETH → sola git, token0=USDC → sağa git
-    let go_left = token0_is_weth;
-
-    // Sıralı başlatılmış tick'leri al
-    let ordered_ticks = if go_left {
-        // Sola giderken: current_tick'ten küçük tick'ler (büyükten küçüğe)
-        let mut t: Vec<_> = bitmap.ticks.iter()
-            .filter(|(&tick, info)| tick <= curr_tick && info.initialized)
-            .map(|(&tick, info)| (tick, *info))
-            .collect();
-        t.sort_by(|a, b| b.0.cmp(&a.0)); // Büyükten küçüğe
-        t
-    } else {
-        // Sağa giderken: current_tick'ten büyük tick'ler (küçükten büyüğe)
-        let mut t: Vec<_> = bitmap.ticks.iter()
-            .filter(|(&tick, info)| tick > curr_tick && info.initialized)
-            .map(|(&tick, info)| (tick, *info))
-            .collect();
-        t.sort_by_key(|(tick, _)| *tick); // Küçükten büyüğe
-        t
-    };
-
-    // Güvenlik: maksimum 50 tick geçişi
-    let max_crossings = 50;
-    let mut crossings_count = 0;
-
-    for (next_tick, tick_info) in &ordered_ticks {
-        if remaining_input <= 1e-12 || crossings_count >= max_crossings {
-            break;
-        }
-
-        // Sonraki tick sınırındaki sqrtPrice
-        let next_sqrt_p = tick_to_sqrt_price_x96(*next_tick) / Q96;
-
-        // Bu aralıkta ne kadar input tüketebiliriz?
-        let (input_consumed, output_produced, new_sqrt_p) = if token0_is_weth {
-            // token0 (WETH) girdi → sqrtPrice azalır
-            compute_swap_within_tick_token0(sqrt_p, next_sqrt_p, active_liq, remaining_input)
-        } else {
-            // token1 (WETH) girdi → sqrtPrice artar
-            compute_swap_within_tick_token1(sqrt_p, next_sqrt_p, active_liq, remaining_input)
-        };
-
-        if input_consumed > 0.0 {
-            total_output += output_produced;
-            remaining_input -= input_consumed;
-            sqrt_p = new_sqrt_p;
-
-            crossings.push(TickCrossing {
-                tick: *next_tick,
-                liquidity: active_liq,
-                input_consumed,
-                output_produced,
-                liquidity_net: tick_info.liquidity_net,
-            });
-
-            // Tick sınırını geçti → likiditeyi güncelle
-            if (remaining_input > 1e-12) && ((new_sqrt_p - next_sqrt_p).abs() < 1e-30) {
-                // Yön: sola gidiyorsak liquidityNet'i çıkar, sağa gidiyorsak ekle
-                if go_left {
-                    active_liq -= tick_info.liquidity_net as f64;
-                } else {
-                    active_liq += tick_info.liquidity_net as f64;
-                }
-                active_liq = active_liq.max(0.0);
-                curr_tick = *next_tick;
-                crossings_count += 1;
-            }
-        }
-    }
-
-    // Tick arası kalan input varsa mevcut likiditede swap et
-    if remaining_input > 1e-12 && active_liq > 0.0 {
-        let extra_output = if token0_is_weth {
-            single_tick_swap_token0_to_token1(sqrt_p, active_liq, remaining_input)
-        } else {
-            single_tick_swap_token1_to_token0(sqrt_p, active_liq, remaining_input)
-        };
-        total_output += extra_output;
-    }
-
-    // USDC dönüşümü
-    let total_usdc = if token0_is_weth {
-        total_output / USDC_DECIMALS
-    } else {
-        total_output / USDC_DECIMALS
-    };
-
-    let _eff_price = if amount_in_effective > 0.0 {
-        total_usdc / (amount_in_effective / WETH_DECIMALS * WETH_DECIMALS / WETH_DECIMALS)
-    } else {
-        0.0
-    };
-
-    // Doğru efektif fiyat hesabı
-    let total_weth_input = amount_in_effective;
-    let real_eff_price = if total_weth_input > 0.0 { total_usdc / total_weth_input } else { 0.0 };
-
-    MultiTickSwapResult {
-        total_output: sanitize_f64(total_usdc),
-        effective_price: sanitize_f64(real_eff_price),
-        tick_crossings: crossings,
-        final_tick: curr_tick,
-        final_sqrt_price_x96: sqrt_p * Q96,
-        final_liquidity: active_liq,
-        used_real_bitmap: true,
-    }
-}
-
-/// USDC → WETH gerçek multi-tick swap.
-fn real_multitick_swap_usdc_to_weth(
-    sqrt_price_f64: f64,
-    liquidity: f64,
-    current_tick: i32,
-    amount_in_effective: f64,
-    token0_is_weth: bool,
-    tick_spacing: i32,
-    bitmap: &TickBitmapData,
-) -> MultiTickSwapResult {
-    // USDC girişi: human-readable (ör: 10000.0) → raw (10000e6)
-    let mut remaining_input = amount_in_effective * USDC_DECIMALS;
-    let mut total_output = 0.0;
-    let mut sqrt_p = sqrt_price_f64 / Q96;
-    let mut active_liq = liquidity;
-    let mut curr_tick = current_tick;
-    let mut crossings: Vec<TickCrossing> = Vec::new();
-
-    // USDC girdi yönü: token0=WETH → USDC token1 girdi → sağa git
-    //                   token0=USDC → USDC token0 girdi → sola git
-    let go_left = !token0_is_weth;
-
-    let ordered_ticks = if go_left {
-        let mut t: Vec<_> = bitmap.ticks.iter()
-            .filter(|(&tick, info)| tick <= curr_tick && info.initialized)
-            .map(|(&tick, info)| (tick, *info))
-            .collect();
-        t.sort_by(|a, b| b.0.cmp(&a.0));
-        t
-    } else {
-        let mut t: Vec<_> = bitmap.ticks.iter()
-            .filter(|(&tick, info)| tick > curr_tick && info.initialized)
-            .map(|(&tick, info)| (tick, *info))
-            .collect();
-        t.sort_by_key(|(tick, _)| *tick);
-        t
-    };
-
-    let max_crossings = 50;
-    let mut crossings_count = 0;
-
-    for (next_tick, tick_info) in &ordered_ticks {
-        if remaining_input <= 1e-12 || crossings_count >= max_crossings {
-            break;
-        }
-
-        let next_sqrt_p = tick_to_sqrt_price_x96(*next_tick) / Q96;
-
-        let (input_consumed, output_produced, new_sqrt_p) = if token0_is_weth {
-            // USDC = token1 girdi → sqrtPrice artar
-            compute_swap_within_tick_token1(sqrt_p, next_sqrt_p, active_liq, remaining_input)
-        } else {
-            // USDC = token0 girdi → sqrtPrice azalır
-            compute_swap_within_tick_token0(sqrt_p, next_sqrt_p, active_liq, remaining_input)
-        };
-
-        if input_consumed > 0.0 {
-            total_output += output_produced;
-            remaining_input -= input_consumed;
-            sqrt_p = new_sqrt_p;
-
-            crossings.push(TickCrossing {
-                tick: *next_tick,
-                liquidity: active_liq,
-                input_consumed,
-                output_produced,
-                liquidity_net: tick_info.liquidity_net,
-            });
-
-            if (remaining_input > 1e-12) && ((new_sqrt_p - next_sqrt_p).abs() < 1e-30) {
-                if go_left {
-                    active_liq -= tick_info.liquidity_net as f64;
-                } else {
-                    active_liq += tick_info.liquidity_net as f64;
-                }
-                active_liq = active_liq.max(0.0);
-                curr_tick = *next_tick;
-                crossings_count += 1;
-            }
-        }
-    }
-
-    if remaining_input > 1e-12 && active_liq > 0.0 {
-        let extra_output = if token0_is_weth {
-            // USDC(token1) girdi → WETH(token0) çıktı
-            single_tick_swap_token1_to_token0(sqrt_p, active_liq, remaining_input)
-        } else {
-            // USDC(token0) girdi → WETH(token1) çıktı
-            single_tick_swap_token0_to_token1(sqrt_p, active_liq, remaining_input)
-        };
-        total_output += extra_output;
-    }
-
-    let total_weth = if token0_is_weth {
-        total_output / WETH_DECIMALS
-    } else {
-        total_output / WETH_DECIMALS
-    };
-
-    let real_eff_price = if total_weth > 0.0 { amount_in_effective / total_weth } else { 0.0 };
-
-    let _ = tick_spacing; // Kullanılmıyor ama API tutarlılığı için
-
-    MultiTickSwapResult {
-        total_output: sanitize_f64(total_weth),
-        effective_price: sanitize_f64(real_eff_price),
-        tick_crossings: crossings,
-        final_tick: curr_tick,
-        final_sqrt_price_x96: sqrt_p * Q96,
-        final_liquidity: active_liq,
-        used_real_bitmap: true,
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Tick-İçi Swap Hesaplama Yardımcıları
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Bir tick aralığı içinde token0 (x) girdi ile swap.
-/// √P_new = L × √P / (L + Δx_raw × √P)   (sqrtPrice azalır)
-/// Δy_raw = L × (√P - √P_new)              (token1 çıktı)
-///
-/// Returns: (input_consumed_raw, output_produced_raw, new_sqrt_price)
-fn compute_swap_within_tick_token0(
-    sqrt_p: f64,
-    target_sqrt_p: f64,
-    liquidity: f64,
-    max_input_raw: f64,
-) -> (f64, f64, f64) {
-    if liquidity <= 0.0 || sqrt_p <= 0.0 {
-        return (0.0, 0.0, sqrt_p);
-    }
-
-    // Bu aralıktaki maksimum tüketilebilir input (target_sqrt_p'ye kadar)
-    // Δx_raw = L × (1/√P_target - 1/√P)
-    let max_input_for_range = if target_sqrt_p > 0.0 && target_sqrt_p < sqrt_p {
-        liquidity * (1.0 / target_sqrt_p - 1.0 / sqrt_p)
-    } else {
-        f64::MAX
-    };
-
-    let actual_input = max_input_raw.min(max_input_for_range.max(0.0));
-    if actual_input <= 0.0 {
-        return (0.0, 0.0, sqrt_p);
-    }
-
-    // Yeni sqrtPrice
-    let denom = liquidity + actual_input * sqrt_p;
-    if denom <= 0.0 {
-        return (0.0, 0.0, sqrt_p);
-    }
-    let new_sqrt_p = liquidity * sqrt_p / denom;
-
-    // Çıktı
-    let output = liquidity * (sqrt_p - new_sqrt_p);
-
-    (actual_input, output.abs(), new_sqrt_p)
-}
-
-/// Bir tick aralığı içinde token1 (y) girdi ile swap.
-/// √P_new = √P + Δy_raw / L               (sqrtPrice artar)
-/// Δx_raw = L × (1/√P - 1/√P_new)          (token0 çıktı)
-fn compute_swap_within_tick_token1(
-    sqrt_p: f64,
-    target_sqrt_p: f64,
-    liquidity: f64,
-    max_input_raw: f64,
-) -> (f64, f64, f64) {
-    if liquidity <= 0.0 || sqrt_p <= 0.0 {
-        return (0.0, 0.0, sqrt_p);
-    }
-
-    // Bu aralıktaki maksimum tüketilebilir input
-    // Δy_raw = L × (√P_target - √P)
-    let max_input_for_range = if target_sqrt_p > sqrt_p {
-        liquidity * (target_sqrt_p - sqrt_p)
-    } else {
-        f64::MAX
-    };
-
-    let actual_input = max_input_raw.min(max_input_for_range.max(0.0));
-    if actual_input <= 0.0 {
-        return (0.0, 0.0, sqrt_p);
-    }
-
-    let new_sqrt_p = sqrt_p + actual_input / liquidity;
-    if new_sqrt_p <= 0.0 {
-        return (0.0, 0.0, sqrt_p);
-    }
-
-    let output = liquidity * (1.0 / sqrt_p - 1.0 / new_sqrt_p);
-
-    (actual_input, output.abs(), new_sqrt_p)
-}
-
-/// Tek tick aralığında token0 → token1 swap (sınır yok)
-fn single_tick_swap_token0_to_token1(sqrt_p: f64, liquidity: f64, input_raw: f64) -> f64 {
-    if liquidity <= 0.0 || sqrt_p <= 0.0 || input_raw <= 0.0 {
-        return 0.0;
-    }
-    let denom = liquidity + input_raw * sqrt_p;
-    if denom <= 0.0 { return 0.0; }
-    let sp_new = liquidity * sqrt_p / denom;
-    (liquidity * (sqrt_p - sp_new)).abs()
-}
-
-/// Tek tick aralığında token1 → token0 swap (sınır yok)
-fn single_tick_swap_token1_to_token0(sqrt_p: f64, liquidity: f64, input_raw: f64) -> f64 {
-    if liquidity <= 0.0 || sqrt_p <= 0.0 || input_raw <= 0.0 {
-        return 0.0;
-    }
-    let sp_new = sqrt_p + input_raw / liquidity;
-    if sp_new <= 0.0 { return 0.0; }
-    (liquidity * (1.0 / sqrt_p - 1.0 / sp_new)).abs()
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// FALLBACK: Dampening-Tabanlı Swap (TickBitmap yoksa)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// WETH → USDC dampening-tabanlı swap (geriye uyumlu v5.1)
-fn dampened_swap_weth_to_usdc(
-    sqrt_price_f64: f64,
-    liquidity: f64,
-    current_tick: i32,
-    effective: f64,
-    token0_is_weth: bool,
-    tick_spacing: i32,
-) -> f64 {
-    let sqrt_price = sqrt_price_f64 / Q96;
-
-    let (new_sqrt_price, raw_out) = if token0_is_weth {
-        let amount_in_raw = effective * WETH_DECIMALS;
-        let denom = liquidity + amount_in_raw * sqrt_price;
-        if denom <= 0.0 { return 0.0; }
-        let sp_new = liquidity * sqrt_price / denom;
-        let out_raw = liquidity * (sqrt_price - sp_new);
-        (sp_new, out_raw / USDC_DECIMALS)
-    } else {
-        let amount_in_raw = effective * WETH_DECIMALS;
-        let sp_new = sqrt_price + amount_in_raw / liquidity;
-        if sp_new <= 0.0 { return 0.0; }
-        let out_raw = liquidity * (1.0 / sqrt_price - 1.0 / sp_new);
-        (sp_new, out_raw / USDC_DECIMALS)
-    };
-
-    // NaN/Infinity güvenlik kontrolü
-    if raw_out.is_nan() || raw_out.is_infinite() {
-        return 0.0;
-    }
-
-    let new_sqrt_price_x96 = new_sqrt_price * Q96;
-    let new_tick = sqrt_price_x96_to_tick(new_sqrt_price_x96);
-    let ts = tick_spacing.max(1) as f64;
-    let ticks_crossed = ((new_tick - current_tick).abs() as f64 / ts).ceil() as i32;
-    let dampening = TICK_CROSS_DAMPENING.powi(ticks_crossed);
-
-    let sonuc = raw_out.abs() * dampening;
-    if sonuc.is_nan() || sonuc.is_infinite() { 0.0 } else { sonuc }
-}
-
-/// USDC → WETH dampening-tabanlı swap (geriye uyumlu v5.1)
-fn dampened_swap_usdc_to_weth(
-    sqrt_price_f64: f64,
-    liquidity: f64,
-    current_tick: i32,
-    effective: f64,
-    token0_is_weth: bool,
-    tick_spacing: i32,
-) -> f64 {
-    let sqrt_price = sqrt_price_f64 / Q96;
-
-    let (new_sqrt_price, raw_out) = if token0_is_weth {
-        let amount_in_raw = effective * USDC_DECIMALS;
-        let sp_new = sqrt_price + amount_in_raw / liquidity;
-        if sp_new <= 0.0 { return 0.0; }
-        let out_raw = liquidity * (1.0 / sqrt_price - 1.0 / sp_new);
-        (sp_new, out_raw / WETH_DECIMALS)
-    } else {
-        let amount_in_raw = effective * USDC_DECIMALS;
-        let denom = liquidity + amount_in_raw * sqrt_price;
-        if denom <= 0.0 { return 0.0; }
-        let sp_new = liquidity * sqrt_price / denom;
-        let out_raw = liquidity * (sqrt_price - sp_new);
-        (sp_new, out_raw / WETH_DECIMALS)
-    };
-
-    // NaN/Infinity güvenlik kontrolü
-    if raw_out.is_nan() || raw_out.is_infinite() {
-        return 0.0;
-    }
-
-    let new_sqrt_price_x96 = new_sqrt_price * Q96;
-    let new_tick = sqrt_price_x96_to_tick(new_sqrt_price_x96);
-    let ts = tick_spacing.max(1) as f64;
-    let ticks_crossed = ((new_tick - current_tick).abs() as f64 / ts).ceil() as i32;
-    let dampening = TICK_CROSS_DAMPENING.powi(ticks_crossed);
-
-    let sonuc = raw_out.abs() * dampening;
-    if sonuc.is_nan() || sonuc.is_infinite() { 0.0 } else { sonuc }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Uyumluluk Katmanı — Eski API (swap_weth_to_usdc / swap_usdc_to_weth)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// WETH → USDC swap (geriye uyumlu, TickBitmap opsiyonel).
-/// TickBitmap verilmezse dampening moduna düşer.
-#[allow(dead_code)]
-pub fn swap_weth_to_usdc(
-    sqrt_price_f64: f64,
-    liquidity: f64,
-    current_tick: i32,
-    amount_in_weth: f64,
-    fee_fraction: f64,
-    token0_is_weth: bool,
-    tick_spacing: i32,
-) -> f64 {
-    let result = swap_weth_to_usdc_multitick(
-        sqrt_price_f64, liquidity, current_tick,
-        amount_in_weth, fee_fraction, token0_is_weth,
-        tick_spacing, None,
-    );
-    result.total_output
-}
-
-/// USDC → WETH swap (geriye uyumlu, TickBitmap opsiyonel).
-#[allow(dead_code)]
-pub fn swap_usdc_to_weth(
-    sqrt_price_f64: f64,
-    liquidity: f64,
-    current_tick: i32,
-    amount_in_usdc: f64,
-    fee_fraction: f64,
-    token0_is_weth: bool,
-    tick_spacing: i32,
-) -> f64 {
-    let result = swap_usdc_to_weth_multitick(
-        sqrt_price_f64, liquidity, current_tick,
-        amount_in_usdc, fee_fraction, token0_is_weth,
-        tick_spacing, None,
-    );
-    result.total_output
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Likidite-Tabanlı Üst Sınır Hesaplama
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Havuzun aktif likiditesine göre güvenli maksimum swap miktarını hesapla.
-///
-/// v7.0: f64 imzası geriye uyumluluk için korunuyor ama
-/// yeni çağrılar `exact::max_safe_swap_amount_u256` kullanmalıdır.
-#[allow(dead_code)]
-pub fn max_safe_swap_amount(
-    sqrt_price_f64: f64,
-    liquidity: f64,
-    token0_is_weth: bool,
-    current_tick: i32,
-    tick_spacing: i32,
-) -> f64 {
-    if sqrt_price_f64 <= 0.0 || liquidity <= 0.0
-       || sqrt_price_f64.is_nan() || sqrt_price_f64.is_infinite()
-       || liquidity.is_nan() || liquidity.is_infinite()
-    {
-        return 0.0;
-    }
-    // f64 değerlerden U256 yaklaşık dönüşüm
-    let sqrt_price_u256 = alloy::primitives::U256::from(
-        crate::types::safe_f64_to_u128(sqrt_price_f64)
-    );
-    let liquidity_u128 = if liquidity >= u128::MAX as f64 {
-        u128::MAX
-    } else if liquidity < 0.0 {
-        0u128
-    } else {
-        liquidity as u128
-    };
-    let result = exact::max_safe_swap_amount_u256(sqrt_price_u256, liquidity_u128, token0_is_weth, current_tick, tick_spacing);
-    sanitize_f64(result)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Arbitraj Kâr Hesaplama — Multi-Tick Aware
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// İki havuz arasında arbitraj kârını hesapla.
-/// TickBitmap verilirse gerçek multi-tick, yoksa dampening kullanır.
-#[allow(dead_code)]
-pub fn compute_arbitrage_profit(
-    amount_in_weth: f64,
-    sell_pool: &PoolState,
-    sell_fee_fraction: f64,
-    buy_pool: &PoolState,
-    buy_fee_fraction: f64,
-    gas_cost_usd: f64,
-    flash_loan_fee_bps: f64,
-    eth_price_usd: f64,
-    sell_token0_is_weth: bool,
-    sell_tick_spacing: i32,
-    buy_tick_spacing: i32,
-    buy_token0_is_weth: bool,
-) -> f64 {
-    compute_arbitrage_profit_with_bitmap(
-        amount_in_weth,
-        sell_pool, sell_fee_fraction,
-        buy_pool, buy_fee_fraction,
-        gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-        sell_token0_is_weth, sell_tick_spacing, buy_tick_spacing,
-        None, None,
-        buy_token0_is_weth,
-    )
-}
-
-/// İki havuz arasında arbitraj kârını hesapla (TickBitmap destekli).
-///
-/// v7.0 (U256 Stabilizasyon): Tüm swap hesaplamaları artık
-/// `exact::compute_exact_swap` üzerinden yapılır — Uniswap V3'ün
-/// FullMath/SqrtPriceMath/SwapMath kütüphanelerinin birebir U256 portu.
-///
-/// Akış:
-///   1. f64 WETH miktarı → U256 wei dönüşümü
-///   2. Pahalı havuzda exact U256 swap (WETH → USDC)
-///   3. Ucuz havuzda exact U256 swap (USDC → WETH)
-///   4. Flash loan geri ödeme (U256)
-///   5. Net kâr → f64 USD (optimizer'a geri dönüş)
-///
-/// Bu sayede off-chain hesaplama, on-chain sonuçla wei bazında eşleşir.
+/// Bu sayede off-chain hesaplama, on-chain sonuÃƒÂ§la wei bazÃ„Â±nda eÃ…Å¸leÃ…Å¸ir.
 pub fn compute_arbitrage_profit_with_bitmap(
     amount_in_weth: f64,
     sell_pool: &PoolState,
@@ -1166,9 +247,9 @@ pub fn compute_arbitrage_profit_with_bitmap(
         return f64::NEG_INFINITY;
     }
 
-    // ═══ U256 EXACT MATH — On-Chain Deterministik Kesinlik ═══
+    // Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â U256 EXACT MATH Ã¢â‚¬â€ On-Chain Deterministik Kesinlik Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 
-    // f64 → U256 wei dönüşümü
+    // f64 Ã¢â€ â€™ U256 wei dÃƒÂ¶nÃƒÂ¼Ã…Å¸ÃƒÂ¼mÃƒÂ¼
     let amount_in_wei = alloy::primitives::U256::from(
         crate::types::safe_f64_to_u128(amount_in_weth * 1e18)
     );
@@ -1176,12 +257,12 @@ pub fn compute_arbitrage_profit_with_bitmap(
         return f64::NEG_INFINITY;
     }
 
-    // Fee fraction → pips (1e6 bazında: 0.0005 → 500)
+    // Fee fraction Ã¢â€ â€™ pips (1e6 bazÃ„Â±nda: 0.0005 Ã¢â€ â€™ 500)
     let sell_fee_pips = exact::fee_fraction_to_pips(sell_fee_fraction);
     let buy_fee_pips = exact::fee_fraction_to_pips(buy_fee_fraction);
 
-    // 1. WETH'i pahalı havuzda sat → USDC al (exact U256 swap)
-    // v20.0: Her havuzun kendi token0_is_weth değeri kullanılır
+    // 1. WETH'i pahalÃ„Â± havuzda sat Ã¢â€ â€™ USDC al (exact U256 swap)
+    // v20.0: Her havuzun kendi token0_is_weth deÃ„Å¸eri kullanÃ„Â±lÃ„Â±r
     let sell_zero_for_one = sell_token0_is_weth;
     let sell_result = exact::compute_exact_swap(
         sell_pool.sqrt_price_x96,
@@ -1197,8 +278,8 @@ pub fn compute_arbitrage_profit_with_bitmap(
         return f64::NEG_INFINITY;
     }
 
-    // 2. USDC → WETH geri al (exact U256 swap)
-    // v20.0: buy pool'un kendi token sıralaması kullanılır
+    // 2. USDC Ã¢â€ â€™ WETH geri al (exact U256 swap)
+    // v20.0: buy pool'un kendi token sÃ„Â±ralamasÃ„Â± kullanÃ„Â±lÃ„Â±r
     let buy_zero_for_one = !buy_token0_is_weth;
     let buy_result = exact::compute_exact_swap(
         buy_pool.sqrt_price_x96,
@@ -1214,14 +295,14 @@ pub fn compute_arbitrage_profit_with_bitmap(
         return f64::NEG_INFINITY;
     }
 
-    // 3. Flash loan geri ödeme (U256 hassasiyetinde)
+    // 3. Flash loan geri ÃƒÂ¶deme (U256 hassasiyetinde)
     let flash_loan_fee_rate = flash_loan_fee_bps / 10_000.0;
     let flash_loan_fee_wei = alloy::primitives::U256::from(
         crate::types::safe_f64_to_u128(amount_in_weth * flash_loan_fee_rate * 1e18)
     );
     let repay_amount = amount_in_wei + flash_loan_fee_wei;
 
-    // 4. Net kâr → USD (optimizer için f64'e geri dönüş)
+    // 4. Net kÃƒÂ¢r Ã¢â€ â€™ USD (optimizer iÃƒÂ§in f64'e geri dÃƒÂ¶nÃƒÂ¼Ã…Å¸)
     if buy_result.amount_out > repay_amount {
         let profit_wei = buy_result.amount_out - repay_amount;
         let profit_weth = exact::u256_to_f64(profit_wei) / 1e18;
@@ -1233,9 +314,9 @@ pub fn compute_arbitrage_profit_with_bitmap(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Newton-Raphson Türev Hesaplayıcı
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// Newton-Raphson TÃƒÂ¼rev HesaplayÃ„Â±cÃ„Â±
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 fn profit_derivative(
     amount_in_weth: f64,
@@ -1313,9 +394,9 @@ fn profit_second_derivative(
     (fp_plus - fp_minus) / (2.0 * h)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Newton-Raphson Optimizasyonu — TickBitmap-Aware
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// Newton-Raphson Optimizasyonu Ã¢â‚¬â€ TickBitmap-Aware
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 /// Newton-Raphson sonucu
 #[derive(Debug, Clone)]
@@ -1326,36 +407,8 @@ pub struct OptimalAmountResult {
     pub iterations: u32,
 }
 
-/// Newton-Raphson ile optimal flash loan miktarını bul.
-/// TickBitmap verilirse multi-tick hassasiyetinde çalışır.
-#[allow(dead_code)]
-pub fn find_optimal_amount(
-    sell_pool: &PoolState,
-    sell_fee: f64,
-    buy_pool: &PoolState,
-    buy_fee: f64,
-    gas_cost_usd: f64,
-    flash_loan_fee_bps: f64,
-    eth_price_usd: f64,
-    max_amount_weth: f64,
-    sell_token0_is_weth: bool,
-    sell_tick_spacing: i32,
-    buy_tick_spacing: i32,
-    buy_token0_is_weth: bool,
-) -> OptimalAmountResult {
-    find_optimal_amount_with_bitmap(
-        sell_pool, sell_fee, buy_pool, buy_fee,
-        gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-        max_amount_weth, sell_token0_is_weth,
-        sell_tick_spacing, buy_tick_spacing,
-        None, None,
-        buy_token0_is_weth,
-    )
-}
-
-/// Newton-Raphson (TickBitmap destekli + Hard Liquidity Cap).
-/// v20.0: sell ve buy havuzları farklı token sıralamasına sahip olabilir.
-///        Her havuzun kendi token0_is_weth değeri bağımsız kullanılır.
+/// Newton-Raphson ile optimal flash loan miktarÃ„Â±nÃ„Â± bul.
+///        Her havuzun kendi token0_is_weth deÃ„Å¸eri baÃ„Å¸Ã„Â±msÃ„Â±z kullanÃ„Â±lÃ„Â±r.
 pub fn find_optimal_amount_with_bitmap(
     sell_pool: &PoolState,
     sell_fee: f64,
@@ -1376,10 +429,10 @@ pub fn find_optimal_amount_with_bitmap(
     let tolerance = 1e-8;
     let min_amount = 0.0001;
 
-    // ── Hard Liquidity Cap (v11.0 + v20.0 decimal normalization) ─
-    // v20.0: Her havuzun kendi token0_is_weth değeri kullanılır.
-    // Farklı token sıralamasına sahip havuzlardan (ör: WETH/USDC vs USDC/WETH)
-    // doğru yönde likidite kapasitesi hesaplanır.
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Hard Liquidity Cap (v11.0 + v20.0 decimal normalization) Ã¢â€â‚¬
+    // v20.0: Her havuzun kendi token0_is_weth deÃ„Å¸eri kullanÃ„Â±lÃ„Â±r.
+    // FarklÃ„Â± token sÃ„Â±ralamasÃ„Â±na sahip havuzlardan (ÃƒÂ¶r: WETH/USDC vs USDC/WETH)
+    // doÃ„Å¸ru yÃƒÂ¶nde likidite kapasitesi hesaplanÃ„Â±r.
     let hard_cap_sell = exact::hard_liquidity_cap_weth(
         sell_pool.sqrt_price_x96,
         sell_pool.liquidity,
@@ -1397,7 +450,7 @@ pub fn find_optimal_amount_with_bitmap(
         buy_tick_spacing,
     );
 
-    // Eski single-tick cap (geriye uyumluluk + karşılaştırma)
+    // Eski single-tick cap (geriye uyumluluk + karÃ…Å¸Ã„Â±laÃ…Å¸tÃ„Â±rma)
     let liq_cap_sell = exact::max_safe_swap_amount_u256(
         sell_pool.sqrt_price_x96, sell_pool.liquidity, sell_token0_is_weth,
         sell_pool.tick, sell_tick_spacing,
@@ -1408,10 +461,10 @@ pub fn find_optimal_amount_with_bitmap(
     );
 
     // v16.0: Hard cap ve single-tick cap'in minimumunu al.
-    // Eski: `* 2.0` çarpanı single-tick kapasiteyi yapay olarak şişiriyor
-    // ve NR'nin havuzda olmayan likiditeyi hedeflemesine yol açıyordu.
-    // Yeni: Her iki metriğin minimumunu al, %99.9 güvenlik marjı zaten
-    // hard_liquidity_cap_weth içinde uygulanıyor.
+    // Eski: `* 2.0` ÃƒÂ§arpanÃ„Â± single-tick kapasiteyi yapay olarak Ã…Å¸iÃ…Å¸iriyor
+    // ve NR'nin havuzda olmayan likiditeyi hedeflemesine yol aÃƒÂ§Ã„Â±yordu.
+    // Yeni: Her iki metriÃ„Å¸in minimumunu al, %99.9 gÃƒÂ¼venlik marjÃ„Â± zaten
+    // hard_liquidity_cap_weth iÃƒÂ§inde uygulanÃ„Â±yor.
     let sell_cap = hard_cap_sell.min(liq_cap_sell.max(0.001)).max(0.001);
     let buy_cap = hard_cap_buy.min(liq_cap_buy.max(0.001)).max(0.001);
     let effective_max = max_amount_weth
@@ -1419,7 +472,7 @@ pub fn find_optimal_amount_with_bitmap(
         .min(buy_cap);
 
     eprintln!(
-        "     \u{1f4ca} [Liquidity Cap] sell_hard={:.4} buy_hard={:.4} sell_single={:.4} buy_single={:.4} → effective_max={:.4} WETH",
+        "     \u{1f4ca} [Liquidity Cap] sell_hard={:.4} buy_hard={:.4} sell_single={:.4} buy_single={:.4} Ã¢â€ â€™ effective_max={:.4} WETH",
         hard_cap_sell, hard_cap_buy, liq_cap_sell, liq_cap_buy, effective_max,
     );
 
@@ -1432,10 +485,10 @@ pub fn find_optimal_amount_with_bitmap(
         };
     }
 
-    // ── AŞAMA 1: Hibrit Kaba Tarama ──────────────────────────────
-    // v22.0: 40 → 25 adım. Quadratic spacing küçük miktarlarda daha yoğun
-    // tarama yapar, büyük miktarlarda seyrekleşir. 25 adım yeterli çözünürlük
-    // sağlar, 15 iterasyon (~0.5ms) tasarruf eder.
+    // Ã¢â€â‚¬Ã¢â€â‚¬ AÃ…ÂAMA 1: Hibrit Kaba Tarama Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    // v22.0: 40 Ã¢â€ â€™ 25 adÃ„Â±m. Quadratic spacing kÃƒÂ¼ÃƒÂ§ÃƒÂ¼k miktarlarda daha yoÃ„Å¸un
+    // tarama yapar, bÃƒÂ¼yÃƒÂ¼k miktarlarda seyrekleÃ…Å¸ir. 25 adÃ„Â±m yeterli ÃƒÂ§ÃƒÂ¶zÃƒÂ¼nÃƒÂ¼rlÃƒÂ¼k
+    // saÃ„Å¸lar, 15 iterasyon (~0.5ms) tasarruf eder.
     let mut best_amount = 0.0;
     let mut best_profit = f64::NEG_INFINITY;
     let scan_steps = 25;
@@ -1468,7 +521,7 @@ pub fn find_optimal_amount_with_bitmap(
         };
     }
 
-    // ── AŞAMA 2: Newton-Raphson İnce Ayar ────────────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ AÃ…ÂAMA 2: Newton-Raphson Ã„Â°nce Ayar Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     let mut x = best_amount;
     let mut converged = false;
     let mut final_iterations: u32 = 0;
@@ -1514,10 +567,10 @@ pub fn find_optimal_amount_with_bitmap(
         x = x_new;
     }
 
-    // v16.0: NR yakınsama sonrası nihai güvenlik tavanı.
-    // NR iterasyonları sırasında clamp uygulanıyor ama yakınsama sonrası
-    // son bir kez daha effective_max ile sınırla — havuz kapasitesinin
-    // %99.9'unu (slippage payı) ASLA aşamaz.
+    // v16.0: NR yakÃ„Â±nsama sonrasÃ„Â± nihai gÃƒÂ¼venlik tavanÃ„Â±.
+    // NR iterasyonlarÃ„Â± sÃ„Â±rasÃ„Â±nda clamp uygulanÃ„Â±yor ama yakÃ„Â±nsama sonrasÃ„Â±
+    // son bir kez daha effective_max ile sÃ„Â±nÃ„Â±rla Ã¢â‚¬â€ havuz kapasitesinin
+    // %99.9'unu (slippage payÃ„Â±) ASLA aÃ…Å¸amaz.
     x = x.clamp(min_amount, effective_max);
 
     let final_profit = compute_arbitrage_profit_with_bitmap(
@@ -1536,9 +589,9 @@ pub fn find_optimal_amount_with_bitmap(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 // Testler
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 #[cfg(test)]
 mod tests {
@@ -1548,8 +601,8 @@ mod tests {
     use std::time::Instant;
     use proptest::prelude::*;
 
-    /// Test havuz durumu oluştur (Base Network gerçekçi değerler).
-    /// v7.0: sqrt_price_x96 artık doğru U256 olarak hesaplanır (exact::get_sqrt_ratio_at_tick).
+    /// Test havuz durumu oluÃ…Å¸tur (Base Network gerÃƒÂ§ekÃƒÂ§i deÃ„Å¸erler).
+    /// v7.0: sqrt_price_x96 artÃ„Â±k doÃ„Å¸ru U256 olarak hesaplanÃ„Â±r (exact::get_sqrt_ratio_at_tick).
     fn make_test_pool(eth_price: f64) -> PoolState {
         let price_ratio = eth_price * 1e-12;
         let sqrt_price = price_ratio.sqrt();
@@ -1557,7 +610,7 @@ mod tests {
         let tick = (price_ratio.ln() / LOG_TICK_BASE).floor() as i32;
         let liquidity: u128 = 50_000_000_000_000_000_000; // 5e19
 
-        // U256 sqrtPriceX96'yı tick'ten exact hesapla (deterministik)
+        // U256 sqrtPriceX96'yÃ„Â± tick'ten exact hesapla (deterministik)
         let sqrt_price_x96_u256 = crate::math::exact::get_sqrt_ratio_at_tick(tick);
 
         PoolState {
@@ -1576,18 +629,18 @@ mod tests {
         }
     }
 
-    /// Test TickBitmap oluştur (mevcut tick etrafında birkaç başlatılmış tick)
+    /// Test TickBitmap oluÃ…Å¸tur (mevcut tick etrafÃ„Â±nda birkaÃƒÂ§ baÃ…Å¸latÃ„Â±lmÃ„Â±Ã…Å¸ tick)
     fn make_test_bitmap(current_tick: i32, tick_spacing: i32) -> TickBitmapData {
         let mut ticks = HashMap::new();
 
-        // Mevcut tick'in etrafında 10 tick sınırı oluştur
+        // Mevcut tick'in etrafÃ„Â±nda 10 tick sÃ„Â±nÃ„Â±rÃ„Â± oluÃ…Å¸tur
         for i in -5..=5 {
             let tick = ((current_tick / tick_spacing) + i) * tick_spacing;
             let liq_net = if i < 0 {
-                // Sol tick'ler: yaklaştıkça likidite artar
+                // Sol tick'ler: yaklaÃ…Å¸tÃ„Â±kÃƒÂ§a likidite artar
                 5_000_000_000_000_000_000i128 // 5e18
             } else if i > 0 {
-                // Sağ tick'ler: uzaklaştıkça likidite azalır
+                // SaÃ„Å¸ tick'ler: uzaklaÃ…Å¸tÃ„Â±kÃƒÂ§a likidite azalÃ„Â±r
                 -5_000_000_000_000_000_000i128
             } else {
                 0i128
@@ -1610,19 +663,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tick_price_roundtrip() {
-        let tick = -200287i32;
-        let price = tick_to_price_ratio(tick);
-        let sqrt_x96 = tick_to_sqrt_price_x96(tick);
-        let recovered_tick = sqrt_price_x96_to_tick(sqrt_x96);
-        assert!(
-            (recovered_tick - tick).abs() <= 1,
-            "Tick roundtrip hatası: {} → {}", tick, recovered_tick
-        );
-        assert!(price > 1e-10 && price < 1e-7, "price_ratio={}", price);
-    }
-
-    #[test]
     fn test_compute_eth_price_token0_weth() {
         let pool = make_test_pool(2000.0);
         let price = compute_eth_price(
@@ -1630,7 +670,7 @@ mod tests {
         );
         assert!(
             (price - 2000.0).abs() < 5.0,
-            "ETH fiyatı ~2000 olmalı, hesaplanan: {:.2}", price
+            "ETH fiyatÃ„Â± ~2000 olmalÃ„Â±, hesaplanan: {:.2}", price
         );
     }
 
@@ -1647,180 +687,6 @@ mod tests {
                 "ETH={:.0}, hesaplanan={:.2}, hata={:.4}%", expected, price, err_pct
             );
         }
-    }
-
-    #[test]
-    fn test_swap_weth_to_usdc_token0_weth() {
-        let pool = make_test_pool(2000.0);
-        let usdc_out = swap_weth_to_usdc(
-            pool.sqrt_price_f64,
-            pool.liquidity_f64,
-            pool.tick,
-            1.0,    // 1 WETH
-            0.0005, // %0.05 fee
-            true,   // token0=WETH
-            10,     // tick_spacing
-        );
-        assert!(
-            usdc_out > 1900.0 && usdc_out < 2100.0,
-            "1 WETH ≈ 2000 USDC olmalı, hesaplanan: {:.2}", usdc_out
-        );
-    }
-
-    #[test]
-    fn test_swap_usdc_to_weth_token0_weth() {
-        let pool = make_test_pool(2000.0);
-        let weth_out = swap_usdc_to_weth(
-            pool.sqrt_price_f64,
-            pool.liquidity_f64,
-            pool.tick,
-            2000.0,  // 2000 USDC
-            0.0005,  // %0.05 fee
-            true,    // token0=WETH
-            10,      // tick_spacing
-        );
-        assert!(
-            weth_out > 0.90 && weth_out < 1.10,
-            "2000 USDC ≈ 1 WETH olmalı, hesaplanan: {:.6}", weth_out
-        );
-    }
-
-    #[test]
-    fn test_large_swap_dampening() {
-        let pool = make_test_pool(2000.0);
-        let small_out = swap_weth_to_usdc(
-            pool.sqrt_price_f64, pool.liquidity_f64, pool.tick,
-            1.0, 0.0005, true, 10,
-        );
-        let large_out = swap_weth_to_usdc(
-            pool.sqrt_price_f64, pool.liquidity_f64, pool.tick,
-            20.0, 0.0005, true, 10,
-        );
-        let small_price = small_out / 1.0;
-        let large_price = large_out / 20.0;
-        assert!(
-            large_price < small_price,
-            "Büyük swap'ta fiyat kötüleşmeli: small={:.2}, large={:.2}",
-            small_price, large_price
-        );
-    }
-
-    #[test]
-    fn test_max_safe_swap_amount() {
-        let pool = make_test_pool(2000.0);
-        let max_weth = max_safe_swap_amount(
-            pool.sqrt_price_f64, pool.liquidity_f64, true,
-            pool.tick, 10,
-        );
-        assert!(
-            max_weth > 1.0 && max_weth < 1_000_000.0,
-            "Güvenli maks swap makul olmalı: {:.4} WETH", max_weth
-        );
-    }
-
-    #[test]
-    fn test_newton_raphson_tick_aware() {
-        let buy_pool = make_test_pool(1980.0);
-        let sell_pool = make_test_pool(2020.0);
-
-        let result = find_optimal_amount(
-            &sell_pool, 0.0005,
-            &buy_pool, 0.01,
-            0.10,
-            5.0,
-            2000.0,
-            10.0,
-            true,
-            10,
-            10,
-            true,
-        );
-
-        println!(
-            "NR Sonuç: miktar={:.6} WETH, kâr={:.4}$, iter={}, yakın={}",
-            result.optimal_amount, result.expected_profit,
-            result.iterations, result.converged
-        );
-
-        assert!(result.expected_profit > 0.0, "Kâr pozitif olmalı");
-        assert!(result.optimal_amount > 0.0, "Optimal miktar > 0 olmalı");
-        assert!(result.optimal_amount <= 10.0, "Optimal miktar max'ı aşmamalı");
-    }
-
-    #[test]
-    fn test_multitick_swap_with_bitmap() {
-        let pool = make_test_pool(2000.0);
-        let bitmap = make_test_bitmap(pool.tick, 10);
-
-        // Multi-tick swap (TickBitmap ile)
-        let result = swap_weth_to_usdc_multitick(
-            pool.sqrt_price_f64,
-            pool.liquidity_f64,
-            pool.tick,
-            5.0,    // 5 WETH
-            0.0005, // %0.05 fee
-            true,   // token0=WETH
-            10,     // tick_spacing
-            Some(&bitmap),
-        );
-
-        println!(
-            "Multi-tick sonuç: çıktı={:.2} USDC, eff_price={:.2}, tick_geçişi={}, bitmap={}",
-            result.total_output, result.effective_price,
-            result.tick_crossings.len(), result.used_real_bitmap
-        );
-
-        // Bitmap kullanıldı mı?
-        assert!(result.used_real_bitmap, "Gerçek TickBitmap kullanılmalı");
-        // Çıktı makul mü?
-        assert!(
-            result.total_output > 9000.0 && result.total_output < 11000.0,
-            "5 WETH ≈ 10000 USDC civarı olmalı, hesaplanan: {:.2}",
-            result.total_output
-        );
-
-        // Dampening ile karşılaştır
-        let dampened_out = swap_weth_to_usdc(
-            pool.sqrt_price_f64, pool.liquidity_f64, pool.tick,
-            5.0, 0.0005, true, 10,
-        );
-        println!(
-            "Karşılaştırma: bitmap={:.2}, dampened={:.2}",
-            result.total_output, dampened_out
-        );
-    }
-
-    #[test]
-    fn test_multitick_swap_tick_crossings_detail() {
-        let pool = make_test_pool(2000.0);
-        let bitmap = make_test_bitmap(pool.tick, 10);
-
-        let result = swap_weth_to_usdc_multitick(
-            pool.sqrt_price_f64,
-            pool.liquidity_f64,
-            pool.tick,
-            10.0,   // 10 WETH (büyük miktar → daha fazla tick geçişi)
-            0.0005,
-            true,
-            10,
-            Some(&bitmap),
-        );
-
-        println!("10 WETH swap detayı:");
-        for (i, crossing) in result.tick_crossings.iter().enumerate() {
-            println!(
-                "  Tick #{}: tick={}, liq={:.2e}, input={:.4e}, output={:.4e}, liqNet={}",
-                i + 1, crossing.tick, crossing.liquidity,
-                crossing.input_consumed, crossing.output_produced,
-                crossing.liquidity_net
-            );
-        }
-        println!(
-            "  Toplam: {:.2} USDC, eff_price={:.2}, final_tick={}",
-            result.total_output, result.effective_price, result.final_tick
-        );
-
-        assert!(result.total_output > 0.0, "Çıktı pozitif olmalı");
     }
 
     #[test]
@@ -1846,56 +712,42 @@ mod tests {
         );
 
         println!(
-            "NR+Bitmap: miktar={:.6} WETH, kâr={:.4}$, iter={}, yakın={}",
+            "NR+Bitmap: miktar={:.6} WETH, kÃƒÂ¢r={:.4}$, iter={}, yakÃ„Â±n={}",
             result.optimal_amount, result.expected_profit,
             result.iterations, result.converged
         );
 
-        assert!(result.expected_profit > 0.0, "Kâr pozitif olmalı");
-        assert!(result.optimal_amount > 0.0, "Optimal miktar > 0 olmalı");
+        assert!(result.expected_profit > 0.0, "KÃƒÂ¢r pozitif olmalÃ„Â±");
+        assert!(result.optimal_amount > 0.0, "Optimal miktar > 0 olmalÃ„Â±");
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // PROPTEST — Çökme Dayanıklılık Testleri (Property-Based Stress Test)
+    // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    // PROPTEST Ã¢â‚¬â€ Ãƒâ€¡ÃƒÂ¶kme DayanÃ„Â±klÃ„Â±lÃ„Â±k Testleri (Property-Based Stress Test)
     //
-    // Amaç: math.rs motoruna milyonlarca rastgele ekstrem değer basarak
-    // hiçbir koşulda panic!, NaN veya Infinity üretmediğini kanıtlamak.
-    // ─────────────────────────────────────────────────────────────────────
+    // AmaÃƒÂ§: math.rs motoruna milyonlarca rastgele ekstrem deÃ„Å¸er basarak
+    // hiÃƒÂ§bir koÃ…Å¸ulda panic!, NaN veya Infinity ÃƒÂ¼retmediÃ„Å¸ini kanÃ„Â±tlamak.
+    // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-    /// Yardımcı: Rastgele bir sqrtPriceX96 f64 değeri üret.
-    /// Gerçek havuzlarda bu değer kabaca 1e18..1e30 arasındadır,
-    /// ancak stres testi için 0.0 ve f64::MAX dahil tüm aralığı kapsıyoruz.
+    /// YardÃ„Â±mcÃ„Â±: Rastgele bir sqrtPriceX96 f64 deÃ„Å¸eri ÃƒÂ¼ret.
+    /// GerÃƒÂ§ek havuzlarda bu deÃ„Å¸er kabaca 1e18..1e30 arasÃ„Â±ndadÃ„Â±r,
+    /// ancak stres testi iÃƒÂ§in 0.0 ve f64::MAX dahil tÃƒÂ¼m aralÃ„Â±Ã„Å¸Ã„Â± kapsÃ„Â±yoruz.
     fn arb_sqrt_price_x96() -> impl Strategy<Value = f64> {
         prop_oneof![
-            // %60 — Gerçekçi aralık (Base ağındaki tipik değerler)
+            // %60 Ã¢â‚¬â€ GerÃƒÂ§ekÃƒÂ§i aralÃ„Â±k (Base aÃ„Å¸Ã„Â±ndaki tipik deÃ„Å¸erler)
             6 => 1e18_f64..1e30_f64,
-            // %20 — Sıfır ve sıfıra yakın kenar durumlar
+            // %20 Ã¢â‚¬â€ SÃ„Â±fÃ„Â±r ve sÃ„Â±fÃ„Â±ra yakÃ„Â±n kenar durumlar
             2 => prop::num::f64::ANY.prop_map(|v| v.abs().min(1.0)),
-            // %10 — Aşırı büyük değerler (u256 aralığına yakın)
+            // %10 Ã¢â‚¬â€ AÃ…Å¸Ã„Â±rÃ„Â± bÃƒÂ¼yÃƒÂ¼k deÃ„Å¸erler (u256 aralÃ„Â±Ã„Å¸Ã„Â±na yakÃ„Â±n)
             1 => 1e30_f64..1e77_f64,
-            // %10 — Negatif ve özel değerler (fonksiyonlar bunları sıfıra düşürmeli)
+            // %10 Ã¢â‚¬â€ Negatif ve ÃƒÂ¶zel deÃ„Å¸erler (fonksiyonlar bunlarÃ„Â± sÃ„Â±fÃ„Â±ra dÃƒÂ¼Ã…Å¸ÃƒÂ¼rmeli)
             1 => prop::num::f64::ANY.prop_map(|v| if v.is_nan() { 0.0 } else { v }),
-        ]
-    }
-
-    /// Yardımcı: Rastgele bir likidite değeri üret.
-    fn arb_liquidity() -> impl Strategy<Value = f64> {
-        prop_oneof![
-            // %50 — Gerçekçi aralık
-            5 => 1e10_f64..1e25_f64,
-            // %20 — Sıfır ve sıfıra yakın
-            2 => 0.0_f64..1.0_f64,
-            // %20 — Çok büyük likidite
-            2 => 1e25_f64..1e38_f64,
-            // %10 — Tam sıfır
-            1 => Just(0.0_f64),
         ]
     }
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10_000))]
 
-        // ─── TEST 1: compute_eth_price asla NaN/Inf/panic üretmemeli ───
+        // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ TEST 1: compute_eth_price asla NaN/Inf/panic ÃƒÂ¼retmemeli Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
         #[test]
         fn stres_compute_eth_price(
             sqrt_price_x96 in arb_sqrt_price_x96(),
@@ -1910,91 +762,17 @@ mod tests {
                 token0_is_weth,
             );
             prop_assert!(!sonuc.is_nan(),
-                "compute_eth_price NaN döndü! sqrt_price_x96={}, tick={}, t0_weth={}",
+                "compute_eth_price NaN dÃƒÂ¶ndÃƒÂ¼! sqrt_price_x96={}, tick={}, t0_weth={}",
                 sqrt_price_x96, tick, token0_is_weth);
             prop_assert!(!sonuc.is_infinite(),
-                "compute_eth_price Infinity döndü! sqrt_price_x96={}, tick={}, t0_weth={}",
+                "compute_eth_price Infinity dÃƒÂ¶ndÃƒÂ¼! sqrt_price_x96={}, tick={}, t0_weth={}",
                 sqrt_price_x96, tick, token0_is_weth);
             prop_assert!(sonuc >= 0.0,
-                "compute_eth_price negatif döndü! sonuc={}, sqrt_price_x96={}, tick={}",
+                "compute_eth_price negatif dÃƒÂ¶ndÃƒÂ¼! sonuc={}, sqrt_price_x96={}, tick={}",
                 sonuc, sqrt_price_x96, tick);
         }
 
-        // ─── TEST 2: swap_weth_to_usdc_multitick asla çökmemeli ───────
-        #[test]
-        fn stres_swap_weth_to_usdc(
-            sqrt_price_x96 in arb_sqrt_price_x96(),
-            liquidity in arb_liquidity(),
-            tick in -887272..=887272i32,
-            amount_in in (0.0_f64..1e12_f64),
-            fee in (0.0_f64..0.1_f64),
-            token0_is_weth in proptest::bool::ANY,
-            tick_spacing in prop::sample::select(vec![1i32, 10, 60, 200]),
-        ) {
-            let sonuc = swap_weth_to_usdc_multitick(
-                sqrt_price_x96,
-                liquidity,
-                tick,
-                amount_in,
-                fee,
-                token0_is_weth,
-                tick_spacing,
-                None, // TickBitmap yok → dampening fallback
-            );
-            prop_assert!(!sonuc.total_output.is_nan(),
-                "swap_weth_to_usdc NaN! sqrtP={}, liq={}, tick={}, amt={}",
-                sqrt_price_x96, liquidity, tick, amount_in);
-            prop_assert!(!sonuc.total_output.is_infinite(),
-                "swap_weth_to_usdc Infinity! sqrtP={}, liq={}, tick={}, amt={}",
-                sqrt_price_x96, liquidity, tick, amount_in);
-            prop_assert!(!sonuc.effective_price.is_nan(),
-                "swap_weth_to_usdc eff_price NaN! sqrtP={}, liq={}, tick={}",
-                sqrt_price_x96, liquidity, tick);
-            prop_assert!(!sonuc.effective_price.is_infinite(),
-                "swap_weth_to_usdc eff_price Infinity! sqrtP={}, liq={}, tick={}",
-                sqrt_price_x96, liquidity, tick);
-            prop_assert!(sonuc.total_output >= 0.0,
-                "swap_weth_to_usdc negatif çıktı! output={}", sonuc.total_output);
-        }
-
-        // ─── TEST 3: swap_usdc_to_weth_multitick asla çökmemeli ───────
-        #[test]
-        fn stres_swap_usdc_to_weth(
-            sqrt_price_x96 in arb_sqrt_price_x96(),
-            liquidity in arb_liquidity(),
-            tick in -887272..=887272i32,
-            amount_in in (0.0_f64..1e12_f64),
-            fee in (0.0_f64..0.1_f64),
-            token0_is_weth in proptest::bool::ANY,
-            tick_spacing in prop::sample::select(vec![1i32, 10, 60, 200]),
-        ) {
-            let sonuc = swap_usdc_to_weth_multitick(
-                sqrt_price_x96,
-                liquidity,
-                tick,
-                amount_in,
-                fee,
-                token0_is_weth,
-                tick_spacing,
-                None,
-            );
-            prop_assert!(!sonuc.total_output.is_nan(),
-                "swap_usdc_to_weth NaN! sqrtP={}, liq={}, tick={}, amt={}",
-                sqrt_price_x96, liquidity, tick, amount_in);
-            prop_assert!(!sonuc.total_output.is_infinite(),
-                "swap_usdc_to_weth Infinity! sqrtP={}, liq={}, tick={}, amt={}",
-                sqrt_price_x96, liquidity, tick, amount_in);
-            prop_assert!(!sonuc.effective_price.is_nan(),
-                "swap_usdc_to_weth eff_price NaN! sqrtP={}, liq={}, tick={}",
-                sqrt_price_x96, liquidity, tick);
-            prop_assert!(!sonuc.effective_price.is_infinite(),
-                "swap_usdc_to_weth eff_price Infinity! sqrtP={}, liq={}, tick={}",
-                sqrt_price_x96, liquidity, tick);
-            prop_assert!(sonuc.total_output >= 0.0,
-                "swap_usdc_to_weth negatif çıktı! output={}", sonuc.total_output);
-        }
-
-        // ─── TEST 4: tick_to_price_ratio aşırı tick'lerde çökmemeli ───
+        // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ TEST 4: tick_to_price_ratio aÃ…Å¸Ã„Â±rÃ„Â± tick'lerde ÃƒÂ§ÃƒÂ¶kmemeli Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
         #[test]
         fn stres_tick_to_price_ratio(
             tick in -887272..=887272i32,
@@ -2002,221 +780,92 @@ mod tests {
             let sonuc = tick_to_price_ratio(tick);
             prop_assert!(!sonuc.is_nan(),
                 "tick_to_price_ratio NaN! tick={}", tick);
-            // Aşırı tick'lerde Infinity olabilir ama panic olmamalı
+            // AÃ…Å¸Ã„Â±rÃ„Â± tick'lerde Infinity olabilir ama panic olmamalÃ„Â±
             prop_assert!(sonuc >= 0.0,
                 "tick_to_price_ratio negatif! tick={}, sonuc={}", tick, sonuc);
         }
 
-        // ─── TEST 5: sqrt_price_x96_to_tick her değerde güvenli olmalı ─
-        #[test]
-        fn stres_sqrt_price_x96_to_tick(
-            sqrt_price_x96 in arb_sqrt_price_x96(),
-        ) {
-            let sonuc = sqrt_price_x96_to_tick(sqrt_price_x96);
-            // Geçerli Uniswap V3 tick aralığı
-            prop_assert!(sonuc >= -887272 && sonuc <= 887272,
-                "sqrt_price_x96_to_tick aralık dışı! sqrt_price={}, tick={}",
-                sqrt_price_x96, sonuc);
-        }
-
-        // ─── TEST 6: max_safe_swap_amount asla NaN/Inf/panic üretmemeli ─
-        #[test]
-        fn stres_max_safe_swap_amount(
-            sqrt_price_x96 in arb_sqrt_price_x96(),
-            liquidity in arb_liquidity(),
-            token0_is_weth in proptest::bool::ANY,
-        ) {
-            // Derive a reasonable tick from sqrtPrice for test
-            let tick = sqrt_price_x96_to_tick(sqrt_price_x96);
-            let sonuc = max_safe_swap_amount(
-                sqrt_price_x96,
-                liquidity,
-                token0_is_weth,
-                tick,
-                10,
-            );
-            prop_assert!(!sonuc.is_nan(),
-                "max_safe_swap_amount NaN! sqrtP={}, liq={}", sqrt_price_x96, liquidity);
-            prop_assert!(!sonuc.is_infinite(),
-                "max_safe_swap_amount Infinity! sqrtP={}, liq={}", sqrt_price_x96, liquidity);
-            prop_assert!(sonuc >= 0.0,
-                "max_safe_swap_amount negatif! sonuc={}", sonuc);
-        }
-
-        // ─── TEST 7: Bitmap'li multi-tick swap çökmemeli ──────────────
-        #[test]
-        fn stres_multitick_with_bitmap(
-            tick in -887272..=887272i32,
-            liquidity in arb_liquidity(),
-            amount_in in (0.001_f64..100.0_f64),
-            token0_is_weth in proptest::bool::ANY,
-            tick_spacing in prop::sample::select(vec![1i32, 10, 60, 200]),
-        ) {
-            // Gerçekçi bir sqrtPriceX96 üret (tick'ten)
-            let sqrt_price_x96 = tick_to_sqrt_price_x96(tick);
-            if sqrt_price_x96 <= 0.0 || sqrt_price_x96.is_infinite() || sqrt_price_x96.is_nan() {
-                return Ok(()); // Geçersiz tick, atla
-            }
-
-            // Rastgele tick etrafında küçük bir bitmap oluştur
-            let mut ticks_map = HashMap::new();
-            let ts = tick_spacing.max(1);
-            for i in -3..=3i32 {
-                let t = ((tick / ts) + i) * ts;
-                ticks_map.insert(t, TickInfo {
-                    liquidity_gross: 1_000_000_000_000_000_000u128,
-                    liquidity_net: if i < 0 { 500_000_000_000_000_000i128 }
-                                   else if i > 0 { -500_000_000_000_000_000i128 }
-                                   else { 0i128 },
-                    initialized: true,
-                });
-            }
-            let bitmap = TickBitmapData {
-                words: HashMap::new(),
-                ticks: ticks_map,
-                snapshot_block: 0,
-                sync_duration_us: 0,
-                scan_range: 500,
-            };
-
-            let sonuc = swap_weth_to_usdc_multitick(
-                sqrt_price_x96,
-                liquidity,
-                tick,
-                amount_in,
-                0.0005,
-                token0_is_weth,
-                tick_spacing,
-                Some(&bitmap),
-            );
-            prop_assert!(!sonuc.total_output.is_nan(),
-                "bitmap swap NaN! tick={}, liq={}, amt={}", tick, liquidity, amount_in);
-            prop_assert!(!sonuc.total_output.is_infinite(),
-                "bitmap swap Infinity! tick={}, liq={}, amt={}", tick, liquidity, amount_in);
-            prop_assert!(sonuc.total_output >= 0.0,
-                "bitmap swap negatif! output={}", sonuc.total_output);
-        }
-
-        // ─── TEST 8: Sıfır/ekstrem likidite ile dampening swap güvenli ─
-        #[test]
-        fn stres_dampening_sifir_likidite(
-            tick in -887272..=887272i32,
-            amount_in in (0.0_f64..1e6_f64),
-            token0_is_weth in proptest::bool::ANY,
-        ) {
-            // Sıfır likidite — kesinlikle çökmemeli, 0.0 dönmeli
-            let sonuc = swap_weth_to_usdc_multitick(
-                1e24_f64, // Makul bir sqrtPriceX96
-                0.0,      // SIFIR likidite
-                tick,
-                amount_in,
-                0.0005,
-                token0_is_weth,
-                10,
-                None,
-            );
-            prop_assert!(!sonuc.total_output.is_nan(),
-                "Sıfır liq NaN! tick={}, amt={}", tick, amount_in);
-            prop_assert!(sonuc.total_output == 0.0,
-                "Sıfır likiditede çıktı 0 olmalı! output={}", sonuc.total_output);
-
-            let sonuc2 = swap_usdc_to_weth_multitick(
-                1e24_f64,
-                0.0,
-                tick,
-                amount_in,
-                0.0005,
-                token0_is_weth,
-                10,
-                None,
-            );
-            prop_assert!(!sonuc2.total_output.is_nan(),
-                "Sıfır liq (usdc→weth) NaN! tick={}", tick);
-            prop_assert!(sonuc2.total_output == 0.0,
-                "Sıfır likiditede çıktı 0 olmalı! output={}", sonuc2.total_output);
-        }
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  BÖLÜM: U256 EXACT-MATH — Wei Seviyesinde Hassas Swap Matematiği
-// ═══════════════════════════════════════════════════════════════════════════════
+// Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
+//  BÃƒâ€“LÃƒÅ“M: U256 EXACT-MATH Ã¢â‚¬â€ Wei Seviyesinde Hassas Swap MatematiÃ„Å¸i
+// Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 //
-//  Neden? EVM 256-bit tam sayılarla çalışır. f64'ün 52-bit mantissa'sı
-//  18-haneli decimal hesaplamalarda yuvarlama hataları yaratır.
-//  Bu modül, Uniswap V3'ün Solidity matematik kütüphanesini (TickMath,
+//  Neden? EVM 256-bit tam sayÃ„Â±larla ÃƒÂ§alÃ„Â±Ã…Å¸Ã„Â±r. f64'ÃƒÂ¼n 52-bit mantissa'sÃ„Â±
+//  18-haneli decimal hesaplamalarda yuvarlama hatalarÃ„Â± yaratÃ„Â±r.
+//  Bu modÃƒÂ¼l, Uniswap V3'ÃƒÂ¼n Solidity matematik kÃƒÂ¼tÃƒÂ¼phanesini (TickMath,
 //  SqrtPriceMath, SwapMath) birebir Rust U256'ya port eder.
 //
-//  Kullanım: Botun off-chain hesapladığı swap çıktısının, on-chain
-//  gerçekleşecek sonuçla *wei* bazında eşleşmesi.
+//  KullanÃ„Â±m: Botun off-chain hesapladÃ„Â±Ã„Å¸Ã„Â± swap ÃƒÂ§Ã„Â±ktÃ„Â±sÃ„Â±nÃ„Â±n, on-chain
+//  gerÃƒÂ§ekleÃ…Å¸ecek sonuÃƒÂ§la *wei* bazÃ„Â±nda eÃ…Å¸leÃ…Å¸mesi.
 //
 //  Kaynaklar:
 //    - UniV3 TickMath.sol: getSqrtRatioAtTick, getTickAtSqrtRatio
 //    - UniV3 SqrtPriceMath.sol: getNextSqrtPriceFromInput, getAmount0/1Delta
 //    - UniV3 SwapMath.sol: computeSwapStep
-// ═══════════════════════════════════════════════════════════════════════════════
+// Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 
-#[allow(dead_code)]
 pub mod exact {
     use alloy::primitives::U256;
     use crate::types::TickBitmapData;
 
-    // ── Sabitler ─────────────────────────────────────────────────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Sabitler Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-    /// Q96 = 2^96 (sqrtPriceX96 çözümleme sabiti)
+    /// Q96 = 2^96 (sqrtPriceX96 ÃƒÂ§ÃƒÂ¶zÃƒÂ¼mleme sabiti)
     const Q96: U256 = U256::from_limbs([0, 0x1_0000_0000, 0, 0]); // 2^96
 
-    /// MAX_SQRT_RATIO (UniV3 TickMath sınırı — 1461446703485210103287273052203988822378723970342)
+    /// MAX_SQRT_RATIO (UniV3 TickMath sÃ„Â±nÃ„Â±rÃ„Â± Ã¢â‚¬â€ 1461446703485210103287273052203988822378723970342)
     const MAX_SQRT_RATIO: U256 = U256::from_limbs([
         0x5D951D5263988D26, 0xEFD1FC6A50648849, 0x00000000FFFD8963, 0
     ]);
 
-    /// MIN_SQRT_RATIO (UniV3 TickMath sınırı)
+    /// MIN_SQRT_RATIO (UniV3 TickMath sÃ„Â±nÃ„Â±rÃ„Â±)
     const MIN_SQRT_RATIO: U256 = U256::from_limbs([4295128739, 0, 0, 0]);
 
-    // ── FullMath — U256 Tam Çarpma / Bölme ──────────────────────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ FullMath Ã¢â‚¬â€ U256 Tam Ãƒâ€¡arpma / BÃƒÂ¶lme Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-    /// a * b / denominator (taşma güvenli, floor rounding)
+    /// a * b / denominator (taÃ…Å¸ma gÃƒÂ¼venli, floor rounding)
     /// Uniswap V3 FullMath.mulDiv port'u.
     ///
-    /// v22.1 DÜZELTME: Rekürsif ayrıştırma algoritması.
-    /// Eski: İç taşmada saturating_mul + U256::ZERO fallback → sessiz hata.
-    /// Yeni: mul_div(big%c, small, c) rekürsifi — big%c < c garantisi ile
-    ///       her adımda operand kesinlikle küçülür → sonlanma garantili.
+    /// v22.1 DÃƒÅ“ZELTME: RekÃƒÂ¼rsif ayrÃ„Â±Ã…Å¸tÃ„Â±rma algoritmasÃ„Â±.
+    /// Eski: Ã„Â°ÃƒÂ§ taÃ…Å¸mada saturating_mul + U256::ZERO fallback Ã¢â€ â€™ sessiz hata.
+    /// Yeni: mul_div(big%c, small, c) rekÃƒÂ¼rsifi Ã¢â‚¬â€ big%c < c garantisi ile
+    ///       her adÃ„Â±mda operand kesinlikle kÃƒÂ¼ÃƒÂ§ÃƒÂ¼lÃƒÂ¼r Ã¢â€ â€™ sonlanma garantili.
     pub fn mul_div(a: U256, b: U256, denominator: U256) -> U256 {
         if denominator.is_zero() || a.is_zero() || b.is_zero() {
             return U256::ZERO;
         }
-        // Doğrudan çarpma dene
+        // DoÃ„Å¸rudan ÃƒÂ§arpma dene
         if let Some(product) = a.checked_mul(b) {
             return product / denominator;
         }
-        // Taşma: rekürsif ayrıştırma ile hesapla
+        // TaÃ…Å¸ma: rekÃƒÂ¼rsif ayrÃ„Â±Ã…Å¸tÃ„Â±rma ile hesapla
         // a*b/c = (big/c)*small + mul_div(big%c, small, c)
-        // Her rekürsif çağrıda ilk argüman = big%c < c → kesinlikle küçülür
+        // Her rekÃƒÂ¼rsif ÃƒÂ§aÃ„Å¸rÃ„Â±da ilk argÃƒÂ¼man = big%c < c Ã¢â€ â€™ kesinlikle kÃƒÂ¼ÃƒÂ§ÃƒÂ¼lÃƒÂ¼r
         // Sonlanma garantili (logaritmik derinlik)
         let (big, small) = if a >= b { (a, b) } else { (b, a) };
         let q = big / denominator;
         let r = big % denominator;
-        // term1 = (big/c) * small — saturating: taşma durumunda sonuç U256'ya sığmıyordur
+        // term1 = (big/c) * small Ã¢â‚¬â€ saturating: taÃ…Å¸ma durumunda sonuÃƒÂ§ U256'ya sÃ„Â±Ã„Å¸mÃ„Â±yordur
         let term1 = q.saturating_mul(small);
-        // term2 = mul_div(big%c, small, c) — rekürsif, big%c < c → sonlanır
+        // term2 = mul_div(big%c, small, c) Ã¢â‚¬â€ rekÃƒÂ¼rsif, big%c < c Ã¢â€ â€™ sonlanÃ„Â±r
         let term2 = mul_div(r, small, denominator);
         term1.saturating_add(term2)
     }
 
-    /// a * b / denominator (taşma güvenli, ceil rounding)
+    /// a * b / denominator (taÃ…Å¸ma gÃƒÂ¼venli, ceil rounding)
     ///
-    /// v22.1 DÜZELTME: mul_mod ile taşma-güvenli kalan kontrolü.
-    /// Eski: Taşma durumunda koşulsuz +1 ekliyordu → gereksiz yuvarlamalar.
-    /// Yeni: a.mul_mod(b, denominator) ile 512-bit ara sonuç üzerinden
-    ///       kesin kalan hesabı → sadece gerçek kalan varsa +1.
+    /// v22.1 DÃƒÅ“ZELTME: mul_mod ile taÃ…Å¸ma-gÃƒÂ¼venli kalan kontrolÃƒÂ¼.
+    /// Eski: TaÃ…Å¸ma durumunda koÃ…Å¸ulsuz +1 ekliyordu Ã¢â€ â€™ gereksiz yuvarlamalar.
+    /// Yeni: a.mul_mod(b, denominator) ile 512-bit ara sonuÃƒÂ§ ÃƒÂ¼zerinden
+    ///       kesin kalan hesabÃ„Â± Ã¢â€ â€™ sadece gerÃƒÂ§ek kalan varsa +1.
     pub fn mul_div_rounding_up(a: U256, b: U256, denominator: U256) -> U256 {
         let result = mul_div(a, b, denominator);
         if denominator.is_zero() {
             return result;
         }
-        // mul_mod: (a * b) % denominator — 512-bit ara sonuç, taşma güvenli
+        // mul_mod: (a * b) % denominator Ã¢â‚¬â€ 512-bit ara sonuÃƒÂ§, taÃ…Å¸ma gÃƒÂ¼venli
         let remainder = a.mul_mod(b, denominator);
         if remainder > U256::ZERO {
             result + U256::from(1)
@@ -2225,7 +874,7 @@ pub mod exact {
         }
     }
 
-    /// (a + b - 1) / b tarzı ceil division
+    /// (a + b - 1) / b tarzÃ„Â± ceil division
     #[inline]
     pub fn div_rounding_up(a: U256, b: U256) -> U256 {
         if b.is_zero() { return U256::ZERO; }
@@ -2233,23 +882,23 @@ pub mod exact {
         if a % b > U256::ZERO { d + U256::from(1) } else { d }
     }
 
-    // ── TickMath — Tick ↔ SqrtPriceX96 Birebir Dönüşüm ─────────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ TickMath Ã¢â‚¬â€ Tick Ã¢â€ â€ SqrtPriceX96 Birebir DÃƒÂ¶nÃƒÂ¼Ã…Å¸ÃƒÂ¼m Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-    /// Tick'ten sqrtPriceX96 hesapla — UniV3 TickMath.getSqrtRatioAtTick birebir port'u.
-    /// İnput: -887272 ≤ tick ≤ 887272
-    /// Çıktı: uint160 sqrtPriceX96 (U256 olarak)
+    /// Tick'ten sqrtPriceX96 hesapla Ã¢â‚¬â€ UniV3 TickMath.getSqrtRatioAtTick birebir port'u.
+    /// Ã„Â°nput: -887272 Ã¢â€°Â¤ tick Ã¢â€°Â¤ 887272
+    /// Ãƒâ€¡Ã„Â±ktÃ„Â±: uint160 sqrtPriceX96 (U256 olarak)
     pub fn get_sqrt_ratio_at_tick(tick: i32) -> U256 {
         let abs_tick = tick.unsigned_abs();
-        assert!(abs_tick <= 887272, "tick aralık dışı");
+        assert!(abs_tick <= 887272, "tick aralÃ„Â±k dÃ„Â±Ã…Å¸Ã„Â±");
 
-        // Başlangıç ratio (Q128 formatında)
+        // BaÃ…Å¸langÃ„Â±ÃƒÂ§ ratio (Q128 formatÃ„Â±nda)
         let mut ratio: U256 = if abs_tick & 0x1 != 0 {
             U256::from_be_slice(&hex_literal::hex!("fffcb933bd6fad37aa2d162d1a594001"))
         } else {
             U256::from(1u64) << 128
         };
 
-        // Her bit için çarpma tablosu — UniV3 TickMath magic numbers
+        // Her bit iÃƒÂ§in ÃƒÂ§arpma tablosu Ã¢â‚¬â€ UniV3 TickMath magic numbers
         macro_rules! apply_tick_bit {
             ($bit:expr, $hex:expr) => {
                 if abs_tick & $bit != 0 {
@@ -2278,12 +927,12 @@ pub mod exact {
         apply_tick_bit!(0x40000, "00002216e584f5fa1ea926041bedfe98");
         apply_tick_bit!(0x80000, "048a170391f7dc42444e8fa2");
 
-        // Pozitif tick → ters çevir
+        // Pozitif tick Ã¢â€ â€™ ters ÃƒÂ§evir
         if tick > 0 {
             ratio = U256::MAX / ratio;
         }
 
-        // Q128 → Q96 dönüşümü + yukarı yuvarlama
+        // Q128 Ã¢â€ â€™ Q96 dÃƒÂ¶nÃƒÂ¼Ã…Å¸ÃƒÂ¼mÃƒÂ¼ + yukarÃ„Â± yuvarlama
         let remainder = ratio % (U256::from(1u64) << 32);
         let shifted = ratio >> 32;
         if remainder > U256::ZERO {
@@ -2293,9 +942,9 @@ pub mod exact {
         }
     }
 
-    // ── SqrtPriceMath — Fiyat Geçişi Hesaplamaları ─────────────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ SqrtPriceMath Ã¢â‚¬â€ Fiyat GeÃƒÂ§iÃ…Å¸i HesaplamalarÃ„Â± Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-    /// token0 girdisi ile yeni sqrtPrice hesapla (zeroForOne=true, fiyat DÜŞER)
+    /// token0 girdisi ile yeni sqrtPrice hesapla (zeroForOne=true, fiyat DÃƒÅ“Ã…ÂER)
     /// Port: SqrtPriceMath.getNextSqrtPriceFromAmount0RoundingUp
     pub fn get_next_sqrt_price_from_amount0(
         sqrt_price_x96: U256,
@@ -2315,7 +964,7 @@ pub mod exact {
             if denominator >= numerator1 {
                 return mul_div_rounding_up(numerator1, sqrt_price_x96, denominator);
             }
-            // Taşma fallback
+            // TaÃ…Å¸ma fallback
             div_rounding_up(numerator1, numerator1 / sqrt_price_x96 + amount)
         } else {
             // sqrtPriceNext = numerator1 * sqrtP / (numerator1 - amount * sqrtP)
@@ -2348,7 +997,7 @@ pub mod exact {
         }
     }
 
-    /// Girdi miktarından yeni sqrtPrice hesapla (yön'e göre dispatch)
+    /// Girdi miktarÃ„Â±ndan yeni sqrtPrice hesapla (yÃƒÂ¶n'e gÃƒÂ¶re dispatch)
     pub fn get_next_sqrt_price_from_input(
         sqrt_price_x96: U256,
         liquidity: u128,
@@ -2362,7 +1011,7 @@ pub mod exact {
         }
     }
 
-    /// İki sqrtPrice arasındaki token0 farkı (Δx)
+    /// Ã„Â°ki sqrtPrice arasÃ„Â±ndaki token0 farkÃ„Â± (Ãâ€x)
     /// Port: SqrtPriceMath.getAmount0Delta (unsigned)
     pub fn get_amount0_delta(
         sqrt_ratio_a: U256,
@@ -2390,7 +1039,7 @@ pub mod exact {
         }
     }
 
-    /// İki sqrtPrice arasındaki token1 farkı (Δy)
+    /// Ã„Â°ki sqrtPrice arasÃ„Â±ndaki token1 farkÃ„Â± (Ãâ€y)
     /// Port: SqrtPriceMath.getAmount1Delta (unsigned)
     pub fn get_amount1_delta(
         sqrt_ratio_a: U256,
@@ -2411,46 +1060,46 @@ pub mod exact {
         }
     }
 
-    // ── SwapMath — Tek Adım Swap Hesaplama ──────────────────────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ SwapMath Ã¢â‚¬â€ Tek AdÃ„Â±m Swap Hesaplama Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-    /// Tek bir fiyat aralığındaki swap adımı sonucu
+    /// Tek bir fiyat aralÃ„Â±Ã„Å¸Ã„Â±ndaki swap adÃ„Â±mÃ„Â± sonucu
     #[derive(Debug, Clone)]
     pub struct ExactSwapStep {
-        /// Swap sonrası sqrtPriceX96
+        /// Swap sonrasÃ„Â± sqrtPriceX96
         pub sqrt_ratio_next: U256,
-        /// Tüketilen girdi miktarı
+        /// TÃƒÂ¼ketilen girdi miktarÃ„Â±
         pub amount_in: U256,
-        /// Üretilen çıktı miktarı
+        /// ÃƒÅ“retilen ÃƒÂ§Ã„Â±ktÃ„Â± miktarÃ„Â±
         pub amount_out: U256,
-        /// Alınan fee miktarı
+        /// AlÃ„Â±nan fee miktarÃ„Â±
         pub fee_amount: U256,
     }
 
-    /// Tek fiyat aralığında swap adımı hesapla
+    /// Tek fiyat aralÃ„Â±Ã„Å¸Ã„Â±nda swap adÃ„Â±mÃ„Â± hesapla
     /// Port: SwapMath.computeSwapStep
     pub fn compute_swap_step(
         sqrt_ratio_current: U256,
         sqrt_ratio_target: U256,
         liquidity: u128,
         amount_remaining: U256,
-        fee_pips: u32, // 1e6 bazında (ör: 500 = %0.05)
+        fee_pips: u32, // 1e6 bazÃ„Â±nda (ÃƒÂ¶r: 500 = %0.05)
     ) -> ExactSwapStep {
         let zero_for_one = sqrt_ratio_current >= sqrt_ratio_target;
         let one_minus_fee = U256::from(1_000_000u64 - fee_pips as u64);
 
-        // Fee düşülmüş efektif girdi
+        // Fee dÃƒÂ¼Ã…Å¸ÃƒÂ¼lmÃƒÂ¼Ã…Å¸ efektif girdi
         let amount_remaining_less_fee = mul_div(
             amount_remaining, one_minus_fee, U256::from(1_000_000u64),
         );
 
-        // Bu aralıktaki maksimum girdi
+        // Bu aralÃ„Â±ktaki maksimum girdi
         let amount_in_max = if zero_for_one {
             get_amount0_delta(sqrt_ratio_target, sqrt_ratio_current, liquidity, true)
         } else {
             get_amount1_delta(sqrt_ratio_current, sqrt_ratio_target, liquidity, true)
         };
 
-        // Hedef fiyata ulaşabilir miyiz?
+        // Hedef fiyata ulaÃ…Å¸abilir miyiz?
         let sqrt_ratio_next = if amount_remaining_less_fee >= amount_in_max {
             sqrt_ratio_target
         } else {
@@ -2461,7 +1110,7 @@ pub mod exact {
 
         let max_reached = sqrt_ratio_next == sqrt_ratio_target;
 
-        // Gerçek girdi ve çıktı miktarlarını hesapla
+        // GerÃƒÂ§ek girdi ve ÃƒÂ§Ã„Â±ktÃ„Â± miktarlarÃ„Â±nÃ„Â± hesapla
         let amount_in = if max_reached {
             amount_in_max
         } else if zero_for_one {
@@ -2491,40 +1140,41 @@ pub mod exact {
         }
     }
 
-    // ── Tam Multi-Tick Swap Simülasyonu (Exact) ─────────────────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Tam Multi-Tick Swap SimÃƒÂ¼lasyonu (Exact) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     /// Exact multi-tick swap sonucu (U256 hassasiyetinde)
     #[derive(Debug, Clone)]
+#[allow(dead_code)]
     pub struct ExactSwapResult {
-        /// Toplam çıktı miktarı (raw wei)
+        /// Toplam ÃƒÂ§Ã„Â±ktÃ„Â± miktarÃ„Â± (raw wei)
         pub amount_out: U256,
-        /// Toplam tüketilen girdi (raw wei, fee dahil)
+        /// Toplam tÃƒÂ¼ketilen girdi (raw wei, fee dahil)
         pub amount_in_consumed: U256,
         /// Son sqrtPriceX96
         pub final_sqrt_price_x96: U256,
         /// Son likidite
         pub final_liquidity: u128,
-        /// Geçilen tick sayısı
+        /// GeÃƒÂ§ilen tick sayÃ„Â±sÃ„Â±
         pub tick_crossings: u32,
     }
 
-    /// Exact V3/CL swap simülasyonu — U256 hassasiyetinde, wei-bazında eşleşme.
+    /// Exact V3/CL swap simÃƒÂ¼lasyonu Ã¢â‚¬â€ U256 hassasiyetinde, wei-bazÃ„Â±nda eÃ…Å¸leÃ…Å¸me.
     ///
-    /// Bu fonksiyon Uniswap V3'ün on-chain `swap()` fonksiyonunun
-    /// matematiğini birebir taklit eder:
-    ///   1. Mevcut fiyat aralığında ne kadar swap yapılabilir? (computeSwapStep)
-    ///   2. Girdi tükenmezse sonraki tick'e ilerle
-    ///   3. O tick'te liquidityNet ile aktif likiditeyi güncelle
+    /// Bu fonksiyon Uniswap V3'ÃƒÂ¼n on-chain `swap()` fonksiyonunun
+    /// matematiÃ„Å¸ini birebir taklit eder:
+    ///   1. Mevcut fiyat aralÃ„Â±Ã„Å¸Ã„Â±nda ne kadar swap yapÃ„Â±labilir? (computeSwapStep)
+    ///   2. Girdi tÃƒÂ¼kenmezse sonraki tick'e ilerle
+    ///   3. O tick'te liquidityNet ile aktif likiditeyi gÃƒÂ¼ncelle
     ///   4. Tekrarla
     ///
     /// # Parametreler
     /// - `sqrt_price_x96`: Mevcut sqrtPriceX96 (U256)
     /// - `liquidity`: Mevcut aktif likidite (u128)
-    /// - `amount_in`: Girdi miktarı (wei, fee dahil ham miktar)
-    /// - `zero_for_one`: Swap yönü (true=token0→token1, false=token1→token0)
-    /// - `fee_pips`: Fee (1e6 bazında, ör: 500 = %0.05)
-    /// - `tick_spacing`: Tick aralığı
-    /// - `bitmap`: TickBitmap verisi (başlatılmış tick'ler + liquidityNet)
+    /// - `amount_in`: Girdi miktarÃ„Â± (wei, fee dahil ham miktar)
+    /// - `zero_for_one`: Swap yÃƒÂ¶nÃƒÂ¼ (true=token0Ã¢â€ â€™token1, false=token1Ã¢â€ â€™token0)
+    /// - `fee_pips`: Fee (1e6 bazÃ„Â±nda, ÃƒÂ¶r: 500 = %0.05)
+    /// - `tick_spacing`: Tick aralÃ„Â±Ã„Å¸Ã„Â±
+    /// - `bitmap`: TickBitmap verisi (baÃ…Å¸latÃ„Â±lmÃ„Â±Ã…Å¸ tick'ler + liquidityNet)
     pub fn compute_exact_swap(
         sqrt_price_x96: U256,
         liquidity: u128,
@@ -2553,7 +1203,7 @@ pub mod exact {
         let mut crossings: u32 = 0;
         let max_crossings: u32 = 50;
 
-        // Sıralı tick'leri al
+        // SÃ„Â±ralÃ„Â± tick'leri al
         let ordered_ticks = if let Some(bm) = bitmap {
             let mut ticks: Vec<(i32, i128)> = bm.ticks.iter()
                 .filter(|(_, info)| info.initialized)
@@ -2572,16 +1222,16 @@ pub mod exact {
             Vec::new()
         };
 
-        // Ana swap döngüsü — tick'ler boyunca ilerle
+        // Ana swap dÃƒÂ¶ngÃƒÂ¼sÃƒÂ¼ Ã¢â‚¬â€ tick'ler boyunca ilerle
         for &(next_tick, liquidity_net) in &ordered_ticks {
             if amount_remaining.is_zero() || crossings >= max_crossings {
                 break;
             }
 
-            // Hedef tick sınırının sqrtPrice'ını hesapla
+            // Hedef tick sÃ„Â±nÃ„Â±rÃ„Â±nÃ„Â±n sqrtPrice'Ã„Â±nÃ„Â± hesapla
             let sqrt_price_target = get_sqrt_ratio_at_tick(next_tick);
 
-            // Bu aralıkta swap yap
+            // Bu aralÃ„Â±kta swap yap
             let step = compute_swap_step(
                 state_sqrt_price,
                 sqrt_price_target,
@@ -2600,9 +1250,9 @@ pub mod exact {
             }
             state_sqrt_price = step.sqrt_ratio_next;
 
-            // Tick sınırına ulaştık mı?
+            // Tick sÃ„Â±nÃ„Â±rÃ„Â±na ulaÃ…Å¸tÃ„Â±k mÃ„Â±?
             if step.sqrt_ratio_next == sqrt_price_target && !amount_remaining.is_zero() {
-                // Likiditeyi güncelle
+                // Likiditeyi gÃƒÂ¼ncelle
                 if zero_for_one {
                     if state_liquidity as i128 >= liquidity_net {
                         state_liquidity = (state_liquidity as i128 - liquidity_net) as u128;
@@ -2614,12 +1264,12 @@ pub mod exact {
                     state_liquidity = if new_liq > 0 { new_liq as u128 } else { 0 };
                 }
                 state_tick = if zero_for_one { next_tick - 1 } else { next_tick };
-                let _ = state_tick; // tick crossing sırasında güncellenir
+                let _ = state_tick; // tick crossing sÃ„Â±rasÃ„Â±nda gÃƒÂ¼ncellenir
                 crossings += 1;
             }
         }
 
-        // Kalan girdi varsa mevcut likiditede son bir adım daha
+        // Kalan girdi varsa mevcut likiditede son bir adÃ„Â±m daha
         if !amount_remaining.is_zero() && state_liquidity > 0 {
             let final_target = if zero_for_one { MIN_SQRT_RATIO + U256::from(1) } else { MAX_SQRT_RATIO - U256::from(1) };
             let step = compute_swap_step(
@@ -2643,34 +1293,34 @@ pub mod exact {
         }
     }
 
-    /// İki havuz arasında exact arbitraj kârı hesapla (U256, wei bazında)
+    /// Ã„Â°ki havuz arasÃ„Â±nda exact arbitraj kÃƒÂ¢rÃ„Â± hesapla (U256, wei bazÃ„Â±nda)
     ///
-    // v23.0 (D-3): compute_exact_arbitrage_profit tamamen kaldırıldı.
-    // Tek token0_is_weth parametresi çapraz-DEX'te hatalı sonuç veriyordu.
-    // Yerine compute_exact_directional_profit kullanılır.
+    // v23.0 (D-3): compute_exact_arbitrage_profit tamamen kaldÃ„Â±rÃ„Â±ldÃ„Â±.
+    // Tek token0_is_weth parametresi ÃƒÂ§apraz-DEX'te hatalÃ„Â± sonuÃƒÂ§ veriyordu.
+    // Yerine compute_exact_directional_profit kullanÃ„Â±lÃ„Â±r.
 
-    // ── Yön-Bazlı Exact Kâr Hesaplama (Flash Swap Akışı Birebir Model) ─────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ YÃƒÂ¶n-BazlÃ„Â± Exact KÃƒÂ¢r Hesaplama (Flash Swap AkÃ„Â±Ã…Å¸Ã„Â± Birebir Model) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-    /// Flash swap akışını birebir modelleyerek kârı hesapla.
+    /// Flash swap akÃ„Â±Ã…Å¸Ã„Â±nÃ„Â± birebir modelleyerek kÃƒÂ¢rÃ„Â± hesapla.
     ///
-    /// Kontrat akışı:
-    ///   1. UniV3(PoolA): amount_wei input → received_amount output
-    ///   2. Slipstream(PoolB): received_amount input → owed_output
+    /// Kontrat akÃ„Â±Ã…Å¸Ã„Â±:
+    ///   1. UniV3(PoolA): amount_wei input Ã¢â€ â€™ received_amount output
+    ///   2. Slipstream(PoolB): received_amount input Ã¢â€ â€™ owed_output
     ///   3. profit = owed_output - amount_wei (owedToken cinsinden, wei)
     ///
-    /// Bu fonksiyon hem WETH-ödeme hem USDC-ödeme senaryolarını doğru hesaplar.
-    /// minProfit calldata değeri bu fonksiyonun çıktısından türetilir.
+    /// Bu fonksiyon hem WETH-ÃƒÂ¶deme hem USDC-ÃƒÂ¶deme senaryolarÃ„Â±nÃ„Â± doÃ„Å¸ru hesaplar.
+    /// minProfit calldata deÃ„Å¸eri bu fonksiyonun ÃƒÂ§Ã„Â±ktÃ„Â±sÃ„Â±ndan tÃƒÂ¼retilir.
     ///
-    /// # Dönüş
-    /// Kâr U256 (owedToken cinsinden, wei). Kâr yoksa U256::ZERO.
+    /// # DÃƒÂ¶nÃƒÂ¼Ã…Å¸
+    /// KÃƒÂ¢r U256 (owedToken cinsinden, wei). KÃƒÂ¢r yoksa U256::ZERO.
     pub fn compute_exact_directional_profit(
-        // Pool A (UniV3 — flash swap kaynağı)
+        // Pool A (UniV3 Ã¢â‚¬â€ flash swap kaynaÃ„Å¸Ã„Â±)
         pool_a_sqrt_price: U256,
         pool_a_liquidity: u128,
         pool_a_tick: i32,
         pool_a_fee_pips: u32,
         pool_a_bitmap: Option<&TickBitmapData>,
-        // Pool B (Slipstream — satış hedefi)
+        // Pool B (Slipstream Ã¢â‚¬â€ satÃ„Â±Ã…Å¸ hedefi)
         pool_b_sqrt_price: U256,
         pool_b_liquidity: u128,
         pool_b_tick: i32,
@@ -2685,8 +1335,8 @@ pub mod exact {
             return U256::ZERO;
         }
 
-        // Adım 1: UniV3 flash swap
-        // amount_wei input → received tokens output
+        // AdÃ„Â±m 1: UniV3 flash swap
+        // amount_wei input Ã¢â€ â€™ received tokens output
         let univ3_result = compute_exact_swap(
             pool_a_sqrt_price,
             pool_a_liquidity,
@@ -2701,8 +1351,8 @@ pub mod exact {
             return U256::ZERO;
         }
 
-        // Adım 2: Slipstream swap
-        // UniV3'ten alınan tokenlar → owedToken geri alınır
+        // AdÃ„Â±m 2: Slipstream swap
+        // UniV3'ten alÃ„Â±nan tokenlar Ã¢â€ â€™ owedToken geri alÃ„Â±nÃ„Â±r
         let slipstream_result = compute_exact_swap(
             pool_b_sqrt_price,
             pool_b_liquidity,
@@ -2713,9 +1363,9 @@ pub mod exact {
             pool_b_bitmap,
         );
 
-        // Adım 3: Kâr = Slipstream çıktısı - UniV3'e borç
-        // Kontrat akışı: balAfter(owedToken) - balBefore(owedToken)
-        // owed_output (Slipstream'den) - amount_wei (UniV3'e ödeme)
+        // AdÃ„Â±m 3: KÃƒÂ¢r = Slipstream ÃƒÂ§Ã„Â±ktÃ„Â±sÃ„Â± - UniV3'e borÃƒÂ§
+        // Kontrat akÃ„Â±Ã…Å¸Ã„Â±: balAfter(owedToken) - balBefore(owedToken)
+        // owed_output (Slipstream'den) - amount_wei (UniV3'e ÃƒÂ¶deme)
         if slipstream_result.amount_out > amount_wei {
             slipstream_result.amount_out - amount_wei
         } else {
@@ -2723,60 +1373,60 @@ pub mod exact {
         }
     }
 
-    // ── Dönüşüm Yardımcıları ────────────────────────────────────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ DÃƒÂ¶nÃƒÂ¼Ã…Å¸ÃƒÂ¼m YardÃ„Â±mcÃ„Â±larÃ„Â± Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-    /// U256'yı f64'e güvenli dönüştür.
-    /// v22.0: String conversion → doğrudan bit manipülasyonu.
-    /// Eski: val.to_string().parse::<f64>() — her dönüşümde heap allocation.
-    /// Yeni: U256 limb'lerinden doğrudan f64 hesaplama — zero-alloc.
-    /// Not: 2^53 üstü değerlerde düşük bitler kaybolur ama WETH/USD
-    /// aralığındaki wei değerleri için sorun oluşturmaz.
+    /// U256'yÃ„Â± f64'e gÃƒÂ¼venli dÃƒÂ¶nÃƒÂ¼Ã…Å¸tÃƒÂ¼r.
+    /// v22.0: String conversion Ã¢â€ â€™ doÃ„Å¸rudan bit manipÃƒÂ¼lasyonu.
+    /// Eski: val.to_string().parse::<f64>() Ã¢â‚¬â€ her dÃƒÂ¶nÃƒÂ¼Ã…Å¸ÃƒÂ¼mde heap allocation.
+    /// Yeni: U256 limb'lerinden doÃ„Å¸rudan f64 hesaplama Ã¢â‚¬â€ zero-alloc.
+    /// Not: 2^53 ÃƒÂ¼stÃƒÂ¼ deÃ„Å¸erlerde dÃƒÂ¼Ã…Å¸ÃƒÂ¼k bitler kaybolur ama WETH/USD
+    /// aralÃ„Â±Ã„Å¸Ã„Â±ndaki wei deÃ„Å¸erleri iÃƒÂ§in sorun oluÃ…Å¸turmaz.
     pub fn u256_to_f64(val: U256) -> f64 {
         if val.is_zero() {
             return 0.0;
         }
-        // U256 → [u64; 4] limbs (little-endian)
+        // U256 Ã¢â€ â€™ [u64; 4] limbs (little-endian)
         let limbs = val.as_limbs();
-        // En yüksek anlamlı limb'i bul
+        // En yÃƒÂ¼ksek anlamlÃ„Â± limb'i bul
         if limbs[3] != 0 {
-            // 192-255 bit aralığında
+            // 192-255 bit aralÃ„Â±Ã„Å¸Ã„Â±nda
             limbs[3] as f64 * (2.0f64).powi(192)
                 + limbs[2] as f64 * (2.0f64).powi(128)
                 + limbs[1] as f64 * (2.0f64).powi(64)
                 + limbs[0] as f64
         } else if limbs[2] != 0 {
-            // 128-191 bit aralığında
+            // 128-191 bit aralÃ„Â±Ã„Å¸Ã„Â±nda
             limbs[2] as f64 * (2.0f64).powi(128)
                 + limbs[1] as f64 * (2.0f64).powi(64)
                 + limbs[0] as f64
         } else if limbs[1] != 0 {
-            // 64-127 bit aralığında
+            // 64-127 bit aralÃ„Â±Ã„Å¸Ã„Â±nda
             limbs[1] as f64 * (2.0f64).powi(64)
                 + limbs[0] as f64
         } else {
-            // 0-63 bit aralığında — tam hassasiyet (f64 mantissa 53 bit)
+            // 0-63 bit aralÃ„Â±Ã„Å¸Ã„Â±nda Ã¢â‚¬â€ tam hassasiyet (f64 mantissa 53 bit)
             limbs[0] as f64
         }
     }
 
-    /// Fee fraction (ör: 0.0005) → fee pips (ör: 500, 1e6 bazında).
+    /// Fee fraction (ÃƒÂ¶r: 0.0005) Ã¢â€ â€™ fee pips (ÃƒÂ¶r: 500, 1e6 bazÃ„Â±nda).
     /// Uniswap V3 fee_pips: 500 = %0.05, 3000 = %0.30, 10000 = %1.00
     #[inline]
     pub fn fee_fraction_to_pips(fee_fraction: f64) -> u32 {
         (fee_fraction * 1_000_000.0).round() as u32
     }
 
-    /// U256-tabanlı güvenli maksimum swap miktarı (f64 WETH döndürür).
-    /// Mevcut tick aralığındaki likidite kapasitesinin %15'ini hesaplar.
+    /// U256-tabanlÃ„Â± gÃƒÂ¼venli maksimum swap miktarÃ„Â± (f64 WETH dÃƒÂ¶ndÃƒÂ¼rÃƒÂ¼r).
+    /// Mevcut tick aralÃ„Â±Ã„Å¸Ã„Â±ndaki likidite kapasitesinin %15'ini hesaplar.
     ///
-    /// Uniswap V3 SqrtPriceMath formülleri ile:
-    ///   token0: capacity = L × Q96 / sqrtPriceX96
-    ///   token1: capacity = L × sqrtPriceX96 / Q96
+    /// Uniswap V3 SqrtPriceMath formÃƒÂ¼lleri ile:
+    ///   token0: capacity = L Ãƒâ€” Q96 / sqrtPriceX96
+    ///   token1: capacity = L Ãƒâ€” sqrtPriceX96 / Q96
     ///
-    /// v11.1: Artık %15 sezgisel hesap YOK.  Bunun yerine mevcut fiyattan
-    ///        bir sonraki tick_spacing sınırına kadar absorbe edilebilecek
-    ///        tam WETH miktarı hesaplanır (get_amount0_delta / get_amount1_delta).
-    ///        Böylece 6 vs 18 decimal asimetrik havuzlarda milyarlık hayalet
+    /// v11.1: ArtÃ„Â±k %15 sezgisel hesap YOK.  Bunun yerine mevcut fiyattan
+    ///        bir sonraki tick_spacing sÃ„Â±nÃ„Â±rÃ„Â±na kadar absorbe edilebilecek
+    ///        tam WETH miktarÃ„Â± hesaplanÃ„Â±r (get_amount0_delta / get_amount1_delta).
+    ///        BÃƒÂ¶ylece 6 vs 18 decimal asimetrik havuzlarda milyarlÃ„Â±k hayalet
     ///        likidite sorunu ortadan kalkar.
     pub fn max_safe_swap_amount_u256(
         sqrt_price_x96: U256,
@@ -2789,19 +1439,19 @@ pub mod exact {
             return 0.0;
         }
 
-        // Tick'i Uniswap V3 geçerli aralığa kısıtla
+        // Tick'i Uniswap V3 geÃƒÂ§erli aralÃ„Â±Ã„Å¸a kÃ„Â±sÃ„Â±tla
         const MIN_TICK: i32 = -887272;
         const MAX_TICK: i32 = 887272;
         let clamped_tick = current_tick.clamp(MIN_TICK, MAX_TICK);
 
-        // Mevcut tick aralığının alt ve üst sınırlarını bul
+        // Mevcut tick aralÃ„Â±Ã„Å¸Ã„Â±nÃ„Â±n alt ve ÃƒÂ¼st sÃ„Â±nÃ„Â±rlarÃ„Â±nÃ„Â± bul
         let lower_tick = clamped_tick.div_euclid(tick_spacing) * tick_spacing;
         let upper_tick = lower_tick + tick_spacing;
 
         let capacity_raw = if token0_is_weth {
-            // WETH = token0 → swap yönü zeroForOne → fiyat DÜŞER (alt sınıra)
+            // WETH = token0 Ã¢â€ â€™ swap yÃƒÂ¶nÃƒÂ¼ zeroForOne Ã¢â€ â€™ fiyat DÃƒÅ“Ã…ÂER (alt sÃ„Â±nÃ„Â±ra)
             let sqrt_lower = get_sqrt_ratio_at_tick(lower_tick.clamp(MIN_TICK, MAX_TICK));
-            // Fiyat tam sınırdaysa bir tick_spacing daha aşağı git
+            // Fiyat tam sÃ„Â±nÃ„Â±rdaysa bir tick_spacing daha aÃ…Å¸aÃ„Å¸Ã„Â± git
             let target_tick = if sqrt_lower >= sqrt_price_x96 {
                 (lower_tick - tick_spacing).clamp(MIN_TICK, MAX_TICK)
             } else {
@@ -2813,9 +1463,9 @@ pub mod exact {
             }
             get_amount0_delta(sqrt_target, sqrt_price_x96, liquidity, false)
         } else {
-            // WETH = token1 → swap yönü oneForZero → fiyat YUKARI (üst sınıra)
+            // WETH = token1 Ã¢â€ â€™ swap yÃƒÂ¶nÃƒÂ¼ oneForZero Ã¢â€ â€™ fiyat YUKARI (ÃƒÂ¼st sÃ„Â±nÃ„Â±ra)
             let sqrt_upper = get_sqrt_ratio_at_tick(upper_tick.clamp(MIN_TICK, MAX_TICK));
-            // Fiyat tam sınırdaysa bir tick_spacing daha yukarı git
+            // Fiyat tam sÃ„Â±nÃ„Â±rdaysa bir tick_spacing daha yukarÃ„Â± git
             let target_tick = if sqrt_upper <= sqrt_price_x96 {
                 (upper_tick + tick_spacing).clamp(MIN_TICK, MAX_TICK)
             } else {
@@ -2831,24 +1481,24 @@ pub mod exact {
         u256_to_f64(capacity_raw) / 1e18
     }
 
-    /// Hard Liquidity Cap — TickBitmap'ten gerçek mevcut likiditeyi hesapla.
+    /// Hard Liquidity Cap Ã¢â‚¬â€ TickBitmap'ten gerÃƒÂ§ek mevcut likiditeyi hesapla.
     ///
-    /// Bu fonksiyon, mevcut tick'ten itibaren swap yönündeki tüm başlatılmış
-    /// tick'lerdeki toplam absorbe edilebilir WETH miktarını hesaplar.
+    /// Bu fonksiyon, mevcut tick'ten itibaren swap yÃƒÂ¶nÃƒÂ¼ndeki tÃƒÂ¼m baÃ…Å¸latÃ„Â±lmÃ„Â±Ã…Å¸
+    /// tick'lerdeki toplam absorbe edilebilir WETH miktarÃ„Â±nÃ„Â± hesaplar.
     ///
     /// Algoritma:
-    ///   1. Swap yönüne göre (zeroForOne veya oneForZero) ilgili tick'leri sırala
-    ///   2. Her tick aralığındaki mevcut likidite ile o aralıkta absorbe
-    ///      edilebilecek maksimum WETH miktarını SqrtPriceMath ile hesapla
-    ///   3. Tick sınırında liquidityNet ile aktif likiditeyi güncelle
-    ///   4. Tüm aralıklardaki kapasiteleri topla
+    ///   1. Swap yÃƒÂ¶nÃƒÂ¼ne gÃƒÂ¶re (zeroForOne veya oneForZero) ilgili tick'leri sÃ„Â±rala
+    ///   2. Her tick aralÃ„Â±Ã„Å¸Ã„Â±ndaki mevcut likidite ile o aralÃ„Â±kta absorbe
+    ///      edilebilecek maksimum WETH miktarÃ„Â±nÃ„Â± SqrtPriceMath ile hesapla
+    ///   3. Tick sÃ„Â±nÃ„Â±rÃ„Â±nda liquidityNet ile aktif likiditeyi gÃƒÂ¼ncelle
+    ///   4. TÃƒÂ¼m aralÃ„Â±klardaki kapasiteleri topla
     ///
-    /// Bu sayede NR, havuzda gerçekten mevcut olmayan likiditeyi
-    /// kullanmaya çalışmaz. Örn: 5.5 WETH likidite varsa max 5.5 WETH önerilir.
+    /// Bu sayede NR, havuzda gerÃƒÂ§ekten mevcut olmayan likiditeyi
+    /// kullanmaya ÃƒÂ§alÃ„Â±Ã…Å¸maz. Ãƒâ€“rn: 5.5 WETH likidite varsa max 5.5 WETH ÃƒÂ¶nerilir.
     ///
-    /// # Dönüş
-    /// Toplam absorbe edilebilir WETH miktarı (f64, human-readable).
-    /// Bitmap yoksa veya boşsa, `max_safe_swap_amount_u256` fallback kullanılır.
+    /// # DÃƒÂ¶nÃƒÂ¼Ã…Å¸
+    /// Toplam absorbe edilebilir WETH miktarÃ„Â± (f64, human-readable).
+    /// Bitmap yoksa veya boÃ…Å¸sa, `max_safe_swap_amount_u256` fallback kullanÃ„Â±lÃ„Â±r.
     pub fn hard_liquidity_cap_weth(
         sqrt_price_x96: U256,
         liquidity: u128,
@@ -2867,12 +1517,12 @@ pub mod exact {
             return 0.0;
         }
 
-        // WETH satışı: zeroForOne (token0_is_weth=true → sola git) veya
-        //               oneForZero (token0_is_weth=false → sağa git)
-        // Bot WETH giriyor → swap yönü WETH→USDC
+        // WETH satÃ„Â±Ã…Å¸Ã„Â±: zeroForOne (token0_is_weth=true Ã¢â€ â€™ sola git) veya
+        //               oneForZero (token0_is_weth=false Ã¢â€ â€™ saÃ„Å¸a git)
+        // Bot WETH giriyor Ã¢â€ â€™ swap yÃƒÂ¶nÃƒÂ¼ WETHÃ¢â€ â€™USDC
         let zero_for_one = token0_is_weth;
 
-        // Tick'leri swap yönüne göre sırala
+        // Tick'leri swap yÃƒÂ¶nÃƒÂ¼ne gÃƒÂ¶re sÃ„Â±rala
         let ordered_ticks: Vec<(i32, i128)> = {
             let mut ticks: Vec<(i32, i128)> = bitmap.ticks.iter()
                 .filter(|(_, info)| info.initialized)
@@ -2881,10 +1531,10 @@ pub mod exact {
 
             if zero_for_one {
                 ticks.retain(|(t, _)| *t <= current_tick);
-                ticks.sort_by(|a, b| b.0.cmp(&a.0)); // büyükten küçüğe
+                ticks.sort_by(|a, b| b.0.cmp(&a.0)); // bÃƒÂ¼yÃƒÂ¼kten kÃƒÂ¼ÃƒÂ§ÃƒÂ¼Ã„Å¸e
             } else {
                 ticks.retain(|(t, _)| *t > current_tick);
-                ticks.sort_by_key(|(t, _)| *t); // küçükten büyüğe
+                ticks.sort_by_key(|(t, _)| *t); // kÃƒÂ¼ÃƒÂ§ÃƒÂ¼kten bÃƒÂ¼yÃƒÂ¼Ã„Å¸e
             }
             ticks
         };
@@ -2901,16 +1551,16 @@ pub mod exact {
 
             let sqrt_price_target = get_sqrt_ratio_at_tick(next_tick);
 
-            // Bu aralıkta absorbe edilebilecek WETH miktarı
+            // Bu aralÃ„Â±kta absorbe edilebilecek WETH miktarÃ„Â±
             let weth_in_range = if zero_for_one {
-                // token0(WETH) girdi: amount0 = L × Q96 × (1/target - 1/current)
+                // token0(WETH) girdi: amount0 = L Ãƒâ€” Q96 Ãƒâ€” (1/target - 1/current)
                 if sqrt_price_target < state_sqrt_price {
                     get_amount0_delta(sqrt_price_target, state_sqrt_price, state_liquidity, false)
                 } else {
                     U256::ZERO
                 }
             } else {
-                // token1(WETH) girdi: amount1 = L × (target - current) / Q96
+                // token1(WETH) girdi: amount1 = L Ãƒâ€” (target - current) / Q96
                 if sqrt_price_target > state_sqrt_price {
                     get_amount1_delta(state_sqrt_price, sqrt_price_target, state_liquidity, false)
                 } else {
@@ -2921,7 +1571,7 @@ pub mod exact {
             total_weth_capacity += weth_in_range;
             state_sqrt_price = sqrt_price_target;
 
-            // Tick sınırında likiditeyi güncelle
+            // Tick sÃ„Â±nÃ„Â±rÃ„Â±nda likiditeyi gÃƒÂ¼ncelle
             if zero_for_one {
                 if state_liquidity as i128 >= liquidity_net {
                     state_liquidity = (state_liquidity as i128 - liquidity_net) as u128;
@@ -2935,22 +1585,22 @@ pub mod exact {
         }
 
         // Son tick'ten sonra kalan likiditede de bir miktar daha absorbe edilebilir
-        // ama muhafazakâr olalım — sadece başlatılmış tick'lere kadar hesapla
+        // ama muhafazakÃƒÂ¢r olalÃ„Â±m Ã¢â‚¬â€ sadece baÃ…Å¸latÃ„Â±lmÃ„Â±Ã…Å¸ tick'lere kadar hesapla
 
         let cap_weth = u256_to_f64(total_weth_capacity) / 1e18;
 
-        // Minimum: single-tick fallback ile karşılaştır, büyük olanı al
-        // (bitmap'te çok az tick varsa fallback daha iyi olabilir)
+        // Minimum: single-tick fallback ile karÃ…Å¸Ã„Â±laÃ…Å¸tÃ„Â±r, bÃƒÂ¼yÃƒÂ¼k olanÃ„Â± al
+        // (bitmap'te ÃƒÂ§ok az tick varsa fallback daha iyi olabilir)
         let single_tick_cap = max_safe_swap_amount_u256(sqrt_price_x96, liquidity, token0_is_weth, current_tick, tick_spacing);
 
-        // v16.0: %99.9 güvenlik marjı — slippage payı bırak.
-        // Havuz kapasitesinin tam sınırında işlem yapmak tick-çapraz
-        // hatalarına ve REVM revert'lerine yol açar.
+        // v16.0: %99.9 gÃƒÂ¼venlik marjÃ„Â± Ã¢â‚¬â€ slippage payÃ„Â± bÃ„Â±rak.
+        // Havuz kapasitesinin tam sÃ„Â±nÃ„Â±rÃ„Â±nda iÃ…Å¸lem yapmak tick-ÃƒÂ§apraz
+        // hatalarÃ„Â±na ve REVM revert'lerine yol aÃƒÂ§ar.
         let raw_cap = cap_weth.max(single_tick_cap);
         raw_cap * 0.999
     }
 
-    // ── Test ─────────────────────────────────────────────────────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Test Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     #[cfg(test)]
     mod exact_tests {
@@ -2960,16 +1610,16 @@ pub mod exact {
         #[test]
         fn test_get_sqrt_ratio_at_tick_zero() {
             let ratio = get_sqrt_ratio_at_tick(0);
-            // tick=0 → sqrtPrice = 2^96 = Q96
-            assert_eq!(ratio, Q96, "tick=0 → sqrtPriceX96 = Q96");
+            // tick=0 Ã¢â€ â€™ sqrtPrice = 2^96 = Q96
+            assert_eq!(ratio, Q96, "tick=0 Ã¢â€ â€™ sqrtPriceX96 = Q96");
         }
 
         #[test]
         fn test_get_sqrt_ratio_at_tick_boundaries() {
             let min_ratio = get_sqrt_ratio_at_tick(-887272);
             let max_ratio = get_sqrt_ratio_at_tick(887272);
-            assert!(min_ratio >= MIN_SQRT_RATIO, "min tick → min sqrt ratio");
-            assert!(max_ratio <= MAX_SQRT_RATIO, "max tick → max sqrt ratio");
+            assert!(min_ratio >= MIN_SQRT_RATIO, "min tick Ã¢â€ â€™ min sqrt ratio");
+            assert!(max_ratio <= MAX_SQRT_RATIO, "max tick Ã¢â€ â€™ max sqrt ratio");
             assert!(min_ratio < max_ratio, "min < max");
         }
 
@@ -2978,8 +1628,8 @@ pub mod exact {
             let ratio_neg = get_sqrt_ratio_at_tick(-1);
             let ratio_pos = get_sqrt_ratio_at_tick(1);
             let ratio_zero = get_sqrt_ratio_at_tick(0);
-            assert!(ratio_neg < ratio_zero, "negatif tick → düşük fiyat");
-            assert!(ratio_pos > ratio_zero, "pozitif tick → yüksek fiyat");
+            assert!(ratio_neg < ratio_zero, "negatif tick Ã¢â€ â€™ dÃƒÂ¼Ã…Å¸ÃƒÂ¼k fiyat");
+            assert!(ratio_pos > ratio_zero, "pozitif tick Ã¢â€ â€™ yÃƒÂ¼ksek fiyat");
         }
 
         #[test]
@@ -3007,8 +1657,8 @@ pub mod exact {
             let amount = U256::from(1_000_000u64); // 1 USDC worth
 
             let step = compute_swap_step(sqrt_price, target, liquidity, amount, 500);
-            assert!(step.amount_out > U256::ZERO, "Çıktı sıfır olmamalı");
-            assert!(step.amount_in > U256::ZERO, "Girdi sıfır olmamalı");
+            assert!(step.amount_out > U256::ZERO, "Ãƒâ€¡Ã„Â±ktÃ„Â± sÃ„Â±fÃ„Â±r olmamalÃ„Â±");
+            assert!(step.amount_in > U256::ZERO, "Girdi sÃ„Â±fÃ„Â±r olmamalÃ„Â±");
         }
 
         #[test]
@@ -3022,8 +1672,8 @@ pub mod exact {
                 amount, true, 500, None,
             );
 
-            assert!(result.amount_out > U256::ZERO, "Swap çıktısı > 0 olmalı");
-            println!("Exact swap: 1 WETH → {} raw USDC çıktı", result.amount_out);
+            assert!(result.amount_out > U256::ZERO, "Swap ÃƒÂ§Ã„Â±ktÃ„Â±sÃ„Â± > 0 olmalÃ„Â±");
+            println!("Exact swap: 1 WETH Ã¢â€ â€™ {} raw USDC ÃƒÂ§Ã„Â±ktÃ„Â±", result.amount_out);
         }
 
         #[test]
@@ -3061,10 +1711,10 @@ pub mod exact {
                 amount, true, 500, Some(&bitmap),
             );
 
-            assert!(result.amount_out > U256::ZERO, "Bitmap swap çıktısı > 0");
-            assert!(result.tick_crossings > 0, "Tick geçişi olmalı");
+            assert!(result.amount_out > U256::ZERO, "Bitmap swap ÃƒÂ§Ã„Â±ktÃ„Â±sÃ„Â± > 0");
+            assert!(result.tick_crossings > 0, "Tick geÃƒÂ§iÃ…Å¸i olmalÃ„Â±");
             println!(
-                "Exact bitmap swap: 5 WETH → {} raw çıktı, {} tick geçişi",
+                "Exact bitmap swap: 5 WETH Ã¢â€ â€™ {} raw ÃƒÂ§Ã„Â±ktÃ„Â±, {} tick geÃƒÂ§iÃ…Å¸i",
                 result.amount_out, result.tick_crossings
             );
         }

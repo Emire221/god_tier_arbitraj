@@ -1,20 +1,20 @@
-// ============================================================================
-//  SIMULATOR v9.0 — REVM Tabanlı Yerel EVM Simülasyonu + Multi-Tick Engine
+﻿// ============================================================================
+//  SIMULATOR v9.0 â€” REVM TabanlÄ± Yerel EVM SimÃ¼lasyonu + Multi-Tick Engine
 //
 //  v9.0 Yenilikler:
-//  ✓ 134-byte calldata (deadlineBlock: uint32 eklendi)
-//  ✓ Kontrat v9.0 uyumu (executor/admin, deadline, kâr kontrat içinde)
+//  âœ“ 134-byte calldata (deadlineBlock: uint32 eklendi)
+//  âœ“ Kontrat v9.0 uyumu (executor/admin, deadline, kÃ¢r kontrat iÃ§inde)
 //
 //  v6.0 (korunuyor):
-//  ✓ TickBitmap entegrasyonu — multi-tick swap impact analizi
-//  ✓ Tick geçiş detayları (hangi tick'ler patlatıldı, likidite değişimi)
-//  ✓ Gerçek bitmap yoksa otomatik dampening fallback
+//  âœ“ TickBitmap entegrasyonu â€” multi-tick swap impact analizi
+//  âœ“ Tick geÃ§iÅŸ detaylarÄ± (hangi tick'ler patlatÄ±ldÄ±, likidite deÄŸiÅŸimi)
+//  âœ“ GerÃ§ek bitmap yoksa otomatik dampening fallback
 //
 //  Mimari:
-//    1. InMemoryDB (CacheDB<EmptyDB>) oluşturulur
-//    2. Havuz bytecode ve kritik storage slot'ları önceden doldurulur
-//    3. Arbitraj kontratı çağrısı yerel EVM'de çalıştırılır
-//    4. Sonuç: Success → işlem gönder / Revert → işlemi atla
+//    1. InMemoryDB (CacheDB<EmptyDB>) oluÅŸturulur
+//    2. Havuz bytecode ve kritik storage slot'larÄ± Ã¶nceden doldurulur
+//    3. Arbitraj kontratÄ± Ã§aÄŸrÄ±sÄ± yerel EVM'de Ã§alÄ±ÅŸtÄ±rÄ±lÄ±r
+//    4. SonuÃ§: Success â†’ iÅŸlem gÃ¶nder / Revert â†’ iÅŸlemi atla
 // ============================================================================
 
 use alloy::primitives::{Address, U256};
@@ -31,59 +31,59 @@ use revm::{
 use crate::types::{DexType, PoolConfig, SharedPoolState, SimulationResult};
 use crate::math;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Tip Dönüşüm Yardımcıları
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Tip DÃ¶nÃ¼ÅŸÃ¼m YardÄ±mcÄ±larÄ±
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// alloy Address → revm Address (aynı alloy-primitives, doğrudan dönüşüm)
+/// alloy Address â†’ revm Address (aynÄ± alloy-primitives, doÄŸrudan dÃ¶nÃ¼ÅŸÃ¼m)
 fn to_revm_addr(addr: Address) -> RevmAddress {
     RevmAddress::from_slice(addr.as_slice())
 }
 
-/// alloy U256 → revm U256 (alanlar aynı — doğrudan dönüşüm)
+/// alloy U256 â†’ revm U256 (alanlar aynÄ± â€” doÄŸrudan dÃ¶nÃ¼ÅŸÃ¼m)
 fn to_revm_u256(val: U256) -> RevmU256 {
     let bytes = val.to_be_bytes::<32>();
     RevmU256::from_be_bytes(bytes)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// v20.0: DEX-Spesifik Storage Layout Şablonları
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// v20.0: DEX-Spesifik Storage Layout ÅablonlarÄ±
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
-// Her DEX'in akıllı kontrat mimarisi farklı storage layout kullanır.
-// Bu yapı, her DEX için bağımsız okuma/yazma şablonu sağlar.
-// Storage injection sırasında DEX türüne göre doğru ofsetler kullanılır.
+// Her DEX'in akÄ±llÄ± kontrat mimarisi farklÄ± storage layout kullanÄ±r.
+// Bu yapÄ±, her DEX iÃ§in baÄŸÄ±msÄ±z okuma/yazma ÅŸablonu saÄŸlar.
+// Storage injection sÄ±rasÄ±nda DEX tÃ¼rÃ¼ne gÃ¶re doÄŸru ofsetler kullanÄ±lÄ±r.
 //
 // Farklar:
-//   UniV3:     slot0 → slot 0 (7 alan, uint8 feeProtocol, 248 bit, 1 slot)
-//              liquidity → slot 4
-//              unlocked → slot 0, bit 240
+//   UniV3:     slot0 â†’ slot 0 (7 alan, uint8 feeProtocol, 248 bit, 1 slot)
+//              liquidity â†’ slot 4
+//              unlocked â†’ slot 0, bit 240
 //
-//   PCS V3:    slot0 → slot 0 (7 alan, uint32 feeProtocol, 272 bit > 256, 2 slot!)
-//              liquidity → slot 5
-//              unlocked → slot 1, bit 32 (ayrı slot!)
+//   PCS V3:    slot0 â†’ slot 0 (7 alan, uint32 feeProtocol, 272 bit > 256, 2 slot!)
+//              liquidity â†’ slot 5
+//              unlocked â†’ slot 1, bit 32 (ayrÄ± slot!)
 //
-//   Aerodrome: slot0 → slot 2 (6 alan, feeProtocol YOK, 240 bit, 1 slot)
-//              liquidity → slot 5
-//              unlocked → slot 2, bit 232
-//              öncesinde: gauge (address) + nft+fee packed → slot 0-1
-// ─────────────────────────────────────────────────────────────────────────────
+//   Aerodrome: slot0 â†’ slot 2 (6 alan, feeProtocol YOK, 240 bit, 1 slot)
+//              liquidity â†’ slot 5
+//              unlocked â†’ slot 2, bit 232
+//              Ã¶ncesinde: gauge (address) + nft+fee packed â†’ slot 0-1
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// DEX-spesifik storage layout tanımı
+/// DEX-spesifik storage layout tanÄ±mÄ±
+#[allow(dead_code)]
 struct StorageLayout {
     /// slot0 storage slot indeksi
     slot0_index: RevmU256,
     /// liquidity storage slot indeksi
     liquidity_index: RevmU256,
-    /// slot0'da unlocked flag'inin bit pozisyonu (None = ayrı slot'ta)
-    #[allow(dead_code)]
-    unlocked_bit_in_slot0: Option<u32>,
-    /// PCS V3 gibi unlocked ayrı slot'taysa: (slot_index, bit_pozisyonu)
+    /// slot0'da unlocked flag'inin bit pozisyonu (None = ayrÄ± slot'ta)
+        unlocked_bit_in_slot0: Option<u32>,
+    /// PCS V3 gibi unlocked ayrÄ± slot'taysa: (slot_index, bit_pozisyonu)
     unlocked_separate_slot: Option<(RevmU256, u32)>,
 }
 
 impl StorageLayout {
-    /// DEX türüne göre doğru storage layout'u döndür
+    /// DEX tÃ¼rÃ¼ne gÃ¶re doÄŸru storage layout'u dÃ¶ndÃ¼r
     fn for_dex(dex: DexType) -> Self {
         match dex {
             DexType::UniswapV3 => StorageLayout {
@@ -95,7 +95,7 @@ impl StorageLayout {
             DexType::PancakeSwapV3 => StorageLayout {
                 slot0_index: RevmU256::ZERO,
                 liquidity_index: RevmU256::from(5),
-                unlocked_bit_in_slot0: None, // slot0'a SIĞMAZ (272 bit > 256)
+                unlocked_bit_in_slot0: None, // slot0'a SIÄMAZ (272 bit > 256)
                 unlocked_separate_slot: Some((RevmU256::from(1), 32)), // slot 1, bit 32
             },
             DexType::Aerodrome => StorageLayout {
@@ -107,18 +107,18 @@ impl StorageLayout {
         }
     }
 
-    /// Bu layout'a göre slot0 ve ilişkili storage slot'larını DB'ye yaz
+    /// Bu layout'a gÃ¶re slot0 ve iliÅŸkili storage slot'larÄ±nÄ± DB'ye yaz
     fn inject_slot0(&self, db: &mut InMemoryDB, addr: RevmAddress, sqrt_price_x96: U256, tick: i32, dex: DexType) {
         let slot0_value = pack_slot0(sqrt_price_x96, tick, dex);
         let _ = db.insert_account_storage(addr, self.slot0_index, slot0_value);
 
-        // PCS V3 gibi unlocked ayrı slot'taysa onu da yaz
+        // PCS V3 gibi unlocked ayrÄ± slot'taysa onu da yaz
         if let Some((slot_idx, _bit)) = &self.unlocked_separate_slot {
             let _ = db.insert_account_storage(addr, *slot_idx, pack_pcs_v3_slot1_unlocked());
         }
     }
 
-    /// Bu layout'a göre liquidity storage slot'unu DB'ye yaz
+    /// Bu layout'a gÃ¶re liquidity storage slot'unu DB'ye yaz
     fn inject_liquidity(&self, db: &mut InMemoryDB, addr: RevmAddress, liquidity: u128) {
         let _ = db.insert_account_storage(addr, self.liquidity_index, RevmU256::from(liquidity));
     }
@@ -126,35 +126,35 @@ impl StorageLayout {
 
 /// Uniswap V3 / PancakeSwap V3 / Aerodrome slot0 storage paketleme.
 ///
-/// v17.0 KRİTİK DÜZELTME: DEX'e özel storage layout farkları.
+/// v17.0 KRÄ°TÄ°K DÃœZELTME: DEX'e Ã¶zel storage layout farklarÄ±.
 ///
-/// UniV3 slot0 (7 alan, uint8 feeProtocol — 248 bit, TEK slot):
+/// UniV3 slot0 (7 alan, uint8 feeProtocol â€” 248 bit, TEK slot):
 ///   [bits 0..159]   sqrtPriceX96 (uint160)
 ///   [bits 160..183] tick (int24, two's complement)
-///   [bits 184..199] observationIndex (uint16) — 0
-///   [bits 200..215] observationCardinality (uint16) — 0
-///   [bits 216..231] observationCardinalityNext (uint16) — 0
-///   [bits 232..239] feeProtocol (uint8) — 0
-///   [bits 240..247] unlocked (bool) — TRUE
+///   [bits 184..199] observationIndex (uint16) â€” 0
+///   [bits 200..215] observationCardinality (uint16) â€” 0
+///   [bits 216..231] observationCardinalityNext (uint16) â€” 0
+///   [bits 232..239] feeProtocol (uint8) â€” 0
+///   [bits 240..247] unlocked (bool) â€” TRUE
 ///
-/// PancakeSwap V3 slot0 (7 alan, uint32 feeProtocol — 272 bit > 256, İKİ slot!):
-///   Storage Slot N:   sqrtPriceX96 + tick + observation alanları (232 bit)
+/// PancakeSwap V3 slot0 (7 alan, uint32 feeProtocol â€” 272 bit > 256, Ä°KÄ° slot!):
+///   Storage Slot N:   sqrtPriceX96 + tick + observation alanlarÄ± (232 bit)
 ///   Storage Slot N+1: feeProtocol (uint32, bit 0-31) + unlocked (bool, bit 32)
-///   ÖNCEKİ BUG: unlocked slot N'de bit 240'a yazılıyordu → Pool Locked revert!
+///   Ã–NCEKÄ° BUG: unlocked slot N'de bit 240'a yazÄ±lÄ±yordu â†’ Pool Locked revert!
 ///
-/// Aerodrome CLPool slot0 (6 alan, feeProtocol YOK — 240 bit, TEK slot):
+/// Aerodrome CLPool slot0 (6 alan, feeProtocol YOK â€” 240 bit, TEK slot):
 ///   [bits 0..159]   sqrtPriceX96 (uint160)
 ///   [bits 160..183] tick (int24)
-///   [bits 184..231] observation alanları (48 bit)
-///   [bits 232..239] unlocked (bool) — TRUE
+///   [bits 184..231] observation alanlarÄ± (48 bit)
+///   [bits 232..239] unlocked (bool) â€” TRUE
 fn pack_slot0(sqrt_price_x96: U256, tick: i32, dex: DexType) -> RevmU256 {
     let mut packed = U256::ZERO;
 
-    // sqrtPriceX96 — lower 160 bits
+    // sqrtPriceX96 â€” lower 160 bits
     let mask_160 = (U256::from(1u64) << 160) - U256::from(1u64);
     packed = packed | (sqrt_price_x96 & mask_160);
 
-    // tick — int24 at bit 160 (two's complement, masked to 24 bits)
+    // tick â€” int24 at bit 160 (two's complement, masked to 24 bits)
     let tick_bits = if tick >= 0 {
         U256::from(tick as u32)
     } else {
@@ -166,14 +166,14 @@ fn pack_slot0(sqrt_price_x96: U256, tick: i32, dex: DexType) -> RevmU256 {
     let mask_24 = U256::from(0x00FF_FFFFu32);
     packed = packed | ((tick_bits & mask_24) << 160);
 
-    // unlocked = true (1) — position depends on DEX type
-    // PCS V3: uint32 feeProtocol (32 bit) slot 0'a SIĞMAZ (232+32=264 > 256)
-    //         feeProtocol + unlocked → slot N+1'e taşar
-    //         Bu yüzden slot 0'a unlocked yazılMAZ
+    // unlocked = true (1) â€” position depends on DEX type
+    // PCS V3: uint32 feeProtocol (32 bit) slot 0'a SIÄMAZ (232+32=264 > 256)
+    //         feeProtocol + unlocked â†’ slot N+1'e taÅŸar
+    //         Bu yÃ¼zden slot 0'a unlocked yazÄ±lMAZ
     match dex {
         DexType::PancakeSwapV3 => {
-            // PCS V3: unlocked slot 0'da değil, slot N+1'de (bit 32)
-            // Burada sadece sqrtPriceX96 + tick yazılır
+            // PCS V3: unlocked slot 0'da deÄŸil, slot N+1'de (bit 32)
+            // Burada sadece sqrtPriceX96 + tick yazÄ±lÄ±r
         }
         DexType::Aerodrome => {
             // Aerodrome: feeProtocol yok, unlocked bit 232
@@ -190,34 +190,34 @@ fn pack_slot0(sqrt_price_x96: U256, tick: i32, dex: DexType) -> RevmU256 {
 
 /// PancakeSwap V3 slot0 ikinci storage slot'u (slot N+1).
 ///
-/// PCS V3 Slot0 struct'ında uint32 feeProtocol 256 bit sınırını aştığı için
-/// feeProtocol + unlocked ayrı bir slot'a taşar:
-///   [bits 0..31]  feeProtocol (uint32) — 0 yazılır
-///   [bits 32..39] unlocked (bool) — TRUE olmalı
+/// PCS V3 Slot0 struct'Ä±nda uint32 feeProtocol 256 bit sÄ±nÄ±rÄ±nÄ± aÅŸtÄ±ÄŸÄ± iÃ§in
+/// feeProtocol + unlocked ayrÄ± bir slot'a taÅŸar:
+///   [bits 0..31]  feeProtocol (uint32) â€” 0 yazÄ±lÄ±r
+///   [bits 32..39] unlocked (bool) â€” TRUE olmalÄ±
 fn pack_pcs_v3_slot1_unlocked() -> RevmU256 {
     to_revm_u256(U256::from(1u64) << 32)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Simülasyon Motoru
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// SimÃ¼lasyon Motoru
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// Simülasyon motoru — havuz durumlarını REVM veritabanına yükler
+/// SimÃ¼lasyon motoru â€” havuz durumlarÄ±nÄ± REVM veritabanÄ±na yÃ¼kler
 ///
 /// v10.0 Singleton Mimarisi:
-///   - base_db: Bot başlatıldığında bir kez oluşturulur (bytecode + hesaplar)
-///   - Her blokta base_db klonlanır, sadece slot0/liquidity güncellenir
-///   - Bytecode her döngüde yeniden yüklenmez → ~2-3ms tasarruf
+///   - base_db: Bot baÅŸlatÄ±ldÄ±ÄŸÄ±nda bir kez oluÅŸturulur (bytecode + hesaplar)
+///   - Her blokta base_db klonlanÄ±r, sadece slot0/liquidity gÃ¼ncellenir
+///   - Bytecode her dÃ¶ngÃ¼de yeniden yÃ¼klenmez â†’ ~2-3ms tasarruf
 pub struct SimulationEngine {
-    /// Havuz bytecode önbellekleri (adres → bytecode)
+    /// Havuz bytecode Ã¶nbellekleri (adres â†’ bytecode)
     bytecode_cache: Vec<(Address, Vec<u8>)>,
-    /// v22.1: Arbitraj kontrat bytecode'u (zincirden alınmış)
-    /// build_db'de kontrat hesabına yüklenir — simülasyon gerçekçi olur
+    /// v22.1: Arbitraj kontrat bytecode'u (zincirden alÄ±nmÄ±ÅŸ)
+    /// build_db'de kontrat hesabÄ±na yÃ¼klenir â€” simÃ¼lasyon gerÃ§ekÃ§i olur
     contract_bytecode: Option<Vec<u8>>,
-    /// v22.1: Zincir ID'si (config'den alınır, hardcoded değil)
+    /// v22.1: Zincir ID'si (config'den alÄ±nÄ±r, hardcoded deÄŸil)
     chain_id: u64,
-    /// v10.0: Kalıcı temel veritabanı (bytecode + hesaplar yüklü)
-    /// Her simulate() çağrısında klonlanır, sadece slot'lar güncellenir
+    /// v10.0: KalÄ±cÄ± temel veritabanÄ± (bytecode + hesaplar yÃ¼klÃ¼)
+    /// Her simulate() Ã§aÄŸrÄ±sÄ±nda klonlanÄ±r, sadece slot'lar gÃ¼ncellenir
     base_db: Option<InMemoryDB>,
     /// base_db'deki caller ve contract adresleri
     base_caller: Option<Address>,
@@ -225,12 +225,12 @@ pub struct SimulationEngine {
 }
 
 impl SimulationEngine {
-    /// Yeni SimulationEngine oluştur
+    /// Yeni SimulationEngine oluÅŸtur
     pub fn new() -> Self {
         Self {
             bytecode_cache: Vec::new(),
             contract_bytecode: None,
-            chain_id: 8453, // Varsayılan: Base
+            chain_id: 8453, // VarsayÄ±lan: Base
             base_db: None,
             base_caller: None,
             base_contract: None,
@@ -242,16 +242,22 @@ impl SimulationEngine {
         self.chain_id = chain_id;
     }
 
-    /// v22.1: Kontrat bytecode'unu ayarla (zincirden alınmış)
+    /// v22.1: Kontrat bytecode'unu ayarla (zincirden alÄ±nmÄ±ÅŸ)
     pub fn set_contract_bytecode(&mut self, bytecode: Vec<u8>) {
         self.contract_bytecode = Some(bytecode);
     }
 
-    /// Havuz bytecode'larını önbelleğe al
+    /// Havuz bytecode'larÄ±nÄ± Ã¶nbelleÄŸe al
+    ///
+    /// v25.0: Append-only mode â€” mevcut cache temizlenmez, yeni havuzlar eklenir.
+    /// Hot-reload sÄ±rasÄ±nda sadece yeni havuzlar (slice) ile Ã§aÄŸrÄ±labilir;
+    /// clear() eski havuzlarÄ±n bytecode'larÄ±nÄ± siliyordu.
     pub fn cache_bytecodes(&mut self, pools: &[PoolConfig], states: &[SharedPoolState]) {
-        self.bytecode_cache.clear();
-
         for (config, state_lock) in pools.iter().zip(states.iter()) {
+            // Mevcut adres zaten cache'te varsa atla
+            if self.bytecode_cache.iter().any(|(addr, _)| *addr == config.address) {
+                continue;
+            }
             let state = state_lock.read();
             if let Some(ref code) = state.bytecode {
                 self.bytecode_cache.push((config.address, code.clone()));
@@ -259,12 +265,12 @@ impl SimulationEngine {
         }
     }
 
-    /// v10.0: Temel veritabanını bir kez oluştur (bytecode + hesaplar)
+    /// v10.0: Temel veritabanÄ±nÄ± bir kez oluÅŸtur (bytecode + hesaplar)
     ///
-    /// Bot başlatıldığında cache_bytecodes() sonrası çağrılır.
-    /// Bytecode ve hesap bilgileri kalıcı olarak base_db'ye yüklenir.
-    /// Sonraki simulate() çağrılarında bu klonlanır — bytecode yeniden
-    /// yüklenmez, sadece slot0 ve liquidity güncellenir.
+    /// Bot baÅŸlatÄ±ldÄ±ÄŸÄ±nda cache_bytecodes() sonrasÄ± Ã§aÄŸrÄ±lÄ±r.
+    /// Bytecode ve hesap bilgileri kalÄ±cÄ± olarak base_db'ye yÃ¼klenir.
+    /// Sonraki simulate() Ã§aÄŸrÄ±larÄ±nda bu klonlanÄ±r â€” bytecode yeniden
+    /// yÃ¼klenmez, sadece slot0 ve liquidity gÃ¼ncellenir.
     pub fn initialize_base_db(
         &mut self,
         pools: &[PoolConfig],
@@ -278,10 +284,10 @@ impl SimulationEngine {
         self.base_contract = Some(contract);
     }
 
-    /// v10.0: base_db'yi klonla ve sadece değişen slot'ları güncelle
+    /// v10.0: base_db'yi klonla ve sadece deÄŸiÅŸen slot'larÄ± gÃ¼ncelle
     ///
-    /// Bytecode zaten base_db'de mevcut — yeniden yüklenmez.
-    /// Sadece slot0 (sqrtPriceX96) ve slot4 (liquidity) güncellenir.
+    /// Bytecode zaten base_db'de mevcut â€” yeniden yÃ¼klenmez.
+    /// Sadece slot0 (sqrtPriceX96) ve slot4 (liquidity) gÃ¼ncellenir.
     /// Performans: ~0.05ms (eski: ~2-3ms)
     fn build_db_from_base(
         &self,
@@ -290,7 +296,7 @@ impl SimulationEngine {
     ) -> InMemoryDB {
         let mut db = self.base_db.as_ref().unwrap().clone();
 
-        // v20.0: StorageLayout şablonu ile DEX-bağımsız storage injection
+        // v20.0: StorageLayout ÅŸablonu ile DEX-baÄŸÄ±msÄ±z storage injection
         for (config, state_lock) in pools.iter().zip(states.iter()) {
             let state = state_lock.read();
             let addr = to_revm_addr(config.address);
@@ -303,7 +309,7 @@ impl SimulationEngine {
         db
     }
 
-    /// InMemoryDB oluştur ve havuz durumlarını doldur
+    /// InMemoryDB oluÅŸtur ve havuz durumlarÄ±nÄ± doldur
     fn build_db(
         &self,
         pools: &[PoolConfig],
@@ -313,7 +319,7 @@ impl SimulationEngine {
     ) -> InMemoryDB {
         let mut db = InMemoryDB::default();
 
-        // ── Havuz Kontratlarını Yükle ──────────────────────────────
+        // â”€â”€ Havuz KontratlarÄ±nÄ± YÃ¼kle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         for (config, state_lock) in pools.iter().zip(states.iter()) {
             let state = state_lock.read();
             let addr = to_revm_addr(config.address);
@@ -330,21 +336,21 @@ impl SimulationEngine {
                 db.insert_account_info(addr, info);
             }
 
-            // v20.0: StorageLayout şablonu ile DEX-bağımsız storage injection
+            // v20.0: StorageLayout ÅŸablonu ile DEX-baÄŸÄ±msÄ±z storage injection
             let layout = StorageLayout::for_dex(config.dex);
             layout.inject_slot0(&mut db, addr, state.sqrt_price_x96, state.tick, config.dex);
             layout.inject_liquidity(&mut db, addr, state.liquidity);
         }
 
-        // ── Caller Hesabı (Test ETH Bakiyesi) ─────────────────────
+        // â”€â”€ Caller HesabÄ± (Test ETH Bakiyesi) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         db.insert_account_info(
             to_revm_addr(caller),
             AccountInfo::from_balance(RevmU256::from(100_000_000_000_000_000_000u128)), // 100 ETH
         );
 
-        // ── Kontrat Hesabı ──────────────────────────────────────────
-        // v22.1: Kontrat bytecode'u varsa yükle — simülasyon gerçekçi olur.
-        // Bytecode yoksa boş hesap (sadece gas tahmini olarak kullanılır).
+        // â”€â”€ Kontrat HesabÄ± â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // v22.1: Kontrat bytecode'u varsa yÃ¼kle â€” simÃ¼lasyon gerÃ§ekÃ§i olur.
+        // Bytecode yoksa boÅŸ hesap (sadece gas tahmini olarak kullanÄ±lÄ±r).
         if let Some(ref code) = self.contract_bytecode {
             let bytecode = Bytecode::new_raw(RevmBytes::from(code.clone()));
             let info = AccountInfo::new(
@@ -362,17 +368,17 @@ impl SimulationEngine {
         db
     }
 
-    /// Arbitraj işlemini REVM'de simüle et
+    /// Arbitraj iÅŸlemini REVM'de simÃ¼le et
     ///
-    /// Simülasyon adımları:
-    ///   1. InMemoryDB'yi güncel havuz verileriyle doldur
-    ///   2. EVM ortamını yapılandır (caller, hedef, calldata, gas)
-    ///   3. İşlemi yerel olarak çalıştır
+    /// SimÃ¼lasyon adÄ±mlarÄ±:
+    ///   1. InMemoryDB'yi gÃ¼ncel havuz verileriyle doldur
+    ///   2. EVM ortamÄ±nÄ± yapÄ±landÄ±r (caller, hedef, calldata, gas)
+    ///   3. Ä°ÅŸlemi yerel olarak Ã§alÄ±ÅŸtÄ±r
     ///   4. Sonucu analiz et (Success/Revert/Halt)
     ///
     /// # Notlar
-    /// - Dış RPC çağrısı YAPILMAZ — tamamen yerel
-    /// - İlk block için ~0.5ms, sonraki bloklar için <0.1ms
+    /// - DÄ±ÅŸ RPC Ã§aÄŸrÄ±sÄ± YAPILMAZ â€” tamamen yerel
+    /// - Ä°lk block iÃ§in ~0.5ms, sonraki bloklar iÃ§in <0.1ms
     pub fn simulate(
         &self,
         pools: &[PoolConfig],
@@ -385,23 +391,23 @@ impl SimulationEngine {
         block_timestamp: u64,
         block_base_fee: u64,
     ) -> SimulationResult {
-        // 1. Veritabanını oluştur
-        // v10.0: base_db varsa klonla+güncelle (hızlı), yoksa sıfırdan oluştur (fallback)
+        // 1. VeritabanÄ±nÄ± oluÅŸtur
+        // v10.0: base_db varsa klonla+gÃ¼ncelle (hÄ±zlÄ±), yoksa sÄ±fÄ±rdan oluÅŸtur (fallback)
         let db = if self.base_db.is_some() {
             self.build_db_from_base(pools, states)
         } else {
             self.build_db(pools, states, caller, contract_address)
         };
 
-        // 2. EVM'yi yapılandır ve çalıştır
-        // v10.0: Timestamp ve base_fee artık zincir verisinden dinamik olarak gelir.
-        //        Eski: SystemTime::now() → yanlış zaman damgası, base_fee yok
+        // 2. EVM'yi yapÄ±landÄ±r ve Ã§alÄ±ÅŸtÄ±r
+        // v10.0: Timestamp ve base_fee artÄ±k zincir verisinden dinamik olarak gelir.
+        //        Eski: SystemTime::now() â†’ yanlÄ±ÅŸ zaman damgasÄ±, base_fee yok
         //        Yeni: block_header.timestamp ve block_header.base_fee_per_gas
         let mut evm = Evm::builder()
             .with_db(db)
             .with_spec_id(SpecId::CANCUN)
             .modify_cfg_env(|cfg| {
-                cfg.chain_id = self.chain_id; // v22.1: config'den, hardcoded değil
+                cfg.chain_id = self.chain_id; // v22.1: config'den, hardcoded deÄŸil
             })
             .modify_block_env(|block| {
                 block.number = RevmU256::from(current_block);
@@ -414,11 +420,11 @@ impl SimulationEngine {
                 tx.data = RevmBytes::from(calldata);
                 tx.value = to_revm_u256(value_wei);
                 tx.gas_limit = 1_500_000;
-                tx.nonce = None; // Nonce kontrolünü atla
+                tx.nonce = None; // Nonce kontrolÃ¼nÃ¼ atla
             })
             .build();
 
-        // 3. İşlemi çalıştır
+        // 3. Ä°ÅŸlemi Ã§alÄ±ÅŸtÄ±r
         match evm.transact() {
             Ok(result_and_state) => {
                 match result_and_state.result {
@@ -452,27 +458,27 @@ impl SimulationEngine {
                 SimulationResult {
                     success: false,
                     gas_used: 0,
-                    error: Some(format!("EVM hatası: {:?}", e)),
+                    error: Some(format!("EVM hatasÄ±: {:?}", e)),
                 }
             }
         }
     }
 
-    /// Basit matematiksel doğrulama simülasyonu
+    /// Basit matematiksel doÄŸrulama simÃ¼lasyonu
     ///
-    /// Tam REVM simülasyonu yerine hızlı bir kontrol yapar:
-    ///   - Havuz verileri geçerli mi?
-    ///   - Gerçek token kapasitesi (Δx/Δy) yeterli mi?
-    ///   - Fiyat makul aralıkta mı?
+    /// Tam REVM simÃ¼lasyonu yerine hÄ±zlÄ± bir kontrol yapar:
+    ///   - Havuz verileri geÃ§erli mi?
+    ///   - GerÃ§ek token kapasitesi (Î”x/Î”y) yeterli mi?
+    ///   - Fiyat makul aralÄ±kta mÄ±?
     ///
-    /// v20.0 KRİTİK DÜZELTME: Likidite kontrolü artık L parametresi ile
-    /// doğrudan karşılaştırma YAPMAZ. L, token miktarı değil, fiyat eğrisi
-    /// oranıdır. Bunun yerine, SqrtPriceMath formülleri (Δx, Δy) ile
-    /// havuzun mevcut fiyatından hedef fiyata kadar absorbe edebileceği
-    /// gerçek WETH miktarı hesaplanır.
+    /// v20.0 KRÄ°TÄ°K DÃœZELTME: Likidite kontrolÃ¼ artÄ±k L parametresi ile
+    /// doÄŸrudan karÅŸÄ±laÅŸtÄ±rma YAPMAZ. L, token miktarÄ± deÄŸil, fiyat eÄŸrisi
+    /// oranÄ±dÄ±r. Bunun yerine, SqrtPriceMath formÃ¼lleri (Î”x, Î”y) ile
+    /// havuzun mevcut fiyatÄ±ndan hedef fiyata kadar absorbe edebileceÄŸi
+    /// gerÃ§ek WETH miktarÄ± hesaplanÄ±r.
     ///
-    /// Bu fonksiyon REVM'in eksik state nedeniyle hatalı sonuç vereceği
-    /// durumlar için fallback olarak kullanılır.
+    /// Bu fonksiyon REVM'in eksik state nedeniyle hatalÄ± sonuÃ§ vereceÄŸi
+    /// durumlar iÃ§in fallback olarak kullanÄ±lÄ±r.
     pub fn validate_mathematical(
         &self,
         pools: &[PoolConfig],
@@ -481,7 +487,7 @@ impl SimulationEngine {
         sell_pool_idx: usize,
         amount_weth: f64,
     ) -> SimulationResult {
-        // Temel doğrulamalar
+        // Temel doÄŸrulamalar
         let buy_state = states[buy_pool_idx].read();
         let sell_state = states[sell_pool_idx].read();
 
@@ -490,11 +496,11 @@ impl SimulationEngine {
             return SimulationResult {
                 success: false,
                 gas_used: 0,
-                error: Some("Havuz(lar) aktif değil".into()),
+                error: Some("Havuz(lar) aktif deÄŸil".into()),
             };
         }
 
-        // 2. Fiyatlar makul aralıkta mı? (Anormal fiyat → önce kontrol et)
+        // 2. Fiyatlar makul aralÄ±kta mÄ±? (Anormal fiyat â†’ Ã¶nce kontrol et)
         if buy_state.eth_price_usd < 100.0
             || buy_state.eth_price_usd > 100_000.0
             || sell_state.eth_price_usd < 100.0
@@ -522,14 +528,14 @@ impl SimulationEngine {
             };
         }
 
-        // 4. v20.0: Gerçek token kapasitesi kontrolü (V3 fiyat eğrisi matematiği)
-        //    ESKİ (HATALI): amount_weth * 1e18 * 10.0 vs liquidity_f64
-        //      → L bir token miktarı DEĞİLDİR, bu karşılaştırma her zaman
-        //        geçerli işlemleri "Yetersiz Likidite" olarak reddediyordu.
-        //    YENİ: hard_liquidity_cap_weth() ile mevcut sqrtPriceX96'dan
-        //          itibaren V3 SqrtPriceMath formülleri (Δx = L·Q96·(1/√P_target - 1/√P)
-        //          veya Δy = L·(√P_target - √P)/Q96) kullanılarak havuzun
-        //          gerçek absorbe edebileceği WETH miktarı hesaplanır.
+        // 4. v20.0: GerÃ§ek token kapasitesi kontrolÃ¼ (V3 fiyat eÄŸrisi matematiÄŸi)
+        //    ESKÄ° (HATALI): amount_weth * 1e18 * 10.0 vs liquidity_f64
+        //      â†’ L bir token miktarÄ± DEÄÄ°LDÄ°R, bu karÅŸÄ±laÅŸtÄ±rma her zaman
+        //        geÃ§erli iÅŸlemleri "Yetersiz Likidite" olarak reddediyordu.
+        //    YENÄ°: hard_liquidity_cap_weth() ile mevcut sqrtPriceX96'dan
+        //          itibaren V3 SqrtPriceMath formÃ¼lleri (Î”x = LÂ·Q96Â·(1/âˆšP_target - 1/âˆšP)
+        //          veya Î”y = LÂ·(âˆšP_target - âˆšP)/Q96) kullanÄ±larak havuzun
+        //          gerÃ§ek absorbe edebileceÄŸi WETH miktarÄ± hesaplanÄ±r.
         {
             let buy_pool = &pools[buy_pool_idx];
             let sell_pool = &pools[sell_pool_idx];
@@ -565,16 +571,16 @@ impl SimulationEngine {
             }
         }
 
-        // Tüm kontroller geçti
-        // v20.0: Dinamik gas tahmini — swap adımı sayısına göre.
+        // TÃ¼m kontroller geÃ§ti
+        // v20.0: Dinamik gas tahmini â€” swap adÄ±mÄ± sayÄ±sÄ±na gÃ¶re.
         // Tipik V3 single-pool swap: ~130K gas
-        // Çapraz swap (2 havuz): ~260K gas
-        // Tick geçişi başına ~+20K gas ek yük
+        // Ã‡apraz swap (2 havuz): ~260K gas
+        // Tick geÃ§iÅŸi baÅŸÄ±na ~+20K gas ek yÃ¼k
         // Kontrat overhead (flash loan + callback): ~50K gas
         // Toplam tahmini: 260K + 50K = ~310K (minimum taban)
         let estimated_gas: u64 = {
-            let base_gas: u64 = 310_000; // 2-havuz çapraz swap baz gas
-            // TickBitmap varsa tahmini tick geçişi ekle
+            let base_gas: u64 = 310_000; // 2-havuz Ã§apraz swap baz gas
+            // TickBitmap varsa tahmini tick geÃ§iÅŸi ekle
             let buy_tick_crossings = buy_state.tick_bitmap.as_ref()
                 .map(|bm| bm.initialized_tick_count().min(5) as u64)
                 .unwrap_or(1);
@@ -592,215 +598,44 @@ impl SimulationEngine {
         }
     }
 
-    /// REVM + Multi-Tick tabanlı swap impact simülasyonu.
-    ///
-    /// TickBitmap varsa gerçek tick geçişlerini modelleyerek:
-    ///   - "50 ETH satarsam hangi tick'leri patlatırım?"
-    ///   - "Ortalama fiyatım ne olur?"
-    ///   - "Toplam slippage ne kadar?"
-    /// sorularına mikrosaniye içinde cevap verir.
-    #[allow(dead_code)]
-    pub fn estimate_swap_impact(
-        &self,
-        pools: &[PoolConfig],
-        states: &[SharedPoolState],
-        pool_idx: usize,
-        amount_weth: f64,
-    ) -> SwapImpactResult {
-        if pool_idx >= pools.len() || pool_idx >= states.len() {
-            return SwapImpactResult::failed("Geçersiz havuz indeksi");
-        }
-
-        let config = &pools[pool_idx];
-        let state = states[pool_idx].read();
-
-        if !state.is_active() {
-            return SwapImpactResult::failed("Havuz aktif değil");
-        }
-
-        // ── 1. REVM ile state doğrulama (opsiyonel) ─────────────────
-        let revm_validated = if state.bytecode.is_some() {
-            self.validate_state_via_revm(pools, states, pool_idx)
-        } else {
-            true
-        };
-
-        // ── 2. Multi-Tick Swap Impact Hesabı (U256 Exact Math) ───
-        let current_tick = state.tick;
-
-        // Güvenli maksimum swap miktarı (U256 tabanlı)
-        let max_safe = math::exact::max_safe_swap_amount_u256(
-            state.sqrt_price_x96, state.liquidity, config.token0_is_weth,
-            current_tick, config.tick_spacing,
-        );
-
-        // TickBitmap referansı al
-        let bitmap_ref = state.tick_bitmap.as_ref();
-
-        // U256 exact swap (on-chain deterministik kesinlik)
-        let swap_result = math::swap_weth_to_usdc_exact(
-            &state,
-            amount_weth,
-            config.fee_fraction,
-            config.token0_is_weth,
-            config.tick_spacing,
-            bitmap_ref,
-        );
-
-        let usdc_output = swap_result.total_output;
-        let effective_price = swap_result.effective_price;
-
-        // Slippage hesabı
-        let slippage_pct = if state.eth_price_usd > 0.0 {
-            ((state.eth_price_usd - effective_price) / state.eth_price_usd).abs() * 100.0
-        } else {
-            0.0
-        };
-
-        // Tick geçiş detayları
-        let tick_crossings_count = swap_result.tick_crossings.len() as u32;
-        let tick_crossings_detail: Vec<(i32, f64, i128)> = swap_result.tick_crossings.iter()
-            .map(|c| (c.tick, c.output_produced, c.liquidity_net))
-            .collect();
-
-        SwapImpactResult {
-            success: true,
-            usdc_output,
-            effective_price,
-            current_tick,
-            final_tick: swap_result.final_tick,
-            slippage_pct,
-            max_safe_amount: max_safe,
-            revm_validated,
-            used_real_bitmap: swap_result.used_real_bitmap,
-            tick_crossings_count,
-            tick_crossings_detail,
-            error: None,
-        }
-    }
-
-    /// REVM üzerinden havuz state'ini doğrula.
-    /// InMemoryDB'ye yüklenen slot0 verisinin tutarlılığını kontrol eder.
-    #[allow(dead_code)]
-    fn validate_state_via_revm(
-        &self,
-        pools: &[PoolConfig],
-        states: &[SharedPoolState],
-        pool_idx: usize,
-    ) -> bool {
-        let config = &pools[pool_idx];
-        let state = states[pool_idx].read();
-        let addr = to_revm_addr(config.address);
-
-        // Basit doğrulama: slot0 storage değeri RAM ile tutarlı mı?
-        let stored_sqrt = to_revm_u256(state.sqrt_price_x96);
-        let db_sqrt = {
-            let db = self.build_db(
-                pools, states,
-                Address::ZERO, Address::ZERO,
-            );
-            db.accounts.get(&addr)
-                .and_then(|acc| acc.storage.get(&RevmU256::ZERO))
-                .copied()
-                .unwrap_or(RevmU256::ZERO)
-        };
-
-        // sqrtPriceX96 slot0'ın alt 160 bit'inde saklanır
-        // Basit tutarlılık kontrolü: sıfır değilse geçerli
-        db_sqrt != RevmU256::ZERO && stored_sqrt != RevmU256::ZERO
-    }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Swap Impact Sonucu
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// REVM + Multi-Tick tabanlı swap impact analizi sonucu
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct SwapImpactResult {
-    /// Simülasyon başarılı mı?
-    pub success: bool,
-    /// Tahmini USDC çıktısı
-    pub usdc_output: f64,
-    /// Efektif swap fiyatı (USDC/WETH)
-    pub effective_price: f64,
-    /// Mevcut tick (swap öncesi)
-    pub current_tick: i32,
-    /// Son tick (swap sonrası)
-    pub final_tick: i32,
-    /// Tahmini slippage yüzdesi
-    pub slippage_pct: f64,
-    /// Güvenli maksimum swap miktarı (WETH)
-    pub max_safe_amount: f64,
-    /// REVM ile doğrulandı mı?
-    pub revm_validated: bool,
-    /// Gerçek TickBitmap kullanıldı mı?
-    pub used_real_bitmap: bool,
-    /// Geçilen tick sınır sayısı
-    pub tick_crossings_count: u32,
-    /// Tick geçiş detayları: (tick, output, liquidityNet)
-    pub tick_crossings_detail: Vec<(i32, f64, i128)>,
-    /// Hata mesajı (varsa)
-    pub error: Option<String>,
-}
-
-impl SwapImpactResult {
-    #[allow(dead_code)]
-    fn failed(msg: &str) -> Self {
-        Self {
-            success: false,
-            usdc_output: 0.0,
-            effective_price: 0.0,
-            current_tick: 0,
-            final_tick: 0,
-            slippage_pct: 0.0,
-            max_safe_amount: 0.0,
-            revm_validated: false,
-            used_real_bitmap: false,
-            tick_crossings_count: 0,
-            tick_crossings_detail: vec![],
-            error: Some(msg.into()),
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Calldata Payload Mühendisliği — 134 Byte Kompakt Kodlama (v9.0 Kontrat)
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Calldata Payload MÃ¼hendisliÄŸi â€” 134 Byte Kompakt Kodlama (v9.0 Kontrat)
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
-// Kontrat v9.0 ile uyumlu 134-byte calldata formatı:
+// Kontrat v9.0 ile uyumlu 134-byte calldata formatÄ±:
 //
 //   Offset  Boy   Alan
-//   ──────  ────  ─────────────────────────────────
+//   â”€â”€â”€â”€â”€â”€  â”€â”€â”€â”€  â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //   0x00    20B   Pool A adresi (UniV3 flash swap)
-//   0x14    20B   Pool B adresi (Slipstream satış)
-//   0x28    20B   owedToken (flash loan'a geri ödenen token adresi)
-//   0x3C    20B   receivedToken (flash loan'dan alınan + slipstream'e ödenen)
+//   0x14    20B   Pool B adresi (Slipstream satÄ±ÅŸ)
+//   0x28    20B   owedToken (flash loan'a geri Ã¶denen token adresi)
+//   0x3C    20B   receivedToken (flash loan'dan alÄ±nan + slipstream'e Ã¶denen)
 //   0x50    32B   Miktar (uint256, big-endian)
-//   0x70     1B   UniV3 Yön (0=zeroForOne, 1=oneForZero)
-//   0x71     1B   Slipstream Yön (0=zeroForOne, 1=oneForZero)
-//   0x72    16B   minProfit (uint128, big-endian — sandviç koruması)
-//   0x82     4B   deadlineBlock (uint32, big-endian — blok son kullanma)
-//   ──────  ────  ─────────────────────────────────
+//   0x70     1B   UniV3 YÃ¶n (0=zeroForOne, 1=oneForZero)
+//   0x71     1B   Slipstream YÃ¶n (0=zeroForOne, 1=oneForZero)
+//   0x72    16B   minProfit (uint128, big-endian â€” sandviÃ§ korumasÄ±)
+//   0x82     4B   deadlineBlock (uint32, big-endian â€” blok son kullanma)
+//   â”€â”€â”€â”€â”€â”€  â”€â”€â”€â”€  â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //   Toplam: 134B  (v8.0: 130B + 4B deadlineBlock)
 //
-// Gas tasarrufu: ABI'nin 260+ byte'ına karşı ~%48 tasarruf
-// Güvenlik: minProfit + deadlineBlock ile MEV + stale TX koruması
-// ─────────────────────────────────────────────────────────────────────────────
+// Gas tasarrufu: ABI'nin 260+ byte'Ä±na karÅŸÄ± ~%48 tasarruf
+// GÃ¼venlik: minProfit + deadlineBlock ile MEV + stale TX korumasÄ±
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// 134-byte kompakt calldata kodla (kontrat v9.0 uyumlu)
 ///
 /// # Parametreler
-/// - `pool_a`: UniV3 havuzu (flash swap kaynağı)
-/// - `pool_b`: Slipstream havuzu (satış hedefi)
-/// - `owed_token`: Flash loan geri ödemesi için token adresi
-/// - `received_token`: Flash loan'dan alınan token adresi
-/// - `amount_in_wei`: İşlem miktarı (uint256, big-endian)
-/// - `uni_direction`: UniV3 yön (0=zeroForOne, 1=oneForZero)
-/// - `aero_direction`: Slipstream yön (0=zeroForOne, 1=oneForZero)
-/// - `min_profit`: Minimum kâr eşiği (uint128, wei cinsinden)
-/// - `deadline_block`: Son geçerli blok numarası (uint32)
+/// - `pool_a`: UniV3 havuzu (flash swap kaynaÄŸÄ±)
+/// - `pool_b`: Slipstream havuzu (satÄ±ÅŸ hedefi)
+/// - `owed_token`: Flash loan geri Ã¶demesi iÃ§in token adresi
+/// - `received_token`: Flash loan'dan alÄ±nan token adresi
+/// - `amount_in_wei`: Ä°ÅŸlem miktarÄ± (uint256, big-endian)
+/// - `uni_direction`: UniV3 yÃ¶n (0=zeroForOne, 1=oneForZero)
+/// - `aero_direction`: Slipstream yÃ¶n (0=zeroForOne, 1=oneForZero)
+/// - `min_profit`: Minimum kÃ¢r eÅŸiÄŸi (uint128, wei cinsinden)
+/// - `deadline_block`: Son geÃ§erli blok numarasÄ± (uint32)
 pub fn encode_compact_calldata(
     pool_a: Address,
     pool_b: Address,
@@ -815,40 +650,40 @@ pub fn encode_compact_calldata(
     // Tam 134 byte: 20+20+20+20+32+1+1+16+4
     let mut calldata = Vec::with_capacity(134);
 
-    // [0x00..0x14] Pool A adresi (UniV3) — 20 byte
+    // [0x00..0x14] Pool A adresi (UniV3) â€” 20 byte
     calldata.extend_from_slice(pool_a.as_slice());
 
-    // [0x14..0x28] Pool B adresi (Slipstream) — 20 byte
+    // [0x14..0x28] Pool B adresi (Slipstream) â€” 20 byte
     calldata.extend_from_slice(pool_b.as_slice());
 
-    // [0x28..0x3C] owedToken adresi — 20 byte
+    // [0x28..0x3C] owedToken adresi â€” 20 byte
     calldata.extend_from_slice(owed_token.as_slice());
 
-    // [0x3C..0x50] receivedToken adresi — 20 byte
+    // [0x3C..0x50] receivedToken adresi â€” 20 byte
     calldata.extend_from_slice(received_token.as_slice());
 
-    // [0x50..0x70] Miktar — uint256, 32 byte big-endian
+    // [0x50..0x70] Miktar â€” uint256, 32 byte big-endian
     calldata.extend_from_slice(&amount_in_wei.to_be_bytes::<32>());
 
-    // [0x70] UniV3 Yön — 1 byte
+    // [0x70] UniV3 YÃ¶n â€” 1 byte
     calldata.push(uni_direction);
 
-    // [0x71] Slipstream Yön — 1 byte
+    // [0x71] Slipstream YÃ¶n â€” 1 byte
     calldata.push(aero_direction);
 
-    // [0x72..0x82] minProfit — uint128, 16 byte big-endian
+    // [0x72..0x82] minProfit â€” uint128, 16 byte big-endian
     calldata.extend_from_slice(&min_profit.to_be_bytes());
 
-    // [0x82..0x86] deadlineBlock — uint32, 4 byte big-endian
+    // [0x82..0x86] deadlineBlock â€” uint32, 4 byte big-endian
     calldata.extend_from_slice(&deadline_block.to_be_bytes());
 
-    debug_assert_eq!(calldata.len(), 134, "Kompakt calldata tam 134 byte olmalı");
+    debug_assert_eq!(calldata.len(), 134, "Kompakt calldata tam 134 byte olmalÄ±");
     calldata
 }
 
-/// Kompakt calldata'yı çözümle (test/debug için)
+/// Kompakt calldata'yÄ± Ã§Ã¶zÃ¼mle (test/debug iÃ§in)
 ///
-/// 134 byte → (pool_a, pool_b, owed_token, received_token, amount, uni_dir, aero_dir, min_profit, deadline_block)
+/// 134 byte â†’ (pool_a, pool_b, owed_token, received_token, amount, uni_dir, aero_dir, min_profit, deadline_block)
 #[allow(dead_code)]
 pub fn decode_compact_calldata(data: &[u8]) -> Option<(Address, Address, Address, Address, U256, u8, u8, u128, u32)> {
     if data.len() != 134 {
@@ -868,14 +703,14 @@ pub fn decode_compact_calldata(data: &[u8]) -> Option<(Address, Address, Address
     Some((pool_a, pool_b, owed_token, received_token, amount, uni_direction, aero_direction, min_profit, deadline_block))
 }
 
-/// Kompakt calldata'yı hex string olarak formatla (log/debug)
+/// Kompakt calldata'yÄ± hex string olarak formatla (log/debug)
 pub fn format_compact_calldata_hex(calldata: &[u8]) -> String {
     format!("0x{}", hex::encode(calldata))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Calldata Testleri (134-byte v9.0 formatı)
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Calldata Testleri (134-byte v9.0 formatÄ±)
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[cfg(test)]
 mod calldata_tests {
@@ -897,7 +732,7 @@ mod calldata_tests {
             amount, 0x00, 0x01, 1_000_000u128, 99_999_999u32,
         );
 
-        assert_eq!(calldata.len(), 134, "Kompakt calldata 134 byte olmalı");
+        assert_eq!(calldata.len(), 134, "Kompakt calldata 134 byte olmalÄ±");
     }
 
     #[test]
@@ -913,19 +748,19 @@ mod calldata_tests {
         );
         assert_eq!(calldata.len(), 134);
 
-        // Çözümle (round-trip)
+        // Ã‡Ã¶zÃ¼mle (round-trip)
         let (dec_a, dec_b, dec_owed, dec_recv, dec_amount, dec_uni, dec_aero, dec_profit, dec_deadline) =
-            decode_compact_calldata(&calldata).expect("Decode başarısız");
+            decode_compact_calldata(&calldata).expect("Decode baÅŸarÄ±sÄ±z");
 
-        assert_eq!(dec_a, POOL_A, "Pool A adresi eşleşmeli");
-        assert_eq!(dec_b, POOL_B, "Pool B adresi eşleşmeli");
-        assert_eq!(dec_owed, USDC, "owedToken eşleşmeli");
-        assert_eq!(dec_recv, WETH, "receivedToken eşleşmeli");
-        assert_eq!(dec_amount, amount, "Miktar eşleşmeli");
-        assert_eq!(dec_uni, 0x01, "UniV3 yön eşleşmeli");
-        assert_eq!(dec_aero, 0x00, "Slipstream yön eşleşmeli");
-        assert_eq!(dec_profit, min_profit, "minProfit eşleşmeli");
-        assert_eq!(dec_deadline, deadline, "deadlineBlock eşleşmeli");
+        assert_eq!(dec_a, POOL_A, "Pool A adresi eÅŸleÅŸmeli");
+        assert_eq!(dec_b, POOL_B, "Pool B adresi eÅŸleÅŸmeli");
+        assert_eq!(dec_owed, USDC, "owedToken eÅŸleÅŸmeli");
+        assert_eq!(dec_recv, WETH, "receivedToken eÅŸleÅŸmeli");
+        assert_eq!(dec_amount, amount, "Miktar eÅŸleÅŸmeli");
+        assert_eq!(dec_uni, 0x01, "UniV3 yÃ¶n eÅŸleÅŸmeli");
+        assert_eq!(dec_aero, 0x00, "Slipstream yÃ¶n eÅŸleÅŸmeli");
+        assert_eq!(dec_profit, min_profit, "minProfit eÅŸleÅŸmeli");
+        assert_eq!(dec_deadline, deadline, "deadlineBlock eÅŸleÅŸmeli");
     }
 
     #[test]
@@ -939,15 +774,15 @@ mod calldata_tests {
 
         let cd = encode_compact_calldata(pool_a, pool_b, owed, recv, amount, 0x00, 0x01, 0xFF, deadline);
 
-        // [0..20] = pool_a → son byte 0x01
+        // [0..20] = pool_a â†’ son byte 0x01
         assert_eq!(cd[19], 0x01, "Pool A son byte = 0x01");
-        // [20..40] = pool_b → son byte 0x02
+        // [20..40] = pool_b â†’ son byte 0x02
         assert_eq!(cd[39], 0x02, "Pool B son byte = 0x02");
-        // [40..60] = owedToken → son byte 0x03
+        // [40..60] = owedToken â†’ son byte 0x03
         assert_eq!(cd[59], 0x03, "owedToken son byte = 0x03");
-        // [60..80] = receivedToken → son byte 0x04
+        // [60..80] = receivedToken â†’ son byte 0x04
         assert_eq!(cd[79], 0x04, "receivedToken son byte = 0x04");
-        // [80..112] = amount (32 byte big-endian, değer=1, son byte=0x01)
+        // [80..112] = amount (32 byte big-endian, deÄŸer=1, son byte=0x01)
         assert_eq!(cd[111], 0x01, "Amount son byte = 0x01");
         assert_eq!(cd[80], 0x00, "Amount ilk byte = 0x00");
         // [112] = UniV3 direction
@@ -966,21 +801,21 @@ mod calldata_tests {
 
     #[test]
     fn test_compact_calldata_invalid_length_rejected() {
-        // 133 byte (eksik) — decode None döndürmeli
+        // 133 byte (eksik) â€” decode None dÃ¶ndÃ¼rmeli
         let short = vec![0u8; 133];
         assert!(decode_compact_calldata(&short).is_none(), "133 byte reddedilmeli");
 
-        // 135 byte (fazla) — decode None döndürmeli
+        // 135 byte (fazla) â€” decode None dÃ¶ndÃ¼rmeli
         let long = vec![0u8; 135];
         assert!(decode_compact_calldata(&long).is_none(), "135 byte reddedilmeli");
 
-        // Eski 130 byte — reddedilmeli
+        // Eski 130 byte â€” reddedilmeli
         let old = vec![0u8; 130];
         assert!(decode_compact_calldata(&old).is_none(), "130 byte eski format reddedilmeli");
 
-        // Boş veri
+        // BoÅŸ veri
         let empty: Vec<u8> = vec![];
-        assert!(decode_compact_calldata(&empty).is_none(), "Boş veri reddedilmeli");
+        assert!(decode_compact_calldata(&empty).is_none(), "BoÅŸ veri reddedilmeli");
     }
 
     #[test]
@@ -998,7 +833,7 @@ mod calldata_tests {
 
         assert_eq!(compact.len(), 134);
         assert_eq!(abi_size, 292);
-        assert!(compact.len() < abi_size, "Kompakt format ABI'den küçük olmalı");
+        assert!(compact.len() < abi_size, "Kompakt format ABI'den kÃ¼Ã§Ã¼k olmalÄ±");
 
         let saved = abi_size - compact.len();
         assert_eq!(saved, 158, "158 byte tasarruf");
@@ -1015,10 +850,10 @@ mod calldata_tests {
         let cd = encode_compact_calldata(pool_a, pool_b, owed, recv, amount, 0x00, 0x01, 0, 100u32);
         let hex_str = format_compact_calldata_hex(&cd);
 
-        // "0x" ile başlamalı
-        assert!(hex_str.starts_with("0x"), "Hex 0x ile başlamalı");
+        // "0x" ile baÅŸlamalÄ±
+        assert!(hex_str.starts_with("0x"), "Hex 0x ile baÅŸlamalÄ±");
         // 134 byte = 268 hex karakter + "0x" = 270 karakter
-        assert_eq!(hex_str.len(), 270, "Hex string 270 karakter olmalı");
+        assert_eq!(hex_str.len(), 270, "Hex string 270 karakter olmalÄ±");
     }
 
     #[test]
@@ -1032,17 +867,17 @@ mod calldata_tests {
         assert_eq!(calldata.len(), 134);
 
         let (_, _, _, _, _, _, _, decoded_profit, decoded_deadline) =
-            decode_compact_calldata(&calldata).expect("Decode başarısız");
+            decode_compact_calldata(&calldata).expect("Decode baÅŸarÄ±sÄ±z");
         assert_eq!(decoded_profit, max_profit, "u128::MAX minProfit round-trip");
         assert_eq!(decoded_deadline, u32::MAX, "u32::MAX deadlineBlock round-trip");
     }
 
     #[test]
     fn test_real_base_scenario() {
-        // Gerçek Base Network senaryosu:
+        // GerÃ§ek Base Network senaryosu:
         // UniV3 WETH/USDC 0.05% havuzundan flash swap ile USDC al
         // Slipstream'de USDC ile WETH geri al
-        // owedToken = WETH (UniV3'e geri öde)
+        // owedToken = WETH (UniV3'e geri Ã¶de)
         // receivedToken = USDC (UniV3'den al, Slipstream'e ver)
         let amount = U256::from(1_000_000_000_000_000_000u128); // 1 WETH
         let min_profit = 500_000u128; // 0.5 USDC (6 decimal)
@@ -1050,19 +885,19 @@ mod calldata_tests {
 
         let calldata = encode_compact_calldata(
             POOL_A, POOL_B,
-            WETH,    // owedToken (WETH borçlu)
-            USDC,    // receivedToken (USDC alınan)
+            WETH,    // owedToken (WETH borÃ§lu)
+            USDC,    // receivedToken (USDC alÄ±nan)
             amount,
-            0x01,   // UniV3: oneForZero (WETH al = zeroForOne=false → direction=1)
-            0x00,   // Slipstream: zeroForOne (USDC sat → WETH al)
+            0x01,   // UniV3: oneForZero (WETH al = zeroForOne=false â†’ direction=1)
+            0x00,   // Slipstream: zeroForOne (USDC sat â†’ WETH al)
             min_profit,
             deadline,
         );
 
         assert_eq!(calldata.len(), 134);
 
-        // Round-trip doğrula  
-        let decoded = decode_compact_calldata(&calldata).expect("Decode başarısız");
+        // Round-trip doÄŸrula  
+        let decoded = decode_compact_calldata(&calldata).expect("Decode baÅŸarÄ±sÄ±z");
         assert_eq!(decoded.0, POOL_A);
         assert_eq!(decoded.1, POOL_B);
         assert_eq!(decoded.2, WETH);
@@ -1075,16 +910,16 @@ mod calldata_tests {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // L2 Sequencer Reorg & Stale State Testleri
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
-// Base, tekil sequencer kullanan bir L2'dir. Sequencer yoğunluk anlarında
-// reorg yapabilir — iyimser (optimistic) state güncellemesi yapılmışsa
-// bot "hayalet fırsat" üzerine işlem gönderebilir. Bu test modülü,
-// validate_mathematical fonksiyonunun bayat (stale) veya tutarsız state'leri
-// doğru şekilde reddettiğini kanıtlar.
-// ─────────────────────────────────────────────────────────────────────────────
+// Base, tekil sequencer kullanan bir L2'dir. Sequencer yoÄŸunluk anlarÄ±nda
+// reorg yapabilir â€” iyimser (optimistic) state gÃ¼ncellemesi yapÄ±lmÄ±ÅŸsa
+// bot "hayalet fÄ±rsat" Ã¼zerine iÅŸlem gÃ¶nderebilir. Bu test modÃ¼lÃ¼,
+// validate_mathematical fonksiyonunun bayat (stale) veya tutarsÄ±z state'leri
+// doÄŸru ÅŸekilde reddettiÄŸini kanÄ±tlar.
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[cfg(test)]
 mod sequencer_reorg_tests {
@@ -1128,7 +963,7 @@ mod sequencer_reorg_tests {
     }
 
     fn make_active_state(eth_price: f64, liquidity: u128, block: u64) -> SharedPoolState {
-        // v20.0: Gerçekçi sqrtPriceX96 — WETH/USDC (18dec/6dec) formatında
+        // v20.0: GerÃ§ekÃ§i sqrtPriceX96 â€” WETH/USDC (18dec/6dec) formatÄ±nda
         let price_ratio = eth_price * 1e-12;
         let tick = (price_ratio.ln() / 1.0001_f64.ln()).floor() as i32;
         let sqrt_price_x96_u256 = crate::math::exact::get_sqrt_ratio_at_tick(tick);
@@ -1153,19 +988,19 @@ mod sequencer_reorg_tests {
 
     /// L2 Sequencer Reorg Testi: Bayat state reddedilmeli.
     ///
-    /// Senaryo: Bot pending TX'den iyimser state güncellemesi yaptı.
-    /// Sequencer bu TX'i düşürdü (dropped). State artık bayat.
-    /// validate_mathematical() 5000ms staleness eşiğini aşan veriyi reddetmeli.
+    /// Senaryo: Bot pending TX'den iyimser state gÃ¼ncellemesi yaptÄ±.
+    /// Sequencer bu TX'i dÃ¼ÅŸÃ¼rdÃ¼ (dropped). State artÄ±k bayat.
+    /// validate_mathematical() 5000ms staleness eÅŸiÄŸini aÅŸan veriyi reddetmeli.
     #[test]
     fn test_sequencer_reorg_handling() {
         let pools = make_pool_configs();
         let sim = SimulationEngine::new();
 
-        // Havuz A: taze state (henüz güncel)
+        // Havuz A: taze state (henÃ¼z gÃ¼ncel)
         let state_a = make_active_state(2500.0, 10_000_000_000_000_000_000, 100);
 
-        // Havuz B: bayat state (pending TX düşürüldü → state güncellenmedi)
-        // Son güncelleme 6 saniye önceydi → staleness_ms() > 5000
+        // Havuz B: bayat state (pending TX dÃ¼ÅŸÃ¼rÃ¼ldÃ¼ â†’ state gÃ¼ncellenmedi)
+        // Son gÃ¼ncelleme 6 saniye Ã¶nceydi â†’ staleness_ms() > 5000
         let price_ratio_b: f64 = 2510.0 * 1e-12;
         let tick_b = (price_ratio_b.ln() / 1.0001_f64.ln()).floor() as i32;
         let sqrt_price_x96_b = crate::math::exact::get_sqrt_ratio_at_tick(tick_b);
@@ -1177,7 +1012,7 @@ mod sequencer_reorg_tests {
             liquidity: 10_000_000_000_000_000_000,
             liquidity_f64: 10_000_000_000_000_000_000.0,
             eth_price_usd: 2510.0,
-            last_block: 98, // 2 blok geride — reorg sonrası
+            last_block: 98, // 2 blok geride â€” reorg sonrasÄ±
             last_update: Instant::now() - Duration::from_secs(6), // 6s bayat
             is_initialized: true,
             bytecode: None,
@@ -1187,40 +1022,40 @@ mod sequencer_reorg_tests {
 
         let states: Vec<SharedPoolState> = vec![state_a, state_b];
 
-        // Simülasyon: bayat state'li havuz → BAŞARISIZ olmalı
+        // SimÃ¼lasyon: bayat state'li havuz â†’ BAÅARISIZ olmalÄ±
         let result = sim.validate_mathematical(&pools, &states, 0, 1, 1.0);
-        assert!(!result.success, "Bayat (stale) state ile simülasyon reddedilmeli");
+        assert!(!result.success, "Bayat (stale) state ile simÃ¼lasyon reddedilmeli");
         assert!(
             result.error.as_deref().unwrap_or("").contains("Bayat"),
-            "Hata mesajı 'Bayat' içermeli, aldığımız: {:?}",
+            "Hata mesajÄ± 'Bayat' iÃ§ermeli, aldÄ±ÄŸÄ±mÄ±z: {:?}",
             result.error
         );
     }
 
-    /// "Hayalet fırsat" testleri: Sequencer reorg sonrası geçersiz fiyatlar.
+    /// "Hayalet fÄ±rsat" testleri: Sequencer reorg sonrasÄ± geÃ§ersiz fiyatlar.
     ///
-    /// Senaryo: Pending TX'den alınan fiyat 2500$, ancak TX düşürüldüğünde
-    /// gerçek fiyat 0$ (veri yok/sıfırlandı). validate_mathematical bunu
-    /// "Havuz aktif değil" olarak reddetmeli.
+    /// Senaryo: Pending TX'den alÄ±nan fiyat 2500$, ancak TX dÃ¼ÅŸÃ¼rÃ¼ldÃ¼ÄŸÃ¼nde
+    /// gerÃ§ek fiyat 0$ (veri yok/sÄ±fÄ±rlandÄ±). validate_mathematical bunu
+    /// "Havuz aktif deÄŸil" olarak reddetmeli.
     #[test]
     fn test_sequencer_reorg_phantom_opportunity() {
         let pools = make_pool_configs();
         let sim = SimulationEngine::new();
 
-        // İyimser state: pending TX'den alınan fiyat ($2500)
+        // Ä°yimser state: pending TX'den alÄ±nan fiyat ($2500)
         let state_a = make_active_state(2500.0, 10_000_000_000_000_000_000, 100);
 
-        // Reorg sonrası havuz B: fiyat sıfırlandı (dropped TX)
+        // Reorg sonrasÄ± havuz B: fiyat sÄ±fÄ±rlandÄ± (dropped TX)
         let state_b = Arc::new(RwLock::new(PoolState {
             sqrt_price_x96: U256::ZERO,
             sqrt_price_f64: 0.0,
             tick: 0,
-            liquidity: 0, // Likidite de sıfır
+            liquidity: 0, // Likidite de sÄ±fÄ±r
             liquidity_f64: 0.0,
             eth_price_usd: 0.0,
             last_block: 100,
             last_update: Instant::now(),
-            is_initialized: false, // Havuz başlatılmamış gibi
+            is_initialized: false, // Havuz baÅŸlatÄ±lmamÄ±ÅŸ gibi
             bytecode: None,
             tick_bitmap: None,
             live_fee_bps: None,
@@ -1229,18 +1064,18 @@ mod sequencer_reorg_tests {
         let states: Vec<SharedPoolState> = vec![state_a, state_b];
 
         let result = sim.validate_mathematical(&pools, &states, 0, 1, 1.0);
-        assert!(!result.success, "Hayalet fırsat (phantom opportunity) reddedilmeli");
+        assert!(!result.success, "Hayalet fÄ±rsat (phantom opportunity) reddedilmeli");
         assert!(
-            result.error.as_deref().unwrap_or("").contains("aktif değil"),
-            "Hata mesajı 'aktif değil' içermeli: {:?}",
+            result.error.as_deref().unwrap_or("").contains("aktif deÄŸil"),
+            "Hata mesajÄ± 'aktif deÄŸil' iÃ§ermeli: {:?}",
             result.error
         );
     }
 
-    /// Çift bayat state testi: Her iki havuz da stale.
+    /// Ã‡ift bayat state testi: Her iki havuz da stale.
     ///
-    /// Senaryo: Sequencer tam kesintide, hiçbir güncelleme gelmiyor.
-    /// Tüm havuzlar 10+ saniye bayat → simülasyon kesinlikle reddedilmeli.
+    /// Senaryo: Sequencer tam kesintide, hiÃ§bir gÃ¼ncelleme gelmiyor.
+    /// TÃ¼m havuzlar 10+ saniye bayat â†’ simÃ¼lasyon kesinlikle reddedilmeli.
     #[test]
     fn test_sequencer_full_outage_both_pools_stale() {
         let pools = make_pool_configs();
@@ -1273,12 +1108,12 @@ mod sequencer_reorg_tests {
         assert!(!result.success, "Tam kesintide her iki bayat havuz reddedilmeli");
         assert!(
             result.error.as_deref().unwrap_or("").contains("Bayat"),
-            "Hata 'Bayat' içermeli: {:?}",
+            "Hata 'Bayat' iÃ§ermeli: {:?}",
             result.error
         );
     }
 
-    /// Taze state → simülasyon başarılı olmalı (pozitif kontrol).
+    /// Taze state â†’ simÃ¼lasyon baÅŸarÄ±lÄ± olmalÄ± (pozitif kontrol).
     #[test]
     fn test_fresh_state_passes_validation() {
         let pools = make_pool_configs();
@@ -1290,11 +1125,11 @@ mod sequencer_reorg_tests {
         ];
 
         let result = sim.validate_mathematical(&pools, &states, 0, 1, 1.0);
-        assert!(result.success, "Taze state ile simülasyon başarılı olmalı");
-        assert!(result.error.is_none(), "Hata mesajı olmamalı");
+        assert!(result.success, "Taze state ile simÃ¼lasyon baÅŸarÄ±lÄ± olmalÄ±");
+        assert!(result.error.is_none(), "Hata mesajÄ± olmamalÄ±");
     }
 
-    /// Anormal fiyat testi: Reorg sonrası havuz fiyatı saçma değere ulaşmış.
+    /// Anormal fiyat testi: Reorg sonrasÄ± havuz fiyatÄ± saÃ§ma deÄŸere ulaÅŸmÄ±ÅŸ.
     #[test]
     fn test_sequencer_reorg_abnormal_price() {
         let pools = make_pool_configs();
@@ -1302,17 +1137,17 @@ mod sequencer_reorg_tests {
 
         // Normal havuz
         let state_a = make_active_state(2500.0, 10_000_000_000_000_000_000, 100);
-        // Reorg sonrası absürd fiyat — flash loan manipülasyonu veya veri bozulması
+        // Reorg sonrasÄ± absÃ¼rd fiyat â€” flash loan manipÃ¼lasyonu veya veri bozulmasÄ±
         let state_b = make_active_state(999_999.0, 10_000_000_000_000_000_000, 100);
 
         let states: Vec<SharedPoolState> = vec![state_a, state_b];
 
         let result = sim.validate_mathematical(&pools, &states, 0, 1, 1.0);
-        // 999,999 < 100,000 sınırı aşılıyor → anormal fiyat reddedilmeli
+        // 999,999 < 100,000 sÄ±nÄ±rÄ± aÅŸÄ±lÄ±yor â†’ anormal fiyat reddedilmeli
         assert!(!result.success, "Anormal fiyat ($999,999) reddedilmeli");
         assert!(
             result.error.as_deref().unwrap_or("").contains("Anormal fiyat"),
-            "Hata 'Anormal fiyat' içermeli: {:?}",
+            "Hata 'Anormal fiyat' iÃ§ermeli: {:?}",
             result.error
         );
     }

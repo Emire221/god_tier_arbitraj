@@ -25,11 +25,13 @@ mod key_manager;
 mod transport;
 mod executor;
 mod pool_discovery;
+mod discovery_engine;
 
 use types::*;
 use state_sync::*;
 use simulator::SimulationEngine;
 use strategy::*;
+use discovery_engine::{DiscoveryConfig, DiscoveryEngine, LivePoolRegistry};
 
 use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder, WsConnect};
@@ -60,7 +62,7 @@ fn print_banner(config: &BotConfig) {
     );
     println!(
         "{}",
-        "║       ARBITRAJ BOTU v9.0 — Kuantum Beyin III                   ║"
+        "║       ARBITRAJ BOTU v25.0 — Kuantum Beyin IV                   ║"
             .cyan().bold()
     );
     println!(
@@ -72,6 +74,11 @@ fn print_banner(config: &BotConfig) {
         "{}",
         "╠══════════════════════════════════════════════════════════════════╣"
             .cyan().bold()
+    );
+    println!(
+        "{}",
+        "║  [v25] Otonom Keşif: Factory WSS + Multi-API + Skorlama + GC   ║"
+            .cyan()
     );
     println!(
         "{}",
@@ -513,7 +520,10 @@ async fn main() -> Result<()> {
     }
 
     let matched_cfg = pool_discovery::load_matched_pools()?;
-    let (pools, pair_combos) = pool_discovery::build_runtime(&matched_cfg)?;
+    let (pools_initial, pair_combos_initial) = pool_discovery::build_runtime(&matched_cfg)?;
+    // v25.0: Havuz listeleri artık mutable — hot-reload için
+    let mut pools = pools_initial;
+    let mut pair_combos = pair_combos_initial;
 
     // ═══ v21.0: PRIVATE RPC ZORUNLULUĞU ═══
     // v21.0: Public mempool gönderimi tamamen kaldırıldı.
@@ -579,7 +589,7 @@ async fn main() -> Result<()> {
             );
         }
 
-        match run_bot(&config, &pools, &pair_combos).await {
+        match run_bot(&config, &mut pools, &mut pair_combos).await {
             Ok(_) => {
                 println!(
                     "\n  {} Bağlantı kesildi. Yeniden bağlanılıyor...",
@@ -633,7 +643,7 @@ async fn main() -> Result<()> {
 // BOT MOTORU — Blok Dinle → State Sync → Fırsat Tara → Simüle → Yürüt
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_discovery::PairCombo]) -> Result<()> {
+async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &mut Vec<pool_discovery::PairCombo>) -> Result<()> {
     // ══════════════ CANCELLATION TOKEN (v11.0: Zombi Thread Önleme) ══════════════
     // Her run_bot çağrısında yeni bir CancellationToken üretilir.
     // Arka plan listener'larına (pending_tx, swap_event) paslanır.
@@ -719,7 +729,7 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
     );
 
     // ══════════════ PAYLAŞIMLI DURUM ══════════════
-    let states: Vec<SharedPoolState> = pools.iter()
+    let mut states: Vec<SharedPoolState> = pools.iter()
         .map(|_| Arc::new(RwLock::new(PoolState::default())))
         .collect();
 
@@ -905,6 +915,11 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
     // Base L2 sequencer'daki bekleyen swap TX'lerini arka planda dinle
     // ve etkilenen havuzların durumlarını iyimser (optimistic) olarak güncelle.
     // Bu sayede blok onayını beklemeden ~15-20ms erken hareket edilir.
+    //
+    // v25.0 SINIRLILIK: Bu dinleyici başlangıçtaki havuz listesiyle başlar.
+    // Hot-reload ile eklenen yeni havuzlar bu listener tarafından izlenmez.
+    // Yeni havuzlar yalnızca blok-bazlı sync ile güncellenir (~2s Base L2).
+    // TODO: Havuz listesi değiştiğinde listener'ı yeniden başlat (CancellationToken ile).
     let pool_addresses: Vec<Address> = pools.iter().map(|p| p.address).collect();
     {
         let pools_bg = pools.to_vec();
@@ -942,6 +957,10 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
     // Havuz swap eventlerini eth_subscribe("logs") ile dinle.
     // Swap eventi sqrtPriceX96, liquidity, tick bilgisini doğrudan içerir —
     // ek RPC çağrısı olmadan state güncellenir (zero-latency).
+    //
+    // v25.0 SINIRLILIK: Pending TX dinleyicisi ile aynı kısıt — başlangıçtaki
+    // havuz listesiyle çalışır, hot-reload ile eklenen yeni havuzları kapsamaz.
+    // TODO: Havuz listesi değiştiğinde event listener'ı yeniden başlat.
     {
         let pools_ev = pools.to_vec();
         let states_ev: Vec<SharedPoolState> = states.iter().map(|s| Arc::clone(s)).collect();
@@ -981,6 +1000,19 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
                 } => {}
             }
         });
+    }
+
+    // ══════════════ KEŞİF MOTORU v25.0 (Otonom Keşif) ══════════════
+    // On-Chain Factory Listener + Multi-API Aggregator + Skorlama + GC
+    let discovery_config = DiscoveryConfig::from_bot_config(
+        &config.rpc_wss_url,
+        config.max_pool_fee_bps,
+        config.weth_address,
+    );
+    let discovery_registry = Arc::new(RwLock::new(LivePoolRegistry::new(pools)));
+    {
+        let engine = DiscoveryEngine::new(discovery_registry.clone(), discovery_config.clone());
+        engine.start(cancel_token.clone());
     }
 
     let sub = provider.subscribe_blocks().await?;
@@ -1068,6 +1100,95 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
 
         stats.total_blocks_processed += 1;
 
+        // ── 1.4. KEŞİF MOTORU: HOT-RELOAD + GC + SKORLAMA ─────
+        // [Adım 3] Bekleyen havuzları canlı sisteme enjekte et
+        let hot_reload_count = discovery_engine::apply_pending_updates(
+            &discovery_registry, pools, &mut states, pair_combos,
+        );
+        if hot_reload_count > 0 {
+            // Yeni havuzların state'ini senkronize et
+            let new_start = pools.len() - hot_reload_count;
+            for i in new_start..pools.len() {
+                // Bytecode al
+                if let Ok(code) = provider.get_code_at(pools[i].address).await {
+                    if !code.is_empty() {
+                        states[i].write().bytecode = Some(code.to_vec());
+                    }
+                }
+                // State sync
+                let _ = crate::state_sync::sync_pool_state(
+                    &provider, &pools[i], &states[i], block_number,
+                ).await;
+                // TickBitmap sync — NR için gerekli, yoksa dampening fallback kullanılır
+                let _ = crate::state_sync::sync_tick_bitmap(
+                    &provider, &pools[i], &states[i], block_number,
+                    config.tick_bitmap_range,
+                ).await;
+            }
+            // v25.0: REVM bytecode cache güncelle (append-only, eski havuzlar korunur)
+            sim_engine.cache_bytecodes(&pools[new_start..], &states[new_start..]);
+            // v25.0: base_db'yi TÜM havuzlarla yeniden oluştur — yeni havuz bytecode'ları
+            // base_db'de yoksa build_db_from_base klon'u eksik kalır → REVM simülasyonu
+            // yeni havuzlarda boş bytecode ile çalışır ve hatalı sonuç verir.
+            let reload_caller = executor_address.unwrap_or_default();
+            let reload_contract = config.contract_address.unwrap_or_default();
+            sim_engine.initialize_base_db(pools, &states, reload_caller, reload_contract);
+            eprintln!(
+                "  {} [Hot-Reload] REVM base_db yeniden oluşturuldu ({} havuz)",
+                "🔧", pools.len(),
+            );
+
+            // v25.0: Yeni havuzları on-chain pool whitelist'e ekle
+            // executorBatchAddPools() ile executor key'i kullanarak whitelist güncellenir.
+            // Kontrat v25.0: executor yalnızca EKLEME yapabilir (güvenlik korunur).
+            if config.execution_enabled() {
+                let new_addrs: Vec<Address> = pools[new_start..].iter().map(|p| p.address).collect();
+                if !new_addrs.is_empty() {
+                    let calldata = crate::executor::encode_whitelist_calldata(&new_addrs);
+                    if let (Some(ref pk), Some(contract_addr)) = (&config.private_key, config.contract_address) {
+                        let pk_clone = pk.clone();
+                        let mev_exec_clone = Arc::clone(&mev_executor);
+                        let nonce = nonce_manager.get_and_increment();
+                        let nm_clone = Arc::clone(&nonce_manager);
+                        let base_fee = block_base_fee;
+                        let addr_count = new_addrs.len();
+                        tokio::spawn(async move {
+                            match whitelist_pools_on_chain(
+                                mev_exec_clone, pk_clone, contract_addr,
+                                calldata, nonce, nm_clone, base_fee,
+                            ).await {
+                                Ok(_) => eprintln!(
+                                    "  {} [Whitelist] {} havuz on-chain whiteliste eklendi",
+                                    "✅", addr_count,
+                                ),
+                                Err(e) => eprintln!(
+                                    "  {} [Whitelist] On-chain whitelist hatası: {} — admin manuel eklemeli",
+                                    "⚠️", e,
+                                ),
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        // [Adım 4] Çöp Toplayıcı — soğuk havuzları temizle
+        let _gc_deactivated = discovery_engine::run_garbage_collector(
+            &discovery_registry, pools, block_number, &discovery_config,
+        );
+
+        // [Adım 5] Skor güncelleme (her ~10 dakikada bir)
+        discovery_engine::update_scores(
+            &discovery_registry, pools, block_number, &discovery_config,
+        );
+
+        // Spread gözlemlerini kaydet (skorlama için)
+        for combo in pair_combos.iter() {
+            discovery_engine::record_spread_observation(
+                &discovery_registry, combo.pool_a_idx, combo.pool_b_idx, &states,
+            );
+        }
+
         // ── 1.5. TİCKBİTMAP PERİYODİK GÜNCELLEME ──────────
         // Her tick_bitmap_max_age_blocks blokta bir TickBitmap'i güncelle
         let bitmap_age = block_number.saturating_sub(last_bitmap_block);
@@ -1091,7 +1212,7 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
 
         // ── 2. BLOK + SPREAD BİLGİSİ ───────────────────────
         print_block_update(block_number, pools, &states, sync_ms);
-        for combo in pair_combos {
+        for combo in pair_combos.iter() {
             let pp = [pools[combo.pool_a_idx].clone(), pools[combo.pool_b_idx].clone()];
             let ps = [states[combo.pool_a_idx].clone(), states[combo.pool_b_idx].clone()];
             print_spread_info(&pp, &ps);
@@ -1102,7 +1223,7 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
         // fırsat değerlendirmesinden BAĞIMSIZ olarak her blokta çalışır.
         // Önceki sürümde bu istatistikler sadece evaluate_and_execute()
         // içinde güncelleniyordu — NR kârsız bulursa hiç çağrılmıyordu.
-        for combo in pair_combos {
+        for combo in pair_combos.iter() {
             let sa = states[combo.pool_a_idx].read();
             let sb = states[combo.pool_b_idx].read();
             if sa.is_active() && sb.is_active() {
@@ -1123,6 +1244,14 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
         // ── 3. ARBİTRAJ FIRSATI KONTROLÜ ────────────────────
         if all_synced {
             for (combo_idx, combo) in pair_combos.iter().enumerate() {
+                // v25.0: GC tarafından deaktive edilmiş havuzları atla
+                {
+                    let reg = discovery_registry.read();
+                    if !reg.is_active(combo.pool_a_idx) || !reg.is_active(combo.pool_b_idx) {
+                        continue;
+                    }
+                }
+
                 // ── v11.0: Cool-down Blacklist kontrolü ──────────────
                 // Bu çift blacklist'te mi? (current_block + 100 blok engeli)
                 if let Some(&until_block) = pair_cooldown.get(&combo_idx) {
@@ -1201,6 +1330,8 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
             && stats.total_blocks_processed > 0
         {
             print_stats_summary(&stats, &states, pools, pair_combos);
+            // Keşif motoru istatistikleri
+            discovery_engine::print_discovery_stats(&discovery_registry, pools);
         }
 
         // ── 6. PERİYODİK NONCE SENKRONİZASYONU (v10.0) ──────
@@ -1305,4 +1436,59 @@ async fn pending_tx_listener(
     }
 
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v25.0: On-Chain Pool Whitelist Güncelleme
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Keşif motoru yeni havuz bulduğunda, kontratın executorBatchAddPools()
+// fonksiyonu çağrılarak havuz on-chain whiteliste eklenir.
+// Bu işlem fire-and-forget tokio::spawn ile çalışır — ana döngüyü bloklamaz.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn whitelist_pools_on_chain(
+    mev_executor: Arc<executor::MevExecutor>,
+    private_key: String,
+    contract_address: Address,
+    calldata: Vec<u8>,
+    nonce: u64,
+    nonce_manager: Arc<NonceManager>,
+    block_base_fee: u64,
+) -> Result<()> {
+    use alloy::signers::local::PrivateKeySigner;
+    use alloy::network::EthereumWallet;
+
+    let signer: PrivateKeySigner = private_key.parse()
+        .map_err(|e| eyre::eyre!("Whitelist TX: key parse hatası: {}", e))?;
+    let wallet = EthereumWallet::from(signer.clone());
+
+    // Basit TX gönderimi — whitelist işlemi düşük öncelikli
+    let ws = alloy::providers::WsConnect::new(mev_executor.standard_rpc_url());
+    let provider = ProviderBuilder::new()
+        .wallet(wallet)
+        .on_ws(ws).await
+        .map_err(|e| eyre::eyre!("Whitelist TX: provider hatası: {}", e))?;
+
+    let max_fee = block_base_fee as u128 + 1_000_000_000; // base_fee + 1 Gwei tip
+    let tx = alloy::rpc::types::TransactionRequest::default()
+        .to(contract_address)
+        .input(calldata.into())
+        .nonce(nonce)
+        .gas_limit(100_000) // Whitelist işlemi ~30K gas
+        .max_fee_per_gas(max_fee)
+        .max_priority_fee_per_gas(1_000_000_000); // 1 Gwei — düşük öncelik yeterli
+
+    match provider.send_transaction(tx).await {
+        Ok(pending) => {
+            eprintln!("  {} [Whitelist] TX gönderildi: {:?}", "📤", pending.tx_hash());
+            // Fire-and-forget — receipt beklenmez
+            Ok(())
+        }
+        Err(e) => {
+            // Nonce'u geri al (TX gönderilemedi)
+            nonce_manager.force_set(nonce);
+            Err(eyre::eyre!("Whitelist TX gönderilemedi: {}", e))
+        }
+    }
 }

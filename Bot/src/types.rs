@@ -1,19 +1,19 @@
-// ============================================================================
-//  TYPES — Paylaşılan Tipler, Yapılandırma ve İstatistikler
-//  Arbitraj Botu v9.0 — Base Network
+﻿// ============================================================================
+//  TYPES Ã¢â‚¬â€ PaylaÃ…Å¸Ã„Â±lan Tipler, YapÃ„Â±landÃ„Â±rma ve Ã„Â°statistikler
+//  Arbitraj Botu v9.0 Ã¢â‚¬â€ Base Network
 //
 //  v9.0 Yenilikler:
-//  ✓ Executor/Admin rol ayrımı (admin_address)
-//  ✓ Deadline block desteği (deadline_blocks)
-//  ✓ Dinamik bribe/priority fee modeli (bribe_pct)
-//  ✓ Şifreli keystore desteği (keystore_path)
-//  ✓ 134-byte calldata uyumu (deadlineBlock eklendi)
+//  Ã¢Å“â€œ Executor/Admin rol ayrÃ„Â±mÃ„Â± (admin_address)
+//  Ã¢Å“â€œ Deadline block desteÃ„Å¸i (deadline_blocks)
+//  Ã¢Å“â€œ Dinamik bribe/priority fee modeli (bribe_pct)
+//  Ã¢Å“â€œ Ã…Âifreli keystore desteÃ„Å¸i (keystore_path)
+//  Ã¢Å“â€œ 134-byte calldata uyumu (deadlineBlock eklendi)
 //
 //  v7.0 (korunuyor):
-//  ✓ NonceManager — AtomicU64 ile atomik nonce yönetimi
-//  ✓ Token adresleri (weth_address, usdc_address) BotConfig'e eklendi
-//  ✓ TickBitmap off-chain derinlik haritası yapıları
-//  ✓ Multi-transport yapılandırması (IPC > WSS > HTTP)
+//  Ã¢Å“â€œ NonceManager Ã¢â‚¬â€ AtomicU64 ile atomik nonce yÃƒÂ¶netimi
+//  Ã¢Å“â€œ Token adresleri (weth_address, usdc_address) BotConfig'e eklendi
+//  Ã¢Å“â€œ TickBitmap off-chain derinlik haritasÃ„Â± yapÃ„Â±larÃ„Â±
+//  Ã¢Å“â€œ Multi-transport yapÃ„Â±landÃ„Â±rmasÃ„Â± (IPC > WSS > HTTP)
 // ============================================================================
 
 use alloy::primitives::{address, Address, U256};
@@ -24,127 +24,68 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::RwLock;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Token Whitelist — Güvenli Token Listesi (Base Network)
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// Token Whitelist Ã¢â‚¬â€ GÃƒÂ¼venli Token Listesi (Base Network)
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 //
-// v10.1: Sadece yüksek likiditeli, kanıtlanmış tokenlar beyaz listede.
-// Egzotik veya yeni çıkan tokenlar ile işlem yapılması engellenir.
-// Bu, rüg-pull, düşük likidite kayası ve token manipulasyonu risklerini
-// ortadan kaldırır.
+// v10.1: Sadece yÃƒÂ¼ksek likiditeli, kanÃ„Â±tlanmÃ„Â±Ã…Å¸ tokenlar beyaz listede.
+// Egzotik veya yeni ÃƒÂ§Ã„Â±kan tokenlar ile iÃ…Å¸lem yapÃ„Â±lmasÃ„Â± engellenir.
+// Bu, rÃƒÂ¼g-pull, dÃƒÂ¼Ã…Å¸ÃƒÂ¼k likidite kayasÃ„Â± ve token manipulasyonu risklerini
+// ortadan kaldÃ„Â±rÃ„Â±r.
 //
 // Desteklenen tokenlar:
-//   • WETH  — Wrapped Ether (Base canonical)
-//   • USDC  — USD Coin (Circle, bridged)
-//   • USDT  — Tether USD (bridged)
-//   • DAI   — Dai Stablecoin (bridged)
-//   • cbETH — Coinbase Wrapped Staked ETH
-// ─────────────────────────────────────────────────────────────────────────────
+//   Ã¢â‚¬Â¢ WETH  Ã¢â‚¬â€ Wrapped Ether (Base canonical)
+//   Ã¢â‚¬Â¢ USDC  Ã¢â‚¬â€ USD Coin (Circle, bridged)
+//   Ã¢â‚¬Â¢ USDT  Ã¢â‚¬â€ Tether USD (bridged)
+//   Ã¢â‚¬Â¢ DAI   Ã¢â‚¬â€ Dai Stablecoin (bridged)
+//   Ã¢â‚¬Â¢ cbETH Ã¢â‚¬â€ Coinbase Wrapped Staked ETH
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-/// Base Network üzerindeki güvenli token adresleri (donanım kodlu whitelist)
+/// Base Network ÃƒÂ¼zerindeki gÃƒÂ¼venli token adresleri (donanÃ„Â±m kodlu whitelist)
 pub fn token_whitelist() -> HashSet<Address> {
     HashSet::from([
-        // WETH — Base canonical
+        // WETH Ã¢â‚¬â€ Base canonical
         address!("4200000000000000000000000000000000000006"),
-        // USDC — Circle (bridged)
+        // USDC Ã¢â‚¬â€ Circle (bridged)
         address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
-        // USDbC — USD Base Coin (bridged via Base bridge)
+        // USDbC Ã¢â‚¬â€ USD Base Coin (bridged via Base bridge)
         address!("d9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA"),
-        // DAI — Dai Stablecoin (bridged)
+        // DAI Ã¢â‚¬â€ Dai Stablecoin (bridged)
         address!("50c5725949A6F0c72E6C4a641F24049A917DB0Cb"),
-        // cbETH — Coinbase Wrapped Staked ETH
+        // cbETH Ã¢â‚¬â€ Coinbase Wrapped Staked ETH
         address!("2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22"),
-        // cbBTC — Coinbase Wrapped BTC (8 decimals)
+        // cbBTC Ã¢â‚¬â€ Coinbase Wrapped BTC (8 decimals)
         address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
     ])
 }
 
-/// Token adresinin whitelistte olup olmadığını doğrula (utility, gelecekte per-trade kontrol için)
-#[allow(dead_code)]
-pub fn is_token_whitelisted(token: &Address) -> bool {
-    token_whitelist().contains(token)
-}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Token Decimal Yardımcıları — Dinamik Birim Çözümleme
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[allow(dead_code)]
-/// WETH decimals sabiti
-pub const WETH_DECIMALS_U8: u8 = 18;
-#[allow(dead_code)]
-/// Fallback decimals sabiti (bilinmeyen tokenlar için)
-pub const STABLECOIN_DECIMALS_U8: u8 = 6;
-
-/// cbBTC adresi (Base ağı)
-const CBBTC_ADDRESS: Address = address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf");
-
-#[allow(dead_code)]
-/// Token adresine göre decimal sayısını döndür.
-/// WETH → 18, cbBTC → 8, diğer tokenlar (fallback) → 6
-pub fn get_token_decimals(token: &Address, weth_address: &Address) -> u8 {
-    if token == weth_address {
-        WETH_DECIMALS_U8 // 18
-    } else if *token == CBBTC_ADDRESS {
-        8 // cbBTC
-    } else {
-        STABLECOIN_DECIMALS_U8 // 6 (USDC, USDT, USDbC — fallback)
-    }
-}
-
-/// Flash swap input tokeninin WETH olup olmadığını belirle.
-///
-/// uni_direction=0 → zeroForOne=true  → token0 input
-/// uni_direction=1 → zeroForOne=false → token1 input
+/// uni_direction=0 Ã¢â€ â€™ zeroForOne=true  Ã¢â€ â€™ token0 input
+/// uni_direction=1 Ã¢â€ â€™ zeroForOne=false Ã¢â€ â€™ token1 input
 ///
 /// token0_is_weth=true:
-///   - uni_dir=0 → token0(WETH) input → true
-///   - uni_dir=1 → token1(USDC) input → false
+///   - uni_dir=0 Ã¢â€ â€™ token0(WETH) input Ã¢â€ â€™ true
+///   - uni_dir=1 Ã¢â€ â€™ token1(USDC) input Ã¢â€ â€™ false
 ///
 /// token0_is_weth=false:
-///   - uni_dir=0 → token0(USDC) input → false
-///   - uni_dir=1 → token1(WETH) input → true
+///   - uni_dir=0 Ã¢â€ â€™ token0(USDC) input Ã¢â€ â€™ false
+///   - uni_dir=1 Ã¢â€ â€™ token1(WETH) input Ã¢â€ â€™ true
 pub fn is_weth_input(uni_direction: u8, token0_is_weth: bool) -> bool {
     if uni_direction == 0 {
-        // zeroForOne=true → token0 is input
+        // zeroForOne=true Ã¢â€ â€™ token0 is input
         token0_is_weth
     } else {
-        // zeroForOne=false → token1 is input
+        // oneForZero=true â†' token1 is input
         !token0_is_weth
     }
 }
 
-/// Flash swap input tokeninin decimal sayısını döndür.
-///
-/// Doğru decimal seçimi kritiktir:
-///   - WETH input → amount * 10^18
-///   - USDC input → amount * 10^6
-///
-/// Yanlış decimal kullanmak "trilyon dolarlık" hatalara yol açar.
-#[allow(dead_code)]
-pub fn get_input_token_decimals(uni_direction: u8, token0_is_weth: bool) -> u8 {
-    if is_weth_input(uni_direction, token0_is_weth) {
-        WETH_DECIMALS_U8
-    } else {
-        STABLECOIN_DECIMALS_U8
-    }
-}
-
-/// Owed (borçlu) tokeninin decimal sayısını döndür.
-///
-/// owedToken = flash swap'a geri ödenen token = input token
-/// minProfit hesabı bu tokende yapılır.
-#[allow(dead_code)]
-pub fn get_owed_token_decimals(owed_token: &Address, weth_address: &Address) -> u8 {
-    get_token_decimals(owed_token, weth_address)
-}
-
-/// WETH miktarını hedef token miktarına çevir (human-readable → wei).
+/// WETH miktarÃ„Â±nÃ„Â± hedef token miktarÃ„Â±na ÃƒÂ§evir (human-readable Ã¢â€ â€™ wei).
 ///
 /// - Hedef WETH ise: amount_weth * 10^18
 /// - Hedef quote token ise: amount_weth * eth_price_quote * 10^quote_decimals
 ///
-/// Bu fonksiyon calldata'ya yazılacak amount değerini üretir.
+/// Bu fonksiyon calldata'ya yazÃ„Â±lacak amount deÃ„Å¸erini ÃƒÂ¼retir.
 pub fn weth_amount_to_input_wei(
     optimal_amount_weth: f64,
     is_weth_input: bool,
@@ -152,22 +93,22 @@ pub fn weth_amount_to_input_wei(
     quote_token_decimals: u8,
 ) -> U256 {
     if is_weth_input {
-        // Input WETH → 18 decimals
+        // Input WETH Ã¢â€ â€™ 18 decimals
         U256::from(safe_f64_to_u128(optimal_amount_weth * 1e18))
     } else {
-        // Input quote token → quote_token_decimals
-        // WETH cinsinden miktar × ETH/Quote fiyatı × 10^decimals
+        // Input quote token Ã¢â€ â€™ quote_token_decimals
+        // WETH cinsinden miktar Ãƒâ€” ETH/Quote fiyatÃ„Â± Ãƒâ€” 10^decimals
         let scale = 10f64.powi(quote_token_decimals as i32);
         let quote_amount = optimal_amount_weth * eth_price_quote * scale;
         U256::from(safe_f64_to_u128(quote_amount))
     }
 }
 
-/// f64 → u128 güvenli dönüşüm (saturating).
+/// f64 Ã¢â€ â€™ u128 gÃƒÂ¼venli dÃƒÂ¶nÃƒÂ¼Ã…Å¸ÃƒÂ¼m (saturating).
 ///
-/// NaN, Infinity, negatif veya u128::MAX üstü değerler için
-/// Rust panic VERMEZ — yerine 0 veya u128::MAX döner.
-/// MEV-kritik sistemlerde thread çökmesini önleyen savunma katmanı.
+/// NaN, Infinity, negatif veya u128::MAX ÃƒÂ¼stÃƒÂ¼ deÃ„Å¸erler iÃƒÂ§in
+/// Rust panic VERMEZ Ã¢â‚¬â€ yerine 0 veya u128::MAX dÃƒÂ¶ner.
+/// MEV-kritik sistemlerde thread ÃƒÂ§ÃƒÂ¶kmesini ÃƒÂ¶nleyen savunma katmanÃ„Â±.
 #[inline]
 pub fn safe_f64_to_u128(val: f64) -> u128 {
     if val.is_nan() || val.is_infinite() || val < 0.0 {
@@ -175,40 +116,20 @@ pub fn safe_f64_to_u128(val: f64) -> u128 {
     } else if val >= u128::MAX as f64 {
         u128::MAX
     } else {
-        // v22.0: Truncation → rounding. Wei cinsinden 0.5+ kaybı önler.
-        // Ör: 1.9999 WETH → 1 WEI (truncation) vs 2 WEI (rounding)
+        // v22.0: Truncation Ã¢â€ â€™ rounding. Wei cinsinden 0.5+ kaybÃ„Â± ÃƒÂ¶nler.
+        // Ãƒâ€“r: 1.9999 WETH Ã¢â€ â€™ 1 WEI (truncation) vs 2 WEI (rounding)
         val.round() as u128
     }
 }
 
-/// Yapılandırılan token adreslerinin whitelist kontrolü
-/// Startup sırasında çağrılır — whitelistte olmayan token varsa hata döner
-#[allow(dead_code)]
-pub fn validate_token_whitelist(weth: &Address, quote_token: &Address) -> Result<()> {
-    let wl = token_whitelist();
-    if !wl.contains(weth) {
-        return Err(eyre::eyre!(
-            "WETH adresi ({}) token whitelist'te YOK! Egzotik token riski.",
-            weth
-        ));
-    }
-    if !wl.contains(quote_token) {
-        return Err(eyre::eyre!(
-            "Quote token adresi ({}) token whitelist'te YOK! Egzotik token riski.",
-            quote_token
-        ));
-    }
-    Ok(())
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// DEX Türü
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// DEX TÃƒÂ¼rÃƒÂ¼
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DexType {
     UniswapV3,
-    /// PancakeSwap V3 — slot0 feeProtocol alanı uint32 (Uniswap V3'te uint8)
+    /// PancakeSwap V3 Ã¢â‚¬â€ slot0 feeProtocol alanÃ„Â± uint32 (Uniswap V3'te uint8)
     PancakeSwapV3,
     Aerodrome,
 }
@@ -223,88 +144,87 @@ impl std::fmt::Display for DexType {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 // Transport Modu (L2 Sequencer Optimizasyonu)
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-/// Bağlantı transport tipi — Base L2 için IPC öncelikli
+/// BaÃ„Å¸lantÃ„Â± transport tipi Ã¢â‚¬â€ Base L2 iÃƒÂ§in IPC ÃƒÂ¶ncelikli
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportMode {
-    /// IPC (Unix Domain Socket / Named Pipe) — En düşük gecikme (<0.1ms)
+    /// IPC (Unix Domain Socket / Named Pipe) Ã¢â‚¬â€ En dÃƒÂ¼Ã…Å¸ÃƒÂ¼k gecikme (<0.1ms)
     Ipc,
-    /// WebSocket — Orta gecikme (~1-5ms)
+    /// WebSocket Ã¢â‚¬â€ Orta gecikme (~1-5ms)
     Ws,
-    /// HTTP — Yüksek gecikme (~5-50ms), fallback
+    /// HTTP Ã¢â‚¬â€ YÃƒÂ¼ksek gecikme (~5-50ms), fallback
     Http,
-    /// Otomatik: IPC → WSS → HTTP sırasıyla dener
+    /// Otomatik: IPC Ã¢â€ â€™ WSS Ã¢â€ â€™ HTTP sÃ„Â±rasÃ„Â±yla dener
     Auto,
 }
 
 impl std::fmt::Display for TransportMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TransportMode::Ipc => write!(f, "IPC (Düşük Gecikme)"),
+            TransportMode::Ipc => write!(f, "IPC (DÃƒÂ¼Ã…Å¸ÃƒÂ¼k Gecikme)"),
             TransportMode::Ws => write!(f, "WebSocket"),
             TransportMode::Http => write!(f, "HTTP"),
-            TransportMode::Auto => write!(f, "Otomatik (IPC→WSS→HTTP)"),
+            TransportMode::Auto => write!(f, "Otomatik (IPCÃ¢â€ â€™WSSÃ¢â€ â€™HTTP)"),
         }
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TickBitmap Yapıları (Off-Chain Derinlik Haritası)
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// TickBitmap YapÃ„Â±larÃ„Â± (Off-Chain Derinlik HaritasÃ„Â±)
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-/// Tek bir başlatılmış tick'in bilgisi (Uniswap V3 ticks mapping)
+/// Tek bir baÃ…Å¸latÃ„Â±lmÃ„Â±Ã…Å¸ tick'in bilgisi (Uniswap V3 ticks mapping)
 ///
-/// Her tick sınırında likidite değişimi net olarak kaydedilir.
-/// liquidityNet > 0 → o tick'e girildiğinde likidite ARTAR
-/// liquidityNet < 0 → o tick'e girildiğinde likidite AZALIR
+/// Her tick sÃ„Â±nÃ„Â±rÃ„Â±nda likidite deÃ„Å¸iÃ…Å¸imi net olarak kaydedilir.
+/// liquidityNet > 0 Ã¢â€ â€™ o tick'e girildiÃ„Å¸inde likidite ARTAR
+/// liquidityNet < 0 Ã¢â€ â€™ o tick'e girildiÃ„Å¸inde likidite AZALIR
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct TickInfo {
-    /// Toplam brüt likidite (pozisyon açma/kapama için)
+    /// Toplam brÃƒÂ¼t likidite (pozisyon aÃƒÂ§ma/kapama iÃƒÂ§in)
     pub liquidity_gross: u128,
-    /// Net likidite değişimi (tick geçişinde uygulanır)
-    /// Pozitif: soldan sağa geçişte aktif likidite ARTAR
-    /// Negatif: soldan sağa geçişte aktif likidite AZALIR
+    /// Net likidite deÃ„Å¸iÃ…Å¸imi (tick geÃƒÂ§iÃ…Å¸inde uygulanÃ„Â±r)
+    /// Pozitif: soldan saÃ„Å¸a geÃƒÂ§iÃ…Å¸te aktif likidite ARTAR
+    /// Negatif: soldan saÃ„Å¸a geÃƒÂ§iÃ…Å¸te aktif likidite AZALIR
     pub liquidity_net: i128,
-    /// Bu tick başlatılmış mı? (bitmap'te 1 ise true)
+    /// Bu tick baÃ…Å¸latÃ„Â±lmÃ„Â±Ã…Å¸ mÃ„Â±? (bitmap'te 1 ise true)
     pub initialized: bool,
 }
 
-/// Off-chain TickBitmap derinlik haritası
+/// Off-chain TickBitmap derinlik haritasÃ„Â±
 ///
-/// Zincirden çekilen iki veri kaynağını birleştirir:
-///   1. tickBitmap(int16 wordPos) → uint256 : hangi tick'ler başlatılmış?
-///   2. ticks(int24 tick) → TickInfo : başlatılmış tick'lerin detayları
+/// Zincirden ÃƒÂ§ekilen iki veri kaynaÃ„Å¸Ã„Â±nÃ„Â± birleÃ…Å¸tirir:
+///   1. tickBitmap(int16 wordPos) Ã¢â€ â€™ uint256 : hangi tick'ler baÃ…Å¸latÃ„Â±lmÃ„Â±Ã…Å¸?
+///   2. ticks(int24 tick) Ã¢â€ â€™ TickInfo : baÃ…Å¸latÃ„Â±lmÃ„Â±Ã…Å¸ tick'lerin detaylarÃ„Â±
 ///
-/// Bu yapı, "50 ETH satarsam hangi 3 tick'i patlatırım?" sorusuna
-/// mikrosaniye içinde cevap verir.
+/// Bu yapÃ„Â±, "50 ETH satarsam hangi 3 tick'i patlatÃ„Â±rÃ„Â±m?" sorusuna
+/// mikrosaniye iÃƒÂ§inde cevap verir.
 #[derive(Debug, Clone)]
 pub struct TickBitmapData {
-    /// Bitmap kelime haritası: wordPos → bitmap (256-bit)
-    /// Her bit, tick_spacing'e göre belirli bir tick'in başlatılmış olup
-    /// olmadığını gösterir.
+    /// Bitmap kelime haritasÃ„Â±: wordPos Ã¢â€ â€™ bitmap (256-bit)
+    /// Her bit, tick_spacing'e gÃƒÂ¶re belirli bir tick'in baÃ…Å¸latÃ„Â±lmÃ„Â±Ã…Å¸ olup
+    /// olmadÃ„Â±Ã„Å¸Ã„Â±nÃ„Â± gÃƒÂ¶sterir.
     pub words: HashMap<i16, U256>,
 
-    /// Başlatılmış tick'lerin detay bilgisi: tick → TickInfo
+    /// BaÃ…Å¸latÃ„Â±lmÃ„Â±Ã…Å¸ tick'lerin detay bilgisi: tick Ã¢â€ â€™ TickInfo
     /// Sadece initialized=true olan tick'ler burada bulunur.
     pub ticks: HashMap<i32, TickInfo>,
 
-    /// Bu verinin okunduğu blok numarası
+    /// Bu verinin okunduÃ„Å¸u blok numarasÃ„Â±
     pub snapshot_block: u64,
 
-    /// Senkronizasyon süresi (mikrosaniye)
+    /// Senkronizasyon sÃƒÂ¼resi (mikrosaniye)
     pub sync_duration_us: u64,
 
-    /// Taranan tick aralığı (current_tick ± range)
+    /// Taranan tick aralÃ„Â±Ã„Å¸Ã„Â± (current_tick Ã‚Â± range)
     pub scan_range: u32,
 }
 
-#[allow(dead_code)]
 impl TickBitmapData {
-    /// Boş bitmap oluştur
+    /// BoÃ…Å¸ bitmap oluÃ…Å¸tur
     pub fn empty() -> Self {
         Self {
             words: HashMap::new(),
@@ -315,53 +235,15 @@ impl TickBitmapData {
         }
     }
 
-    /// Toplam başlatılmış tick sayısı
+    /// Toplam baÃ…Å¸latÃ„Â±lmÃ„Â±Ã…Å¸ tick sayÃ„Â±sÃ„Â±
     pub fn initialized_tick_count(&self) -> usize {
         self.ticks.len()
     }
-
-    /// Verilen tick'ten sonraki (sağdaki) en yakın başlatılmış tick'i bul
-    /// direction: true = sağa (artan tick), false = sola (azalan tick)
-    pub fn next_initialized_tick(&self, current_tick: i32, direction_right: bool) -> Option<(i32, &TickInfo)> {
-        if direction_right {
-            self.ticks.iter()
-                .filter(|(&t, info)| t > current_tick && info.initialized)
-                .min_by_key(|(&t, _)| t)
-                .map(|(&t, info)| (t, info))
-        } else {
-            self.ticks.iter()
-                .filter(|(&t, info)| t <= current_tick && info.initialized)
-                .max_by_key(|(&t, _)| t)
-                .map(|(&t, info)| (t, info))
-        }
-    }
-
-    /// Belirli bir aralıktaki tüm başlatılmış tick'leri sıralı döndür
-    pub fn initialized_ticks_in_range(&self, from_tick: i32, to_tick: i32) -> Vec<(i32, TickInfo)> {
-        let (lo, hi) = if from_tick <= to_tick {
-            (from_tick, to_tick)
-        } else {
-            (to_tick, from_tick)
-        };
-
-        let mut result: Vec<(i32, TickInfo)> = self.ticks.iter()
-            .filter(|(&t, info)| t >= lo && t <= hi && info.initialized)
-            .map(|(&t, info)| (t, *info))
-            .collect();
-
-        result.sort_by_key(|(t, _)| *t);
-        result
-    }
-
-    /// Bitmap verisi yeterince güncel mi?
-    pub fn is_fresh(&self, current_block: u64, max_age_blocks: u64) -> bool {
-        current_block.saturating_sub(self.snapshot_block) <= max_age_blocks
-    }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Havuz Yapılandırması
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// Havuz YapÃ„Â±landÃ„Â±rmasÃ„Â±
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
@@ -372,45 +254,45 @@ pub struct PoolConfig {
     pub token0_decimals: u8,
     pub token1_decimals: u8,
     pub dex: DexType,
-    /// token0 WETH mi? (Base: WETH < USDC adres sırasında → token0=WETH)
+    /// token0 WETH mi? (Base: WETH < USDC adres sÃ„Â±rasÃ„Â±nda Ã¢â€ â€™ token0=WETH)
     pub token0_is_weth: bool,
-    /// Tick aralığı (Uniswap V3 %0.05 = 10, Aerodrome değişken)
+    /// Tick aralÃ„Â±Ã„Å¸Ã„Â± (Uniswap V3 %0.05 = 10, Aerodrome deÃ„Å¸iÃ…Å¸ken)
     pub tick_spacing: i32,
-    /// Quote token adresi (çift bazlı — matched_pools.json'dan)
+    /// Quote token adresi (ÃƒÂ§ift bazlÃ„Â± Ã¢â‚¬â€ matched_pools.json'dan)
     pub quote_token_address: Address,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Havuz Anlık Durumu (RAM'de tutulur)
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// Havuz AnlÃ„Â±k Durumu (RAM'de tutulur)
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 #[derive(Debug, Clone)]
 pub struct PoolState {
-    /// sqrtPriceX96 (ham U256 değer)
+    /// sqrtPriceX96 (ham U256 deÃ„Å¸er)
     pub sqrt_price_x96: U256,
-    /// sqrtPriceX96 float versiyonu (hızlı hesap için)
+    /// sqrtPriceX96 float versiyonu (hÃ„Â±zlÃ„Â± hesap iÃƒÂ§in)
     pub sqrt_price_f64: f64,
     /// Mevcut tick
     pub tick: i32,
-    /// Anlık likidite (u128)
+    /// AnlÃ„Â±k likidite (u128)
     pub liquidity: u128,
-    /// Likidite float versiyonu (hızlı hesap için)
+    /// Likidite float versiyonu (hÃ„Â±zlÃ„Â± hesap iÃƒÂ§in)
     pub liquidity_f64: f64,
-    /// WETH fiyatı quote token cinsinden — ör: 25.5 (cbBTC) veya 2500.0 (USDC)
+    /// WETH fiyatÃ„Â± quote token cinsinden Ã¢â‚¬â€ ÃƒÂ¶r: 25.5 (cbBTC) veya 2500.0 (USDC)
     pub eth_price_usd: f64,
-    /// Son güncellenen blok numarası
+    /// Son gÃƒÂ¼ncellenen blok numarasÃ„Â±
     pub last_block: u64,
-    /// Son güncelleme zamanı (yerel)
+    /// Son gÃƒÂ¼ncelleme zamanÃ„Â± (yerel)
     pub last_update: Instant,
-    /// Havuz başlatıldı mı?
+    /// Havuz baÃ…Å¸latÃ„Â±ldÃ„Â± mÃ„Â±?
     pub is_initialized: bool,
-    /// Havuz bytecode'u (REVM için önbellek)
+    /// Havuz bytecode'u (REVM iÃƒÂ§in ÃƒÂ¶nbellek)
     pub bytecode: Option<Vec<u8>>,
-    /// Off-chain TickBitmap derinlik haritası
-    /// "50 ETH satarsam hangi tick'leri patlatırım?" sorusunu yanıtlar
+    /// Off-chain TickBitmap derinlik haritasÃ„Â±
+    /// "50 ETH satarsam hangi tick'leri patlatÃ„Â±rÃ„Â±m?" sorusunu yanÃ„Â±tlar
     pub tick_bitmap: Option<TickBitmapData>,
-    /// Zincirden okunan canlı fee (basis points, ör: 500 = %0.05)
-    /// None ise config'teki statik fee_bps kullanılır
+    /// Zincirden okunan canlÃ„Â± fee (basis points, ÃƒÂ¶r: 500 = %0.05)
+    /// None ise config'teki statik fee_bps kullanÃ„Â±lÃ„Â±r
     pub live_fee_bps: Option<u32>,
 }
 
@@ -434,12 +316,12 @@ impl Default for PoolState {
 }
 
 impl PoolState {
-    /// Havuz aktif mi? (veriler geçerli mi?)
+    /// Havuz aktif mi? (veriler geÃƒÂ§erli mi?)
     pub fn is_active(&self) -> bool {
         self.is_initialized && self.eth_price_usd > 0.0 && self.liquidity > 0
     }
 
-    /// Verinin yaşı (milisaniye)
+    /// Verinin yaÃ…Å¸Ã„Â± (milisaniye)
     pub fn staleness_ms(&self) -> u128 {
         self.last_update.elapsed().as_millis()
     }
@@ -448,56 +330,50 @@ impl PoolState {
 /// Thread-safe havuz durumu
 pub type SharedPoolState = Arc<RwLock<PoolState>>;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Dinamik Atomik Nonce Yöneticisi
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// Dinamik Atomik Nonce YÃƒÂ¶neticisi
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-/// Lock-free, atomik nonce yöneticisi.
+/// Lock-free, atomik nonce yÃƒÂ¶neticisi.
 ///
-/// Problem: Her blokta `provider.get_transaction_count()` çağırmak sıralı
-/// RPC gecikmesi yaratır ve yarış durumuna (race condition) açıktır.
+/// Problem: Her blokta `provider.get_transaction_count()` ÃƒÂ§aÃ„Å¸Ã„Â±rmak sÃ„Â±ralÃ„Â±
+/// RPC gecikmesi yaratÃ„Â±r ve yarÃ„Â±Ã…Å¸ durumuna (race condition) aÃƒÂ§Ã„Â±ktÃ„Â±r.
 ///
-/// Çözüm: Bot başlangıcında nonce RPC'den bir kez okunur, sonra her TX
-/// gönderiminde atomik olarak artırılır:
+/// Ãƒâ€¡ÃƒÂ¶zÃƒÂ¼m: Bot baÃ…Å¸langÃ„Â±cÃ„Â±nda nonce RPC'den bir kez okunur, sonra her TX
+/// gÃƒÂ¶nderiminde atomik olarak artÃ„Â±rÃ„Â±lÃ„Â±r:
 ///
 /// ```text
-/// Bot başlatılır → RPC: eth_getTransactionCount → nonce = 42
-/// TX #1 gönder → nonce = 42, AtomicU64::fetch_add(1) → nonce = 43
-/// TX #2 gönder → nonce = 43, AtomicU64::fetch_add(1) → nonce = 44
+/// Bot baÃ…Å¸latÃ„Â±lÃ„Â±r Ã¢â€ â€™ RPC: eth_getTransactionCount Ã¢â€ â€™ nonce = 42
+/// TX #1 gÃƒÂ¶nder Ã¢â€ â€™ nonce = 42, AtomicU64::fetch_add(1) Ã¢â€ â€™ nonce = 43
+/// TX #2 gÃƒÂ¶nder Ã¢â€ â€™ nonce = 43, AtomicU64::fetch_add(1) Ã¢â€ â€™ nonce = 44
 /// ```
 ///
-/// Sıfır ek gecikme, sıfır kilit çekişmesi.
+/// SÃ„Â±fÃ„Â±r ek gecikme, sÃ„Â±fÃ„Â±r kilit ÃƒÂ§ekiÃ…Å¸mesi.
 pub struct NonceManager {
     current_nonce: AtomicU64,
 }
 
 impl NonceManager {
-    /// Başlangıç nonce değeriyle oluştur (RPC'den okunan değer)
+    /// BaÃ…Å¸langÃ„Â±ÃƒÂ§ nonce deÃ„Å¸eriyle oluÃ…Å¸tur (RPC'den okunan deÃ„Å¸er)
     pub fn new(initial_nonce: u64) -> Self {
         Self {
             current_nonce: AtomicU64::new(initial_nonce),
         }
     }
 
-    /// Mevcut nonce'u al ve atomik olarak 1 artır.
-    /// Dönen değer: TX'e yazılacak nonce (artmadan önceki değer)
+    /// Mevcut nonce'u al ve atomik olarak 1 artÃ„Â±r.
+    /// DÃƒÂ¶nen deÃ„Å¸er: TX'e yazÃ„Â±lacak nonce (artmadan ÃƒÂ¶nceki deÃ„Å¸er)
     pub fn get_and_increment(&self) -> u64 {
         self.current_nonce.fetch_add(1, Ordering::SeqCst)
     }
 
-    /// Mevcut nonce'u oku (artırmadan)
+    /// Mevcut nonce'u oku (artÃ„Â±rmadan)
     pub fn current(&self) -> u64 {
         self.current_nonce.load(Ordering::SeqCst)
     }
 
-    /// TX başarısız olursa nonce'u geri al (decriment)
-    /// v22.1: race condition riski nedeniyle kullanılmıyor — periyodik sync yeterli
-    #[allow(dead_code)]
-    pub fn rollback(&self) {
-        self.current_nonce.fetch_sub(1, Ordering::SeqCst);
-    }
 
-    /// Nonce'u belirli bir değere zorla ayarla (RPC senkronizasyonu için)
+    /// Nonce'u belirli bir deÃ„Å¸ere zorla ayarla (RPC senkronizasyonu iÃƒÂ§in)
     pub fn force_set(&self, nonce: u64) {
         self.current_nonce.store(nonce, Ordering::SeqCst);
     }
@@ -509,148 +385,143 @@ impl std::fmt::Debug for NonceManager {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Arbitraj Fırsatı
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// Arbitraj FÃ„Â±rsatÃ„Â±
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 #[derive(Debug, Clone)]
 pub struct ArbitrageOpportunity {
     /// Ucuz havuz indeksi (buradan al)
     pub buy_pool_idx: usize,
-    /// Pahalı havuz indeksi (buraya sat)
+    /// PahalÃ„Â± havuz indeksi (buraya sat)
     pub sell_pool_idx: usize,
-    /// Newton-Raphson ile hesaplanan optimal WETH miktarı
+    /// Newton-Raphson ile hesaplanan optimal WETH miktarÃ„Â±
     pub optimal_amount_weth: f64,
-    /// Beklenen net kâr (WETH cinsinden)
+    /// Beklenen net kÃƒÂ¢r (WETH cinsinden)
     pub expected_profit_weth: f64,
-    /// Alış fiyatı (ucuz havuz ETH/Quote)
+    /// AlÃ„Â±Ã…Å¸ fiyatÃ„Â± (ucuz havuz ETH/Quote)
     pub buy_price_quote: f64,
-    /// Satış fiyatı (pahalı havuz ETH/Quote)
+    /// SatÃ„Â±Ã…Å¸ fiyatÃ„Â± (pahalÃ„Â± havuz ETH/Quote)
     pub sell_price_quote: f64,
-    /// Spread yüzdesi
+    /// Spread yÃƒÂ¼zdesi
     pub spread_pct: f64,
-    /// Newton-Raphson yakınsadı mı?
+    /// Newton-Raphson yakÃ„Â±nsadÃ„Â± mÃ„Â±?
     pub nr_converged: bool,
-    /// Newton-Raphson iterasyon sayısı
+    /// Newton-Raphson iterasyon sayÃ„Â±sÃ„Â±
     pub nr_iterations: u32,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// REVM Simülasyon Sonucu
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// REVM SimÃƒÂ¼lasyon Sonucu
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 #[derive(Debug, Clone)]
 pub struct SimulationResult {
-    /// Simülasyon başarılı mı?
+    /// SimÃƒÂ¼lasyon baÃ…Å¸arÃ„Â±lÃ„Â± mÃ„Â±?
     pub success: bool,
-    /// Kullanılan gas
+    /// KullanÃ„Â±lan gas
     pub gas_used: u64,
-    /// Hata mesajı (varsa)
+    /// Hata mesajÃ„Â± (varsa)
     pub error: Option<String>,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Bot Yapılandırması (.env tabanlı)
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// Bot YapÃ„Â±landÃ„Â±rmasÃ„Â± (.env tabanlÃ„Â±)
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
+#[allow(dead_code)]
 pub struct BotConfig {
-    /// WebSocket RPC URL (blok başlığı aboneliği için)
+    /// WebSocket RPC URL (blok baÃ…Å¸lÃ„Â±Ã„Å¸Ã„Â± aboneliÃ„Å¸i iÃƒÂ§in)
     pub rpc_wss_url: String,
-    /// HTTP RPC URL (durum okuma için — gelecekte kullanılabilir)
-    #[allow(dead_code)]
-    pub rpc_http_url: String,
-    /// IPC bağlantı yolu (Unix socket / Windows named pipe)
-    #[allow(dead_code)]
-    pub rpc_ipc_path: Option<String>,
+    /// HTTP RPC URL (durum okuma iÃƒÂ§in Ã¢â‚¬â€ gelecekte kullanÃ„Â±labilir)
+        pub rpc_http_url: String,
+    /// IPC baÃ„Å¸lantÃ„Â± yolu (Unix socket / Windows named pipe)
+        pub rpc_ipc_path: Option<String>,
     /// Transport modu (IPC > WSS > HTTP)
     pub transport_mode: TransportMode,
-    /// Private key (kontrat tetikleme için, opsiyonel)
-    /// v9.0: KeyManager üzerinden yönetilir, ama geriye uyumluluk için saklanır
+    /// Private key (kontrat tetikleme iÃƒÂ§in, opsiyonel)
+    /// v9.0: KeyManager ÃƒÂ¼zerinden yÃƒÂ¶netilir, ama geriye uyumluluk iÃƒÂ§in saklanÃ„Â±r
     pub private_key: Option<String>,
     /// Arbitraj kontrat adresi (opsiyonel)
     pub contract_address: Option<Address>,
     /// WETH token adresi (Base: 0x4200000000000000000000000000000000000006)
-    /// v12.0: Hardcoded — .env'den okunmaz, Base ağında sabittir.
+    /// v12.0: Hardcoded Ã¢â‚¬â€ .env'den okunmaz, Base aÃ„Å¸Ã„Â±nda sabittir.
     pub weth_address: Address,
     /// Tahmini gas maliyeti fallback (WETH cinsinden)
     pub gas_cost_fallback_weth: f64,
-    /// Flash loan ücreti (basis points)
+    /// Flash loan ÃƒÂ¼creti (basis points)
     pub flash_loan_fee_bps: f64,
-    /// Minimum net kâr eşiği (WETH cinsinden)
+    /// Minimum net kÃƒÂ¢r eÃ…Å¸iÃ„Å¸i (WETH cinsinden)
     pub min_net_profit_weth: f64,
-    /// İstatistik gösterme aralığı (blok sayısı)
+    /// Ã„Â°statistik gÃƒÂ¶sterme aralÃ„Â±Ã„Å¸Ã„Â± (blok sayÃ„Â±sÃ„Â±)
     pub stats_interval: u64,
-    /// Maks yeniden bağlanma denemesi (0 = sınırsız)
+    /// Maks yeniden baÃ„Å¸lanma denemesi (0 = sÃ„Â±nÃ„Â±rsÃ„Â±z)
     pub max_retries: u32,
-    /// Başlangıç bekleme süresi (saniye) — v10.1: agresif reconnect ile kullanılmıyor
-    #[allow(dead_code)]
-    pub initial_retry_delay_secs: u64,
-    /// Maksimum bekleme süresi (saniye) — v10.1: agresif reconnect ile kullanılmıyor
-    #[allow(dead_code)]
-    pub max_retry_delay_secs: u64,
-    /// Veri tazelik eşiği (milisaniye)
+    /// BaÃ…Å¸langÃ„Â±ÃƒÂ§ bekleme sÃƒÂ¼resi (saniye) Ã¢â‚¬â€ v10.1: agresif reconnect ile kullanÃ„Â±lmÃ„Â±yor
+        pub initial_retry_delay_secs: u64,
+    /// Maksimum bekleme sÃƒÂ¼resi (saniye) Ã¢â‚¬â€ v10.1: agresif reconnect ile kullanÃ„Â±lmÃ„Â±yor
+        pub max_retry_delay_secs: u64,
+    /// Veri tazelik eÃ…Å¸iÃ„Å¸i (milisaniye)
     pub max_staleness_ms: u128,
     /// Maksimum flash loan boyutu (WETH)
     pub max_trade_size_weth: f64,
     /// Base zincir ID
     pub chain_id: u64,
-    /// TickBitmap tarama yarıçapı (mevcut tick ± range)
-    /// Varsayılan: 500 tick (Uniswap V3 %0.05 için ~5% fiyat aralığı)
+    /// TickBitmap tarama yarÃ„Â±ÃƒÂ§apÃ„Â± (mevcut tick Ã‚Â± range)
+    /// VarsayÃ„Â±lan: 500 tick (Uniswap V3 %0.05 iÃƒÂ§in ~5% fiyat aralÃ„Â±Ã„Å¸Ã„Â±)
     pub tick_bitmap_range: u32,
-    /// TickBitmap'in kaç blok eskiyene kadar geçerli sayılacağı
+    /// TickBitmap'in kaÃƒÂ§ blok eskiyene kadar geÃƒÂ§erli sayÃ„Â±lacaÃ„Å¸Ã„Â±
     pub tick_bitmap_max_age_blocks: u64,
-    /// Gölge Modu (Shadow Mode): false ise fırsatlar loglanır, TX gönderilmez
+    /// GÃƒÂ¶lge Modu (Shadow Mode): false ise fÃ„Â±rsatlar loglanÃ„Â±r, TX gÃƒÂ¶nderilmez
     /// .env'deki EXECUTION_ENABLED ile kontrol edilir
     pub execution_enabled_flag: bool,
 
-    // ── v9.0: Yeni Güvenlik ve Performans Alanları ──────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ v9.0: Yeni GÃƒÂ¼venlik ve Performans AlanlarÃ„Â± Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-    /// Admin adresi — fon çekme yetkisi (soğuk cüzdan / multisig)
-    /// v9.0 kontrat: admin rolü. Boşsa executor adresi kullanılır.
-    #[allow(dead_code)]
-    pub admin_address: Option<Address>,
-    /// Deadline block offset — calldata'ya eklenir, kontrat kontrol eder
-    /// Ör: 2 → mevcut blok + 2 = son geçerli blok
+    /// Admin adresi Ã¢â‚¬â€ fon ÃƒÂ§ekme yetkisi (soÃ„Å¸uk cÃƒÂ¼zdan / multisig)
+    /// v9.0 kontrat: admin rolÃƒÂ¼. BoÃ…Å¸sa executor adresi kullanÃ„Â±lÃ„Â±r.
+        pub admin_address: Option<Address>,
+    /// Deadline block offset Ã¢â‚¬â€ calldata'ya eklenir, kontrat kontrol eder
+    /// Ãƒâ€“r: 2 Ã¢â€ â€™ mevcut blok + 2 = son geÃƒÂ§erli blok
     pub deadline_blocks: u32,
-    /// Dinamik bribe yüzdesi — beklenen kârın bu oranı builder'a verilir
-    /// Ör: 0.25 = %25, coinbase.transfer veya yüksek priority fee olarak
+    /// Dinamik bribe yÃƒÂ¼zdesi Ã¢â‚¬â€ beklenen kÃƒÂ¢rÃ„Â±n bu oranÃ„Â± builder'a verilir
+    /// Ãƒâ€“r: 0.25 = %25, coinbase.transfer veya yÃƒÂ¼ksek priority fee olarak
     pub bribe_pct: f64,
-    /// Şifreli keystore dosya yolu (v9.0 key management)
-    #[allow(dead_code)]
-    pub keystore_path: Option<String>,
-    /// Key Manager modu aktif mi? (auto_load tarafından ayarlanır)
+    /// Ã…Âifreli keystore dosya yolu (v9.0 key management)
+        pub keystore_path: Option<String>,
+    /// Key Manager modu aktif mi? (auto_load tarafÃ„Â±ndan ayarlanÃ„Â±r)
     pub key_manager_active: bool,
-    /// v10.1: Circuit breaker eşiği — kaç ardışık başarısızlıkta bot kapanır
-    /// Varsayılan: 3. .env'den CIRCUIT_BREAKER_THRESHOLD ile ayarlanabilir.
+    /// v10.1: Circuit breaker eÃ…Å¸iÃ„Å¸i Ã¢â‚¬â€ kaÃƒÂ§ ardÃ„Â±Ã…Å¸Ã„Â±k baÃ…Å¸arÃ„Â±sÃ„Â±zlÃ„Â±kta bot kapanÃ„Â±r
+    /// VarsayÃ„Â±lan: 3. .env'den CIRCUIT_BREAKER_THRESHOLD ile ayarlanabilir.
     pub circuit_breaker_threshold: u32,
-    /// v15.0: Yedek RPC WebSocket URL (failover için)
-    /// Primary RPC'de hata veya yüksek gecikme olursa backup'a geçilir.
+    /// v15.0: Yedek RPC WebSocket URL (failover iÃƒÂ§in)
+    /// Primary RPC'de hata veya yÃƒÂ¼ksek gecikme olursa backup'a geÃƒÂ§ilir.
     pub rpc_wss_url_backup: Option<String>,
-    /// v15.0: Gecikme spike uyarı eşiği (ms)
-    /// Bu değerin üzerinde gecikme loglanır.
+    /// v15.0: Gecikme spike uyarÃ„Â± eÃ…Å¸iÃ„Å¸i (ms)
+    /// Bu deÃ„Å¸erin ÃƒÂ¼zerinde gecikme loglanÃ„Â±r.
     pub latency_spike_threshold_ms: f64,
-    /// v10.0: Private/Flashbots RPC URL (MEV koruması için)
-    /// Tanımlıysa eth_sendBundle kullanılır, değilse public mempool
+    /// v10.0: Private/Flashbots RPC URL (MEV korumasÃ„Â± iÃƒÂ§in)
+    /// TanÃ„Â±mlÃ„Â±ysa eth_sendBundle kullanÃ„Â±lÃ„Â±r, deÃ„Å¸ilse public mempool
     pub private_rpc_url: Option<String>,
-    /// v10.0: Ek WSS RPC URL'leri (Round-Robin havuz için)
-    /// Primary + backup dışında 3. endpoint
+    /// v10.0: Ek WSS RPC URL'leri (Round-Robin havuz iÃƒÂ§in)
+    /// Primary + backup dÃ„Â±Ã…Å¸Ã„Â±nda 3. endpoint
     pub rpc_wss_url_extra: Vec<String>,
-    /// v21.0: Maksimum havuz komisyon tavanı (basis points)
-    /// Bu değerin üzerindeki fee'ye sahip havuzlar strateji değerlendirmesinde atlanır.
-    /// Varsayılan: 30 bps (%0.30). .env'den MAX_POOL_FEE_BPS ile ayarlanabilir.
-    /// v21.0: 100→30 düşürüldü — shadow mode analizleri yüksek fee'li
-    /// havuzların kârsız olduğunu gösterdi. Düşük fee (%0.01, %0.05) havuzlara odaklanılır.
+    /// v21.0: Maksimum havuz komisyon tavanÃ„Â± (basis points)
+    /// Bu deÃ„Å¸erin ÃƒÂ¼zerindeki fee'ye sahip havuzlar strateji deÃ„Å¸erlendirmesinde atlanÃ„Â±r.
+    /// VarsayÃ„Â±lan: 30 bps (%0.30). .env'den MAX_POOL_FEE_BPS ile ayarlanabilir.
+    /// v21.0: 100Ã¢â€ â€™30 dÃƒÂ¼Ã…Å¸ÃƒÂ¼rÃƒÂ¼ldÃƒÂ¼ Ã¢â‚¬â€ shadow mode analizleri yÃƒÂ¼ksek fee'li
+    /// havuzlarÃ„Â±n kÃƒÂ¢rsÃ„Â±z olduÃ„Å¸unu gÃƒÂ¶sterdi. DÃƒÂ¼Ã…Å¸ÃƒÂ¼k fee (%0.01, %0.05) havuzlara odaklanÃ„Â±lÃ„Â±r.
     pub max_pool_fee_bps: u32,
 }
 
 impl BotConfig {
-    /// .env dosyasından yapılandırmayı oku
+    /// .env dosyasÃ„Â±ndan yapÃ„Â±landÃ„Â±rmayÃ„Â± oku
     pub fn from_env() -> Result<Self> {
         let rpc_wss_url = std::env::var("RPC_WSS_URL")
-            .map_err(|_| eyre::eyre!("RPC_WSS_URL .env dosyasında tanımlanmalıdır!"))?;
+            .map_err(|_| eyre::eyre!("RPC_WSS_URL .env dosyasÃ„Â±nda tanÃ„Â±mlanmalÃ„Â±dÃ„Â±r!"))?;
 
         if rpc_wss_url.is_empty() || rpc_wss_url.starts_with("wss://your-") {
-            return Err(eyre::eyre!("RPC_WSS_URL geçerli bir URL olmalıdır!"));
+            return Err(eyre::eyre!("RPC_WSS_URL geÃƒÂ§erli bir URL olmalÃ„Â±dÃ„Â±r!"));
         }
 
         // v15.0: Yedek RPC URL (opsiyonel)
@@ -659,10 +530,10 @@ impl BotConfig {
             .filter(|u| !u.is_empty() && !u.starts_with("wss://your-"));
 
         let rpc_http_url = std::env::var("RPC_HTTP_URL")
-            .map_err(|_| eyre::eyre!("RPC_HTTP_URL .env dosyasında tanımlanmalıdır!"))?;
+            .map_err(|_| eyre::eyre!("RPC_HTTP_URL .env dosyasÃ„Â±nda tanÃ„Â±mlanmalÃ„Â±dÃ„Â±r!"))?;
 
         if rpc_http_url.is_empty() || rpc_http_url.starts_with("https://your-") {
-            return Err(eyre::eyre!("RPC_HTTP_URL geçerli bir URL olmalıdır!"));
+            return Err(eyre::eyre!("RPC_HTTP_URL geÃƒÂ§erli bir URL olmalÃ„Â±dÃ„Â±r!"));
         }
 
         let private_key = std::env::var("PRIVATE_KEY")
@@ -674,15 +545,15 @@ impl BotConfig {
             .filter(|addr| !addr.is_empty() && addr != "0xYourContractAddress")
             .and_then(|addr| addr.parse::<Address>().ok());
 
-        // ── WETH Adresi (Base sabit) ─────────────────────────────
+        // Ã¢â€â‚¬Ã¢â€â‚¬ WETH Adresi (Base sabit) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
         // v12.0: Legacy env var'lar (WETH_ADDRESS, QUOTE_TOKEN_*,
-        // WETH_IS_TOKEN0, TOKEN0_DECIMALS, TOKEN1_DECIMALS) görmezden geliniyor.
-        // Havuz bazlı token bilgileri matched_pools.json'dan geliyor.
+        // WETH_IS_TOKEN0, TOKEN0_DECIMALS, TOKEN1_DECIMALS) gÃƒÂ¶rmezden geliniyor.
+        // Havuz bazlÃ„Â± token bilgileri matched_pools.json'dan geliyor.
         let weth_address: Address = address!("4200000000000000000000000000000000000006");
 
         let gas_cost_fallback_weth = Self::parse_env_f64("GAS_COST_FALLBACK_WETH", 0.00005);
         let flash_loan_fee_bps = Self::parse_env_f64("FLASH_LOAN_FEE_BPS", 5.0);
-        // v22.0: Default 0.0001 → 0.001 WETH (gas maliyetini karşılayacak eşik)
+        // v22.0: Default 0.0001 Ã¢â€ â€™ 0.001 WETH (gas maliyetini karÃ…Å¸Ã„Â±layacak eÃ…Å¸ik)
         let min_net_profit_weth = Self::parse_env_f64("MIN_NET_PROFIT_WETH", 0.001);
         let max_trade_size_weth = Self::parse_env_f64("MAX_TRADE_SIZE_WETH", 50.0);
 
@@ -706,7 +577,7 @@ impl BotConfig {
             .parse::<u64>()
             .unwrap_or(8453);
 
-        // ── IPC ve Transport Ayarları ─────────────────────────────
+        // Ã¢â€â‚¬Ã¢â€â‚¬ IPC ve Transport AyarlarÃ„Â± Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
         let rpc_ipc_path = std::env::var("RPC_IPC_PATH")
             .ok()
             .filter(|p| !p.is_empty());
@@ -722,7 +593,7 @@ impl BotConfig {
             _ => TransportMode::Auto,
         };
 
-        // ── TickBitmap Ayarları ───────────────────────────────────
+        // Ã¢â€â‚¬Ã¢â€â‚¬ TickBitmap AyarlarÃ„Â± Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
         let tick_bitmap_range = std::env::var("TICK_BITMAP_RANGE")
             .unwrap_or_else(|_| "500".into())
             .parse::<u32>()
@@ -733,39 +604,39 @@ impl BotConfig {
             .parse::<u64>()
             .unwrap_or(5);
 
-        // ── Gölge Modu (Shadow Mode) ─────────────────────────────
-        // EXECUTION_ENABLED=true → gerçek TX gönder
-        // EXECUTION_ENABLED=false veya tanımsız → sadece logla
+        // Ã¢â€â‚¬Ã¢â€â‚¬ GÃƒÂ¶lge Modu (Shadow Mode) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+        // EXECUTION_ENABLED=true Ã¢â€ â€™ gerÃƒÂ§ek TX gÃƒÂ¶nder
+        // EXECUTION_ENABLED=false veya tanÃ„Â±msÃ„Â±z Ã¢â€ â€™ sadece logla
         let execution_enabled_flag = std::env::var("EXECUTION_ENABLED")
             .unwrap_or_else(|_| "false".into())
             .to_lowercase()
             .parse::<bool>()
             .unwrap_or(false);
 
-        // ── v9.0: Yeni Güvenlik ve Performans Ayarları ───────────
+        // Ã¢â€â‚¬Ã¢â€â‚¬ v9.0: Yeni GÃƒÂ¼venlik ve Performans AyarlarÃ„Â± Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-        // Admin adresi (fon çekme yetkisi — kontrat v9.0)
+        // Admin adresi (fon ÃƒÂ§ekme yetkisi Ã¢â‚¬â€ kontrat v9.0)
         let admin_address = std::env::var("ADMIN_ADDRESS")
             .ok()
             .filter(|addr| !addr.is_empty())
             .and_then(|addr| addr.parse::<Address>().ok());
 
-        // Deadline block offset (varsayılan: 2 blok)
+        // Deadline block offset (varsayÃ„Â±lan: 2 blok)
         let deadline_blocks = std::env::var("DEADLINE_BLOCKS")
             .unwrap_or_else(|_| "2".into())
             .parse::<u32>()
             .unwrap_or(2);
 
-        // Dinamik bribe yüzdesi (varsayılan: %25)
+        // Dinamik bribe yÃƒÂ¼zdesi (varsayÃ„Â±lan: %25)
         let bribe_pct = Self::parse_env_f64("BRIBE_PCT", 0.25);
 
-        // v10.1: Circuit breaker eşiği (varsayılan: 3)
+        // v10.1: Circuit breaker eÃ…Å¸iÃ„Å¸i (varsayÃ„Â±lan: 3)
         let circuit_breaker_threshold = std::env::var("CIRCUIT_BREAKER_THRESHOLD")
             .unwrap_or_else(|_| "3".into())
             .parse::<u32>()
             .unwrap_or(3);
 
-        // Şifreli keystore dosya yolu
+        // Ã…Âifreli keystore dosya yolu
         let keystore_path = std::env::var("KEYSTORE_PATH")
             .ok()
             .filter(|p| !p.is_empty());
@@ -795,7 +666,7 @@ impl BotConfig {
             deadline_blocks,
             bribe_pct,
             keystore_path,
-            key_manager_active: false, // main.rs'de KeyManager başlatıldıktan sonra güncellenir
+            key_manager_active: false, // main.rs'de KeyManager baÃ…Å¸latÃ„Â±ldÃ„Â±ktan sonra gÃƒÂ¼ncellenir
             circuit_breaker_threshold,
             rpc_wss_url_backup,
             latency_spike_threshold_ms: Self::parse_env_f64("LATENCY_SPIKE_THRESHOLD_MS", 200.0),
@@ -822,17 +693,17 @@ impl BotConfig {
     }
 
     /// Kontrat tetikleme modu aktif mi?
-    /// Koşullar:
+    /// KoÃ…Å¸ullar:
     ///   1. EXECUTION_ENABLED=true (.env)
     ///   2. Private key mevcut (keystore VEYA env var)
-    ///   3. ARBITRAGE_CONTRACT_ADDRESS tanımlı
+    ///   3. ARBITRAGE_CONTRACT_ADDRESS tanÃ„Â±mlÃ„Â±
     pub fn execution_enabled(&self) -> bool {
         self.execution_enabled_flag
             && (self.private_key.is_some() || self.key_manager_active)
             && self.contract_address.is_some()
     }
 
-    /// Gölge modu aktif mi? (Loglama yapılır ama TX gönderilmez)
+    /// GÃƒÂ¶lge modu aktif mi? (Loglama yapÃ„Â±lÃ„Â±r ama TX gÃƒÂ¶nderilmez)
     pub fn shadow_mode(&self) -> bool {
         !self.execution_enabled_flag
     }
@@ -846,15 +717,15 @@ impl BotConfig {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// load_pool_configs_from_env() SİLİNDİ — v11.0
-// Havuz yapılandırması artık matched_pools.json'dan pool_discovery::build_runtime()
-// ile yüklenir. Statik POOL_A/B_ADDRESS env var'ları kullanılmaz.
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// load_pool_configs_from_env() SÃ„Â°LÃ„Â°NDÃ„Â° Ã¢â‚¬â€ v11.0
+// Havuz yapÃ„Â±landÃ„Â±rmasÃ„Â± artÃ„Â±k matched_pools.json'dan pool_discovery::build_runtime()
+// ile yÃƒÂ¼klenir. Statik POOL_A/B_ADDRESS env var'larÃ„Â± kullanÃ„Â±lmaz.
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Arbitraj İstatistikleri
-// ─────────────────────────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// Arbitraj Ã„Â°statistikleri
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 pub struct ArbitrageStats {
     pub total_blocks_processed: u64,
@@ -866,26 +737,26 @@ pub struct ArbitrageStats {
     pub max_profit_weth: f64,
     pub total_potential_profit: f64,
     pub session_start: Instant,
-    /// Transport türü (aktif bağlantı)
+    /// Transport tÃƒÂ¼rÃƒÂ¼ (aktif baÃ„Å¸lantÃ„Â±)
     pub active_transport: String,
-    /// Ortalama blok işleme gecikmesi (ms)
+    /// Ortalama blok iÃ…Å¸leme gecikmesi (ms)
     pub avg_block_latency_ms: f64,
-    /// Minimum blok işleme gecikmesi (ms)
+    /// Minimum blok iÃ…Å¸leme gecikmesi (ms)
     pub min_block_latency_ms: f64,
-    /// Toplam tick bitmap senkronizasyon sayısı
+    /// Toplam tick bitmap senkronizasyon sayÃ„Â±sÃ„Â±
     pub tick_bitmap_syncs: u64,
-    /// v10.0: Ardışık başarısızlık sayacı (circuit breaker için)
-    /// 3 ardışık simülasyon/TX başarısızlığında bot geçici olarak durur
+    /// v10.0: ArdÃ„Â±Ã…Å¸Ã„Â±k baÃ…Å¸arÃ„Â±sÃ„Â±zlÃ„Â±k sayacÃ„Â± (circuit breaker iÃƒÂ§in)
+    /// 3 ardÃ„Â±Ã…Å¸Ã„Â±k simÃƒÂ¼lasyon/TX baÃ…Å¸arÃ„Â±sÃ„Â±zlÃ„Â±Ã„Å¸Ã„Â±nda bot geÃƒÂ§ici olarak durur
     pub consecutive_failures: u32,
-    /// v15.0: Maksimum blok işleme gecikmesi (ms)
+    /// v15.0: Maksimum blok iÃ…Å¸leme gecikmesi (ms)
     pub max_block_latency_ms: f64,
-    /// v15.0: Gecikme spike sayısı (threshold üzerinde)
+    /// v15.0: Gecikme spike sayÃ„Â±sÃ„Â± (threshold ÃƒÂ¼zerinde)
     pub latency_spikes: u64,
-    /// v23.0 (Y-1): Gölge modunda simülasyon başarılı fırsat sayısı
+    /// v23.0 (Y-1): GÃƒÂ¶lge modunda simÃƒÂ¼lasyon baÃ…Å¸arÃ„Â±lÃ„Â± fÃ„Â±rsat sayÃ„Â±sÃ„Â±
     pub shadow_sim_success: u64,
-    /// v23.0 (Y-1): Gölge modunda simülasyon başarısız fırsat sayısı
+    /// v23.0 (Y-1): GÃƒÂ¶lge modunda simÃƒÂ¼lasyon baÃ…Å¸arÃ„Â±sÃ„Â±z fÃ„Â±rsat sayÃ„Â±sÃ„Â±
     pub shadow_sim_fail: u64,
-    /// v23.0 (Y-1): Gölge modunda kümülatif potansiyel kâr (WETH)
+    /// v23.0 (Y-1): GÃƒÂ¶lge modunda kÃƒÂ¼mÃƒÂ¼latif potansiyel kÃƒÂ¢r (WETH)
     pub shadow_cumulative_profit: f64,
 }
 
@@ -914,7 +785,7 @@ impl ArbitrageStats {
         }
     }
 
-    /// Blok gecikme istatistiğini güncelle
+    /// Blok gecikme istatistiÃ„Å¸ini gÃƒÂ¼ncelle
     pub fn update_latency(&mut self, latency_ms: f64) {
         if self.total_blocks_processed == 0 {
             self.avg_block_latency_ms = latency_ms;

@@ -572,6 +572,30 @@ contract ArbitrajBotu {
         }
     }
 
+    /// @notice v25.0: Executor'ın keşfettiği havuzları whiteliste EKLEMESİNE izin ver
+    /// @dev Sadece EKLEME yapabilir — çıkarma yetkisi YOKTUR (admin ayrıcalığı).
+    ///      Otonom keşif motoru yeni havuz bulduğunda bot bu fonksiyonu çağırarak
+    ///      admin müdahalesi olmadan havuzu aktif edebilir.
+    ///      Güvenlik: Executor zaten sadece whitelistteki havuzlara TX atabilir.
+    ///      Executor key çalınsa bile en kötü ihtimal yeni havuz eklenmesidir —
+    ///      kontrat fonlarına erişim hâlâ imkansızdır.
+    /// @param pool Whiteliste eklenecek havuz adresi
+    function executorAddPool(address pool) external {
+        if (msg.sender != executor) revert Unauthorized();
+        if (pool == address(0)) revert ZeroAddress();
+        poolWhitelist[pool] = true;
+    }
+
+    /// @notice v25.0: Executor toplu havuz ekleme (otonom keşif batch modu)
+    /// @param pools Whiteliste eklenecek havuz adresleri dizisi
+    function executorBatchAddPools(address[] calldata pools) external {
+        if (msg.sender != executor) revert Unauthorized();
+        for (uint256 i; i < pools.length; ++i) {
+            if (pools[i] == address(0)) revert ZeroAddress();
+            poolWhitelist[pools[i]] = true;
+        }
+    }
+
     // ═════════════════════════════════════════════════════════════════════════════
     //  ACİL DURUM — Token ve ETH Kurtarma
     // ═════════════════════════════════════════════════════════════════════════

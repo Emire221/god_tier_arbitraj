@@ -815,9 +815,9 @@ impl BotConfig {
                 extras
             },
             max_pool_fee_bps: std::env::var("MAX_POOL_FEE_BPS")
-                .unwrap_or_else(|_| "30".into())
+                .unwrap_or_else(|_| "10".into())
                 .parse::<u32>()
-                .unwrap_or(30),
+                .unwrap_or(10),
         })
     }
 

@@ -460,28 +460,31 @@ impl MevExecutor {
             10.0
         };
 
-        // v20.0: Adaptatif bribe yüzdesi — MAKSİMUM %70 (eski: %95)
+        // v24.0: Agresif PGA modülü — %10 ile %95 aralığında dinamik bribe.
         //
-        // L2 ağlarında (Base/OP Stack) L1 Data Fee anlık dalgalanır.
-        // Eski %95 bribe ile kalan %5'lik pay, L1 fee sapmasını
-        // tolere edemiyordu → net zarar.
+        // Base L2 sequencer sıralaması yalnızca priority fee ile belirlenir.
+        // Rekabetçi bloklarda rakip botlar kârın %99'una kadar rüşvet
+        // teklif edebilir. Düşük marjlı fırsatlarda agresif olmak gerekir.
         //
-        // Yeni sınırlar:
-        //   margin >= 5x  → %25 (sınırlı rekabet, konservatif)
-        //   margin 3-5x   → %35 (orta rekabet)
-        //   margin 2-3x   → %50 (yüksek rekabet)
-        //   margin 1.5-2x → %65 (çok yüksek rekabet)
-        //   margin < 1.5x → %70 (maksimum agresiflik — eski %95'ten düşürüldü)
-        let effective_pct = if profit_margin_ratio >= 5.0 {
-            self.base_bribe_pct.max(0.25)
+        // Yeni kademeler:
+        //   margin >= 10x → %10 (çok düşük rekabet, kârı koru)
+        //   margin 5-10x  → %25 (düşük rekabet)
+        //   margin 3-5x   → %40 (orta rekabet)
+        //   margin 2-3x   → %60 (yüksek rekabet)
+        //   margin 1.5-2x → %80 (çok yüksek rekabet)
+        //   margin < 1.5x → %95 (maksimum agresiflik — rakipleri ez)
+        let effective_pct = if profit_margin_ratio >= 10.0 {
+            self.base_bribe_pct.max(0.10)
+        } else if profit_margin_ratio >= 5.0 {
+            0.25
         } else if profit_margin_ratio >= 3.0 {
-            0.35
+            0.40
         } else if profit_margin_ratio >= 2.0 {
-            0.50
+            0.60
         } else if profit_margin_ratio >= 1.5 {
-            0.65
+            0.80
         } else {
-            0.70 // v20.0: Eski %95 → %70 (L1 fee dalgalanma marjı bırak)
+            0.95 // v24.0: Eski %70 → %95 (maksimum rekabet gücü)
         };
 
         // v20.0: Minimum mutlak kâr koruması

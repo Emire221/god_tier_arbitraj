@@ -251,12 +251,12 @@ async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> 
                 .unwrap_or(0.0)
                 >= 10_000.0
         })
-        // v21.0: Keşif komisyon filtresi: 1.00 → 0.30 daraltıldı.
-        // Shadow mode analizleri, %0.30+ komisyonlu havuzların spread'lerin
-        // fee'leri tolere edemediğini gösterdi. Düşük komisyonlu havuzlara
-        // (%0.01, %0.05) odaklanmak kârlılığı artırır.
-        // Yüksek fee havuzlar yalnızca aşırı volatilite döneminde faydalı olur.
-        .filter(|p| p.fee_tier.map_or(true, |fee| fee <= 0.30))
+        // v24.0: Keşif komisyon filtresi: 0.30 → 0.05 daraltıldı.
+        // %0.30+ komisyonlu havuzlarda toplam fee (%0.30 + %0.30 = %0.60)
+        // spread'in fee'leri tolere edemediğini gösterdi. Yalnızca düşük
+        // komisyonlu havuzlara (%0.01, %0.05) odaklanmak kârlılığı artırır.
+        // 100 bps (%0.01) ve 500 bps (%0.05) fee tier'ları hedeflenir.
+        .filter(|p| p.fee_tier.map_or(true, |fee| fee <= 0.05))
         .map(|p| DiscoveredPool {
             address: p.pair_address,
             dex: p.dex_id,

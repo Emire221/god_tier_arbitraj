@@ -574,11 +574,16 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
             )
         };
 
-        // v10.0: Varlık bazlı dinamik slippage
+        // v24.0: Desimal-duyarlı dinamik slippage
         let slippage_bps = {
             let buy_state = states[opportunity.buy_pool_idx].read();
             let sell_state = states[opportunity.sell_pool_idx].read();
-            determine_slippage_factor_bps(buy_state.liquidity, sell_state.liquidity)
+            determine_slippage_factor_bps(
+                buy_state.liquidity,
+                sell_state.liquidity,
+                &pools[opportunity.buy_pool_idx],
+                &pools[opportunity.sell_pool_idx],
+            )
         };
         let min_profit = compute_min_profit_exact(exact_min_profit, slippage_bps);
 
@@ -886,29 +891,41 @@ fn compute_min_profit_exact(exact_profit_wei: U256, slippage_factor_bps: u64) ->
 
 /// Havuz likidite derinliğine göre slippage faktörü hesapla (bps cinsinden)
 ///
-/// Mantık:
-///   - Derin havuzlar (WETH/Quote, likidite > 1e18) → %99.9 (9990 bps)
-///     MEV sandwich fırsatı minimuma iner
-///   - Orta derinlik (likidite > 1e16) → %99.5 (9950 bps)
-///     Makul güvenlik marjı
-///   - Sığ havuzlar (altcoin'ler, düşük likidite) → %95 (9500 bps)
-///     Yüksek slippage riski, konservatif yaklaşım
-fn determine_slippage_factor_bps(buy_liquidity: u128, sell_liquidity: u128) -> u64 {
-    let min_liquidity = buy_liquidity.min(sell_liquidity);
+/// v24.0: Token desimal-duyarlı normalizasyon.
+/// Raw likidite (u128), havuzdaki token0 ve token1'in desimal farkına göre
+/// 18-desimale normalize edilir. Bu sayede USDC (6 desimal) havuzunda
+/// 1e10 raw likidite, WETH (18 desimal) havuzundaki 1e18 ile eşdeğer olarak
+/// değerlendirilir.
+///
+/// Mantık (normalize likiditeye göre):
+///   - Derin havuz (>= 1e15 normalized) → 9950 bps (%99.5)
+///   - Orta derinlik (>= 1e13 normalized) → 9900 bps (%99)
+///   - Sığ havuz (< 1e13 normalized) → 9500 bps (%95)
+fn determine_slippage_factor_bps(
+    buy_liquidity: u128,
+    sell_liquidity: u128,
+    buy_pool: &PoolConfig,
+    sell_pool: &PoolConfig,
+) -> u64 {
+    // Her havuzun likiditesini 18-desimale normalize et.
+    // Uniswap V3'te L parametresi sqrt(token0 * token1) biriminde olup
+    // desimal farkı (token0_decimals + token1_decimals) / 2 kadar dengelenmeli.
+    let normalize = |liq: u128, pool: &PoolConfig| -> f64 {
+        let avg_decimals = (pool.token0_decimals as f64 + pool.token1_decimals as f64) / 2.0;
+        let scale = 10f64.powi(18 - avg_decimals as i32);
+        liq as f64 * scale
+    };
 
-    // v22.0: Sim vs real divergence koruması artırıldı.
-    // REVM simülasyonu ile gerçek yürütme arasında fiyat kayması olabilir
-    // (aradaki blokta başka swap'lar gerçekleşebilir). Daha konservatif
-    // slippage faktörleri kullanılır.
-    if min_liquidity >= 1_000_000_000_000_000_000 {
-        // >= 1e18 aktif likidite → derin havuz
-        9950 // %99.5 (eski: %99.9)
-    } else if min_liquidity >= 10_000_000_000_000_000 {
-        // >= 1e16 aktif likidite → orta derinlik
-        9900 // %99 (eski: %99.5)
+    let norm_buy = normalize(buy_liquidity, buy_pool);
+    let norm_sell = normalize(sell_liquidity, sell_pool);
+    let min_normalized = norm_buy.min(norm_sell);
+
+    if min_normalized >= 1e15 {
+        9950 // %99.5 — derin havuz
+    } else if min_normalized >= 1e13 {
+        9900 // %99.0 — orta derinlik
     } else {
-        // Sığ havuz — konservatif
-        9500 // %95 (değişmedi)
+        9500 // %95.0 — sığ havuz, konservatif
     }
 }
 

@@ -94,6 +94,10 @@ error ZeroAddress();
 /// @dev v13.0: ZeroAmount yerine semantik olarak doğru hata
 error InvalidCalldataLength();
 
+/// @dev executor ve admin aynı adres olamaz (rol ayrımı ihlali)
+/// @dev v24.0: ZeroAddress yerine semantik olarak doğru hata
+error InvalidRoleAssignment();
+
 // (v12.0: PoolNotWhitelisted kaldırıldı — off-chain doğrulama)
 // (v22.0: PoolNotWhitelisted geri eklendi — on-chain doğrulama ile güvenlik artırıldı)
 error PoolNotWhitelisted();
@@ -190,8 +194,8 @@ contract ArbitrajBotu {
     /// @param _admin    Fon yönetimi adresi (soğuk cüzdan/multisig)
     constructor(address _executor, address _admin) {
         if (_executor == address(0) || _admin == address(0)) revert ZeroAddress();
-        // v22.1: executor ve admin aynı adres olamaz — rol ayrımı ihlali
-        if (_executor == _admin) revert ZeroAddress();
+        // v24.0: executor ve admin aynı adres olamaz — rol ayrımı ihlali
+        if (_executor == _admin) revert InvalidRoleAssignment();
         executor = _executor;
         admin = _admin;
     }
@@ -478,6 +482,26 @@ contract ArbitrajBotu {
                 amountOwed     = uint256(amount1Delta);
                 // Güvenli negatif dönüşüm: anormal pozitif delta → 0 (underflow panic yerine)
                 amountReceived = amount0Delta < 0 ? uint256(-amount0Delta) : 0;
+            }
+
+            // ── v24.0: Fee-on-Transfer Token Koruması ────────────────────
+            //    Transfer sırasında vergi/kesinti uygulayan tokenlar için
+            //    delta'dan gelen miktar ile gerçek bakiye arasında fark olabilir.
+            //    Gerçek alınan miktarı bakiyeden oku — delta'ya güvenme.
+            {
+                uint256 actualBalance;
+                assembly {
+                    mstore(0x00, 0x70a0823100000000000000000000000000000000000000000000000000000000)
+                    mstore(0x04, address())
+                    let ok := staticcall(gas(), receivedToken, 0x00, 0x24, 0x00, 0x20)
+                    if or(iszero(ok), lt(returndatasize(), 0x20)) { revert(0, 0) }
+                    actualBalance := mload(0x00)
+                }
+                // Gerçek bakiye delta'dan düşükse, fee-on-transfer token.
+                // Gerçek bakiyeyi kullan, delta'yı değil.
+                if (actualBalance < amountReceived) {
+                    amountReceived = actualBalance;
+                }
             }
 
             // ── Hedef Havuzda Sat ────────────────────────────────────────

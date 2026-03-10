@@ -796,17 +796,50 @@ async fn run_bot(config: &BotConfig, pools: &[PoolConfig], pair_combos: &[pool_d
     sim_engine.cache_bytecodes(pools, &states);
 
     // v22.1: Kontrat bytecode'unu zincirden al — simülasyonda gerçek kontrat çalışsın
+    // v24.0: Zincirden alınamazsa Foundry artifact'ten yükle (local fallback)
     if let Some(contract_addr) = config.contract_address {
+        let mut bytecode_loaded = false;
         match provider.get_code_at(contract_addr).await {
             Ok(code) if !code.is_empty() => {
-                println!("  {} Kontrat bytecode yüklendi ({} byte)", "✅".green(), code.len());
+                println!("  {} Kontrat bytecode yüklendi ({} byte — zincirden)", "✅".green(), code.len());
                 sim_engine.set_contract_bytecode(code.to_vec());
+                bytecode_loaded = true;
             }
             Ok(_) => {
-                eprintln!("  {} Kontrat bytecode boş — deploy edilmemiş olabilir", "⚠️".yellow());
+                eprintln!("  {} Kontrat bytecode boş — deploy edilmemiş olabilir, local artifact aranıyor...", "⚠️".yellow());
             }
             Err(e) => {
-                eprintln!("  {} Kontrat bytecode alınamadı: {} — simülasyon boş hesap kullanacak", "⚠️".yellow(), e);
+                eprintln!("  {} Kontrat bytecode alınamadı: {} — local artifact aranıyor...", "⚠️".yellow(), e);
+            }
+        }
+        // v24.0: Fallback — Foundry out/ veya Contract/out/ dizininden derlenmiş bytecode yükle
+        if !bytecode_loaded {
+            let artifact_paths = [
+                "../Contract/out/Arbitraj.sol/ArbitrajBotu.json",
+                "Contract/out/Arbitraj.sol/ArbitrajBotu.json",
+            ];
+            for path in &artifact_paths {
+                if let Ok(content) = std::fs::read_to_string(path) {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(deployed) = json.get("deployedBytecode")
+                            .and_then(|v| v.get("object"))
+                            .and_then(|v| v.as_str())
+                        {
+                            let hex_str = deployed.strip_prefix("0x").unwrap_or(deployed);
+                            if let Ok(bytes) = alloy::primitives::hex::decode(hex_str) {
+                                if !bytes.is_empty() {
+                                    println!("  {} Kontrat bytecode yüklendi ({} byte — local artifact: {})", "✅".green(), bytes.len(), path);
+                                    sim_engine.set_contract_bytecode(bytes);
+                                    bytecode_loaded = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !bytecode_loaded {
+                eprintln!("  {} Kontrat bytecode bulunamadı — REVM simülasyonu matematiksel fallback kullanacak", "⚠️".yellow());
             }
         }
     }

@@ -646,6 +646,9 @@ pub async fn sync_all_pools<T: Transport + Clone, P: Provider<T, Ethereum> + Syn
 ///   1. tickBitmap word'lerini tarar
 ///   2. Başlatılmış tick'lerin liquidityNet bilgisini okur
 ///   3. PoolState.tick_bitmap'e yazar
+///
+/// v27.1: Her havuz için 1000ms timeout — tek havuzun RPC gecikmesi
+/// tüm paralel pipeline'ı bloklayamaz.
 pub async fn sync_all_tick_bitmaps<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
     provider: &P,
     pools: &[PoolConfig],
@@ -653,8 +656,27 @@ pub async fn sync_all_tick_bitmaps<T: Transport + Clone, P: Provider<T, Ethereum
     block_number: u64,
     scan_range: u32,
 ) -> Vec<Result<()>> {
+    const BITMAP_TIMEOUT_MS: u64 = 1000;
+
     let futures: Vec<_> = pools.iter().zip(states.iter())
-        .map(|(config, state)| sync_tick_bitmap(provider, config, state, block_number, scan_range))
+        .map(|(config, state)| {
+            let name = config.name.clone();
+            async move {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(BITMAP_TIMEOUT_MS),
+                    sync_tick_bitmap(provider, config, state, block_number, scan_range),
+                ).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        eprintln!(
+                            "     ⚠️ [TickBitmap] {} sync timeout ({}ms) — eski veri korunuyor",
+                            name, BITMAP_TIMEOUT_MS,
+                        );
+                        Err(eyre::eyre!("[{}] TickBitmap timeout ({}ms)", name, BITMAP_TIMEOUT_MS))
+                    }
+                }
+            }
+        })
         .collect();
     join_all(futures).await
 }
@@ -668,11 +690,36 @@ pub async fn sync_all_tick_bitmaps<T: Transport + Clone, P: Provider<T, Ethereum
 /// GasPriceOracle.getL1Fee() çağrısı ile 134-byte kompakt calldata'nın
 /// L1'e yayınlanma maliyetini sorguler. Blok başına 1 kez çağrılması yeterlidir.
 ///
+/// v27.1: 500ms timeout eklendi — RPC gecikmesi paralel pipeline'ı bloklayamaz.
+///
 /// # Dönüş
-/// L1 data fee (wei). Hata durumunda 0 döner (fallback: sadece L2 ücreti kullanılır).
+/// L1 data fee (wei). Hata/timeout durumunda konservatif fallback döner.
 pub async fn estimate_l1_data_fee<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
     provider: &P,
 ) -> u128 {
+    const L1_FEE_TIMEOUT_MS: u64 = 500;
+    const FALLBACK_FEE_WEI: u128 = 500_000_000_000_000; // 0.0005 ETH
+
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(L1_FEE_TIMEOUT_MS),
+        estimate_l1_data_fee_inner(provider),
+    ).await {
+        Ok(fee) => fee,
+        Err(_elapsed) => {
+            eprintln!(
+                "  ⚠️ [L1 Fee] GasPriceOracle sorgusu {}ms'de zaman aşımına uğradı — konservatif fallback kullanılıyor",
+                L1_FEE_TIMEOUT_MS,
+            );
+            FALLBACK_FEE_WEI
+        }
+    }
+}
+
+/// estimate_l1_data_fee iç implementasyonu (timeout wrapper'sız)
+async fn estimate_l1_data_fee_inner<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
+    provider: &P,
+) -> u128 {
+    const FALLBACK_FEE_WEI: u128 = 500_000_000_000_000; // 0.0005 ETH
     // 134-byte representative calldata (mostly non-zero for worst case estimate)
     // Gerçek calldata adresleri ve miktarları değişir ama boyut sabittir.
     // Non-zero byte'lar 16 gas, zero byte'lar 4 gas maliyetlidir (EIP-2028).
@@ -691,7 +738,18 @@ pub async fn estimate_l1_data_fee<T: Transport + Clone, P: Provider<T, Ethereum>
             if fee > alloy::primitives::U256::from(u128::MAX) {
                 u128::MAX
             } else {
-                fee.to::<u128>()
+                let fee_u128 = fee.to::<u128>();
+                // v27.0: Oracle başarılı döndü ama 0 ise → kontrat yanlış çalışıyor olabilir.
+                // Base mainnet'te 134-byte calldata için L1 fee asla 0 olmamalı.
+                // Konservatif fallback kullan ve uyar.
+                if fee_u128 == 0 {
+                    eprintln!(
+                        "  ⚠️ [L1 Fee] GasPriceOracle.getL1Fee() = 0 döndü — oracle veri beslemesi hatalı olabilir, konservatif fallback kullanılıyor",
+                    );
+                    FALLBACK_FEE_WEI
+                } else {
+                    fee_u128
+                }
             }
         }
         Err(e) => {
@@ -699,11 +757,7 @@ pub async fn estimate_l1_data_fee<T: Transport + Clone, P: Provider<T, Ethereum>
                 "  ⚠️ L1 data fee tahmini başarısız (fallback: konservatif tahmin): {}",
                 e
             );
-            // v22.0: Fallback 0 → konservatif tahmin.
-            // 0 dönmek gas maliyetini eksik hesaplatır → zararlı işlem riski.
-            // 134-byte non-zero calldata, Base L2'de ~0.0001-0.0005 ETH L1 fee öder.
-            // Konservatif üst sınır: 500_000 gwei = 0.0005 ETH
-            500_000_000_000_000u128 // 0.0005 ETH (wei)
+            FALLBACK_FEE_WEI
         }
     }
 }

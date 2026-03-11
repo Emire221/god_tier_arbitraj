@@ -121,11 +121,68 @@ pub fn check_arbitrage_opportunity(
     // L1 data fee → WETH (tüm gas hesaplarında kullanılacak)
     let l1_data_fee_weth = l1_data_fee_wei as f64 / 1e18;
 
+    // ─── v27.0: Yön + Likidite → PreFilter sıralama düzeltmesi ───
+    // Önce yön ve havuz derinliğini hesapla, sonra PreFilter'a besle.
+    // Eski hata: PreFilter statik 25 WETH probe ile çalışıyor, havuz sığ
+    // olduğunda sahte kâr tahmini üretiyordu. Şimdi effective_cap
+    // PreFilter'dan ÖNCE hesaplanır ve probe_amount olarak kullanılır.
+
+    // Yön belirleme: Ucuzdan al, pahalıya sat
+    let (buy_idx, sell_idx) = if price_a < price_b {
+        (0, 1) // A ucuz, B pahalı
+    } else {
+        (1, 0) // B ucuz, A pahalı
+    };
+
+    let buy_state = if buy_idx == 0 { &state_a } else { &state_b };
+    let sell_state = if sell_idx == 0 { &state_a } else { &state_b };
+    let avg_price_in_quote = (price_a + price_b) / 2.0;
+
+    // ─── TickBitmap referansları (varsa) ───────────────────────────
+    let sell_bitmap = sell_state.tick_bitmap.as_ref();
+    let buy_bitmap = buy_state.tick_bitmap.as_ref();
+
+    // ─── v11.0: Hard Liquidity Cap — PreFilter + NR Öncesi Havuz Derinlik Kontrolü ─
+    // Havuzun gerçek mevcut likiditesini hesapla (TickBitmap'ten).
+    // WETH/USDC havuzlarında 18 vs 6 decimal uyumsuzluğu burada yakalanır.
+    // v27.0: effective_cap artık PreFilter'a da beslenir (probe_amount).
+    let sell_hard_cap = math::exact::hard_liquidity_cap_weth(
+        sell_state.sqrt_price_x96,
+        sell_state.liquidity,
+        sell_state.tick,
+        pools[sell_idx].token0_is_weth,
+        sell_bitmap,
+        pools[sell_idx].tick_spacing,
+    );
+    let buy_hard_cap = math::exact::hard_liquidity_cap_weth(
+        buy_state.sqrt_price_x96,
+        buy_state.liquidity,
+        buy_state.tick,
+        pools[buy_idx].token0_is_weth,
+        buy_bitmap,
+        pools[buy_idx].tick_spacing,
+    );
+    let effective_cap = sell_hard_cap.min(buy_hard_cap);
+
+    if effective_cap < config.max_trade_size_weth * 0.1 {
+        eprintln!(
+            "     \u{26a0}\u{fe0f} [Liquidity] Havuz derinliği çok sığ: sell_cap={:.4} buy_cap={:.4} WETH (MAX_TRADE={:.1})",
+            sell_hard_cap, buy_hard_cap, config.max_trade_size_weth,
+        );
+    }
+
+    if effective_cap <= 0.001 {
+        eprintln!(
+            "     \u{23ed}\u{fe0f} [Liquidity] Yetersiz likidite — NR atlanıyor (cap={:.6} WETH)",
+            effective_cap,
+        );
+        return None;
+    }
+
     // ─── v19.0: O(1) PreFilter — NR'ye girmeden hızlı eleme ───
     // Spread'in fee + gas + bribe maliyetlerini kurtarıp kurtaramayacağını
-    // mikrosaniyede kontrol eder. v19.0: Gas maliyetine %20 güvenlik marjı
-    // eklendi ve bribe maliyeti de hesaba katıldı → kârsız işlemler
-    // en erken safhada elenir.
+    // mikrosaniyede kontrol eder. v27.0: probe_amount artık havuzun gerçek
+    // likiditesine (effective_cap) göre sınırlandırılır.
     {
         // Dinamik gas cost (PreFilter için) — L2 + L1 + %20 güvenlik marjı
         let gas_estimate: u64 = last_simulated_gas.unwrap_or(200_000);
@@ -152,84 +209,33 @@ pub fn check_arbitrage_opportunity(
             bribe_pct: config.bribe_pct * 1.10,
         };
 
-        // Kaba tarama miktarı: max trade size'ın %50'si (konservatif tahmin)
-        let probe_amount = config.max_trade_size_weth * 0.5;
+        // v27.0: Gerçek havuz derinliğine göre sınırlandırılmış probe miktarı
+        // Eski: config.max_trade_size_weth * 0.5 (statik, havuz derinliğini yok sayıyordu)
+        // Yeni: min(max_trade * 0.5, effective_cap) → sığ havuzlarda sahte kâr tahmini önlenir
+        let probe_amount = f64::min(config.max_trade_size_weth * 0.5, effective_cap);
 
         match pre_filter.check(price_a, price_b, probe_amount) {
             math::PreFilterResult::Unprofitable { reason } => {
                 eprintln!(
-                    "     {} [PreFilter] Spread {:.4}% → {:?} | fee_total={:.3}% | gas={:.8} WETH",
+                    "     {} [PreFilter] Spread {:.4}% → {:?} | fee_total={:.3}% | gas={:.8} WETH | probe={:.4} WETH",
                     "\u{23ed}\u{fe0f}",
                     spread_pct,
                     reason,
                     (pre_filter.fee_a + pre_filter.fee_b + config.flash_loan_fee_bps / 10_000.0) * 100.0,
                     prefilter_gas_cost_weth,
+                    probe_amount,
                 );
                 return None;
             }
             math::PreFilterResult::Profitable { estimated_profit_weth, spread_ratio } => {
                 eprintln!(
-                    "     {} [PreFilter] GEÇTI | spread_ratio={:.6} | est_profit={:.8} WETH → NR'ye devam",
+                    "     {} [PreFilter] GEÇTI | spread_ratio={:.6} | est_profit={:.8} WETH | probe={:.4} WETH → NR'ye devam",
                     "\u{2705}",
                     spread_ratio,
                     estimated_profit_weth,
+                    probe_amount,
                 );
             }
-        }
-    }
-
-    // Yön belirleme: Ucuzdan al, pahalıya sat
-    let (buy_idx, sell_idx) = if price_a < price_b {
-        (0, 1) // A ucuz, B pahalı
-    } else {
-        (1, 0) // B ucuz, A pahalı
-    };
-
-    let buy_state = if buy_idx == 0 { &state_a } else { &state_b };
-    let sell_state = if sell_idx == 0 { &state_a } else { &state_b };
-    let avg_price_in_quote = (price_a + price_b) / 2.0;
-
-    // ─── TickBitmap referansları (varsa) ───────────────────────────
-    let sell_bitmap = sell_state.tick_bitmap.as_ref();
-    let buy_bitmap = buy_state.tick_bitmap.as_ref();
-
-    // ─── v11.0: Hard Liquidity Cap — NR Öncesi Havuz Derinlik Kontrolü ─────
-    // Havuzun gerçek mevcut likiditesini hesapla (TickBitmap'ten).
-    // WETH/USDC havuzlarında 18 vs 6 decimal uyumsuzluğu burada yakalanır.
-    // Eğer havuzda sadece ~5 WETH varken MAX_TRADE_SIZE (50 WETH) öneriliyorsa,
-    // NR bu tavanla sınırlandırılır ve REVM revert'ü önlenir.
-    {
-        let sell_hard_cap = math::exact::hard_liquidity_cap_weth(
-            sell_state.sqrt_price_x96,
-            sell_state.liquidity,
-            sell_state.tick,
-            pools[sell_idx].token0_is_weth,
-            sell_bitmap,
-            pools[sell_idx].tick_spacing,
-        );
-        let buy_hard_cap = math::exact::hard_liquidity_cap_weth(
-            buy_state.sqrt_price_x96,
-            buy_state.liquidity,
-            buy_state.tick,
-            pools[buy_idx].token0_is_weth,
-            buy_bitmap,
-            pools[buy_idx].tick_spacing,
-        );
-        let effective_cap = sell_hard_cap.min(buy_hard_cap);
-
-        if effective_cap < config.max_trade_size_weth * 0.1 {
-            eprintln!(
-                "     \u{26a0}\u{fe0f} [Liquidity] Havuz derinliği çok sığ: sell_cap={:.4} buy_cap={:.4} WETH (MAX_TRADE={:.1})",
-                sell_hard_cap, buy_hard_cap, config.max_trade_size_weth,
-            );
-        }
-
-        if effective_cap <= 0.001 {
-            eprintln!(
-                "     \u{23ed}\u{fe0f} [Liquidity] Yetersiz likidite — NR atlanıyor (cap={:.6} WETH)",
-                effective_cap,
-            );
-            return None;
         }
     }
 

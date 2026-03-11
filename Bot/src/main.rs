@@ -36,6 +36,7 @@ use discovery_engine::{DiscoveryConfig, DiscoveryEngine, LivePoolRegistry};
 use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use futures_util::StreamExt;
+use futures_util::future::join_all;
 use eyre::Result;
 use chrono::Local;
 use colored::*;
@@ -1062,13 +1063,61 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         let block_base_fee = block_header.header.base_fee_per_gas
             .unwrap_or(0) as u64;
 
-        // ── 1. DURUM SENKRONİZASYONU ────────────────────────
-        let sync_results = sync_all_pools(&provider, pools, &states, block_number).await;
+        // ── 1. DURUM SENKRONİZASYONU + L1 FEE + TİCKBİTMAP (PARALEL) ────
+        // v27.1: Üç bağımsız I/O işlemi tek tokio::join! ile paralel çalışır.
+        // Eski: sync_pools → L1_fee → ... → TickBitmap (sıralı, 600ms+ ekleniyor)
+        // Yeni: sync_pools ∥ L1_fee ∥ TickBitmap (paralel, toplam ≈ max(tek RTT))
+        //
+        // TickBitmap periyodik güncelleme (her N blokta) artık ayrı bir adım değil,
+        // state sync ile eşzamanlı çalışır → blok döngüsü 500-600ms kısalır.
+        let bitmap_needs_refresh = block_number.saturating_sub(last_bitmap_block)
+            >= config.tick_bitmap_max_age_blocks;
 
-        // ── 1.1. L1 DATA FEE TAHMİNİ (OP Stack / Base) ──────
-        // GasPriceOracle.getL1Fee() ile 134-byte calldata'nın L1 maliyeti
-        // Blok başına 1 kez sorgulanır — sonuç tüm fırsat hesaplarına dahil edilir
-        let l1_data_fee_wei = estimate_l1_data_fee(&provider).await;
+        let bitmap_future = async {
+            if bitmap_needs_refresh {
+                let bm_start = Instant::now();
+                let results = sync_all_tick_bitmaps(
+                    &provider, pools, &states, block_number, config.tick_bitmap_range,
+                ).await;
+                Some((results, bm_start.elapsed()))
+            } else {
+                None
+            }
+        };
+
+        let (sync_results, l1_data_fee_wei, bitmap_result) = tokio::join!(
+            sync_all_pools(&provider, pools, &states, block_number),
+            estimate_l1_data_fee(&provider),
+            bitmap_future,
+        );
+
+        // TickBitmap sonuçlarını işle
+        if let Some((bm_results, bm_elapsed)) = bitmap_result {
+            let bm_ms = bm_elapsed.as_millis();
+            let bm_ok = bm_results.iter().filter(|r| r.is_ok()).count();
+            if bm_ok > 0 {
+                println!(
+                    "     {} TickBitmap güncellendi ({}/{} havuz, {}ms) [PARALEL]",
+                    "🗺️".cyan(), bm_ok, pools.len(), bm_ms,
+                );
+            }
+            stats.tick_bitmap_syncs += 1;
+            last_bitmap_block = block_number;
+        }
+
+        // v27.0: L1 Data Fee teşhis logu — 0 gelmesi OP Stack'te anormal
+        let l1_fee_eth = l1_data_fee_wei as f64 / 1e18;
+        if l1_data_fee_wei == 0 {
+            eprintln!(
+                "  {} [L1 Fee] UYARI: L1 data fee = 0 wei — GasPriceOracle yanıt vermiyor olabilir!",
+                "⚠️",
+            );
+        } else {
+            eprintln!(
+                "  {} [L1 Fee] {} wei ({:.8} ETH)",
+                "⛽", l1_data_fee_wei, l1_fee_eth,
+            );
+        }
 
         let sync_ms = block_start.elapsed().as_millis();
 
@@ -1106,25 +1155,49 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             &discovery_registry, pools, &mut states, pair_combos,
         );
         if hot_reload_count > 0 {
-            // Yeni havuzların state'ini senkronize et
+            // v27.0: Yeni havuzların state'ini PARALEL senkronize et
+            // Eski: Sıralı for döngüsü → N havuz × 3 RTT = 3N RTT gecikme
+            // Yeni: join_all ile paralel → ~3 RTT (havuz sayısından bağımsız)
             let new_start = pools.len() - hot_reload_count;
-            for i in new_start..pools.len() {
-                // Bytecode al
-                if let Ok(code) = provider.get_code_at(pools[i].address).await {
+
+            // Adım 1: Bytecode al (paralel)
+            let bytecode_futs: Vec<_> = (new_start..pools.len())
+                .map(|i| {
+                    let provider = &provider;
+                    let addr = pools[i].address;
+                    async move {
+                        (i, provider.get_code_at(addr).await)
+                    }
+                })
+                .collect();
+            let bytecode_results = join_all(bytecode_futs).await;
+            for (i, result) in bytecode_results {
+                if let Ok(code) = result {
                     if !code.is_empty() {
                         states[i].write().bytecode = Some(code.to_vec());
                     }
                 }
-                // State sync
-                let _ = crate::state_sync::sync_pool_state(
-                    &provider, &pools[i], &states[i], block_number,
-                ).await;
-                // TickBitmap sync — NR için gerekli, yoksa dampening fallback kullanılır
-                let _ = crate::state_sync::sync_tick_bitmap(
-                    &provider, &pools[i], &states[i], block_number,
-                    config.tick_bitmap_range,
-                ).await;
             }
+
+            // Adım 2: State sync + TickBitmap sync (paralel)
+            let sync_futs: Vec<_> = (new_start..pools.len())
+                .map(|i| {
+                    let provider = &provider;
+                    let pool_cfg = &pools[i];
+                    let pool_state = &states[i];
+                    let bitmap_range = config.tick_bitmap_range;
+                    async move {
+                        let _ = crate::state_sync::sync_pool_state(
+                            provider, pool_cfg, pool_state, block_number,
+                        ).await;
+                        let _ = crate::state_sync::sync_tick_bitmap(
+                            provider, pool_cfg, pool_state, block_number,
+                            bitmap_range,
+                        ).await;
+                    }
+                })
+                .collect();
+            join_all(sync_futs).await;
             // v25.0: REVM bytecode cache güncelle (append-only, eski havuzlar korunur)
             sim_engine.cache_bytecodes(&pools[new_start..], &states[new_start..]);
             // v25.0: base_db'yi TÜM havuzlarla yeniden oluştur — yeni havuz bytecode'ları
@@ -1189,26 +1262,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             );
         }
 
-        // ── 1.5. TİCKBİTMAP PERİYODİK GÜNCELLEME ──────────
-        // Her tick_bitmap_max_age_blocks blokta bir TickBitmap'i güncelle
-        let bitmap_age = block_number.saturating_sub(last_bitmap_block);
-        if bitmap_age >= config.tick_bitmap_max_age_blocks {
-            let bm_start = Instant::now();
-            let bm_results = sync_all_tick_bitmaps(
-                &provider, pools, &states, block_number, config.tick_bitmap_range,
-            ).await;
-            let bm_ms = bm_start.elapsed().as_millis();
-
-            let bm_ok = bm_results.iter().filter(|r| r.is_ok()).count();
-            if bm_ok > 0 {
-                println!(
-                    "     {} TickBitmap güncellendi ({}/{} havuz, {}ms)",
-                    "🗺️".cyan(), bm_ok, pools.len(), bm_ms,
-                );
-            }
-            stats.tick_bitmap_syncs += 1;
-            last_bitmap_block = block_number;
-        }
+        // ── 1.5. TİCKBİTMAP — Artık §1'de paralel çalışıyor (v27.1) ──
 
         // ── 2. BLOK + SPREAD BİLGİSİ ───────────────────────
         print_block_update(block_number, pools, &states, sync_ms);

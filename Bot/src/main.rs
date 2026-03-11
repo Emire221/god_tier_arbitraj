@@ -26,6 +26,7 @@ mod transport;
 mod executor;
 mod pool_discovery;
 mod discovery_engine;
+mod route_engine;
 
 use types::*;
 use state_sync::*;
@@ -376,8 +377,8 @@ PRIVATE_RPC_URL=
 GAS_COST_FALLBACK_WETH=0.00005
 FLASH_LOAN_FEE_BPS=0.0
 MIN_NET_PROFIT_WETH=0.0001
-MAX_TRADE_SIZE_WETH=50.0
-MAX_STALENESS_MS=2000
+MAX_TRADE_SIZE_WETH=5.0
+MAX_STALENESS_MS=3000
 STATS_INTERVAL=10
 MAX_RETRIES=0
 
@@ -506,21 +507,26 @@ async fn main() -> Result<()> {
     }
 
     // ═══ GÖREV 2: Auto-Bootstrap — matched_pools.json yoksa veya boşsa otomatik keşif ═══
-    let needs_discovery = match std::fs::metadata("matched_pools.json") {
-        Ok(meta) => meta.len() == 0, // Dosya var ama boş
-        Err(_) => true,               // Dosya yok
+    // ═══ v29.0: CORE POOLS — Statik beyaz liste öncelikli ═══
+    let matched_cfg = if let Some(core_cfg) = pool_discovery::load_core_pools() {
+        core_cfg
+    } else {
+        let needs_discovery = match std::fs::metadata("matched_pools.json") {
+            Ok(meta) => meta.len() == 0,
+            Err(_) => true,
+        };
+
+        if needs_discovery {
+            eprintln!(
+                "  {} matched_pools.json {} — otomatik havuz keşfi başlatılıyor...",
+                "🔍".cyan(),
+                if std::path::Path::new("matched_pools.json").exists() { "boş" } else { "bulunamadı" }
+            );
+            pool_discovery::cli_discover_pools().await?;
+        }
+
+        pool_discovery::load_matched_pools()?
     };
-
-    if needs_discovery {
-        eprintln!(
-            "  {} matched_pools.json {} — otomatik havuz keşfi başlatılıyor...",
-            "🔍".cyan(),
-            if std::path::Path::new("matched_pools.json").exists() { "boş" } else { "bulunamadı" }
-        );
-        pool_discovery::cli_discover_pools().await?;
-    }
-
-    let matched_cfg = pool_discovery::load_matched_pools()?;
     let (pools_initial, pair_combos_initial) = pool_discovery::build_runtime(&matched_cfg)?;
     // v25.0: Havuz listeleri artık mutable — hot-reload için
     let mut pools = pools_initial;
@@ -902,6 +908,48 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             "ℹ️".blue(),
             "DEVRE DIŞI".yellow().bold()
         );
+    }
+
+    // ══════════════ BAŞLANGIÇ WHİTELİST SYNC ══════════════
+    // Tüm core havuzları on-chain whiteliste ekle (executorBatchAddPools).
+    // İdempotent — zaten whitelistte olan havuzlar tekrar eklense sorun olmaz.
+    if config.execution_enabled() {
+        let all_pool_addrs: Vec<Address> = pools.iter().map(|p| p.address).collect();
+        if !all_pool_addrs.is_empty() {
+            let calldata = crate::executor::encode_whitelist_calldata(&all_pool_addrs);
+            if let (Some(ref pk), Some(contract_addr)) = (&config.private_key, config.contract_address) {
+                let startup_base_fee = provider
+                    .get_block(
+                        alloy::eips::BlockNumberOrTag::Latest.into(),
+                        alloy::rpc::types::BlockTransactionsKind::Hashes,
+                    )
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|b| b.header.base_fee_per_gas)
+                    .unwrap_or(1_000_000_000) as u64;
+
+                let nonce = nonce_manager.get_and_increment();
+                match whitelist_pools_on_chain(
+                    Arc::clone(&mev_executor),
+                    pk.clone(),
+                    contract_addr,
+                    calldata,
+                    nonce,
+                    Arc::clone(&nonce_manager),
+                    startup_base_fee,
+                ).await {
+                    Ok(_) => println!(
+                        "  {} [Whitelist] {} havuz on-chain whiteliste eklendi (startup sync)",
+                        "✅".green(), all_pool_addrs.len(),
+                    ),
+                    Err(e) => eprintln!(
+                        "  {} [Whitelist] Startup whitelist hatası: {} — admin manuel eklemelidir",
+                        "⚠️".yellow(), e,
+                    ),
+                }
+            }
+        }
     }
 
     // ══════════════ BLOK BAŞLIĞI ABONELİĞİ ══════════════
@@ -1296,7 +1344,14 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         }
 
         // ── 3. ARBİTRAJ FIRSATI KONTROLÜ ────────────────────
-        if all_synced {
+        // v28.0: Pipeline Bütçesi — toplam blok işleme süresi Base L2 blok
+        // süresinin (2s) %75'ini aşıyorsa, gönderilecek TX hedef bloğu
+        // kaçıracağı için işlem atlanır. Eski/gecikmeli veriyle yapılan
+        // simülasyonlar frontrun ve sandwich saldırılarına açıktır.
+        let pipeline_elapsed_ms = block_start.elapsed().as_millis();
+        const PIPELINE_BUDGET_MS: u128 = 1500; // Base L2 ~2s blok, %75 bütçe
+
+        if all_synced && pipeline_elapsed_ms <= PIPELINE_BUDGET_MS {
             for (combo_idx, combo) in pair_combos.iter().enumerate() {
                 // v25.0: GC tarafından deaktive edilmiş havuzları atla
                 {
@@ -1375,6 +1430,83 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                             stats.consecutive_failures = 0;
                         }
                     }
+                }
+            }
+        } else if pipeline_elapsed_ms > PIPELINE_BUDGET_MS {
+            // v28.0: Pipeline bütçesi aşıldı — bu bloğu atla
+            eprintln!(
+                "  \u{26a0}\u{fe0f} [Pipeline] Blok #{} işleme süresi {}ms > bütçe {}ms — fırsat taraması atlandı (MEV koruması)",
+                block_number, pipeline_elapsed_ms, PIPELINE_BUDGET_MS,
+            );
+        }
+
+        // ── 4. MULTI-HOP ROTA TARAMASI (v29.0: Shadow Mode) ──────────────
+        //    LiquidityGraph'ı mevcut havuz verileriyle oluştur,
+        //    3+ hop rotalarını tara ve kârlı olanları logla.
+        //    Henüz yürütme YOKTUR — sadece gözlem ve log.
+        if all_synced && block_number % 3 == 0 {
+            let graph = route_engine::LiquidityGraph::build(pools, &states, config.weth_address);
+            let routes = graph.find_routes(4, 200);
+
+            if !routes.is_empty() {
+                let two_hop_count = graph.two_hop_routes(&routes).len();
+                let multi_hop_routes = graph.multi_hop_routes(&routes);
+                let multi_hop_count = multi_hop_routes.len();
+
+                eprintln!(
+                    "     {} [Graph] {} düğüm, {} kenar | {} rota (2-hop: {}, 3+hop: {})",
+                    "🔀".cyan(),
+                    graph.node_count(),
+                    graph.edge_count(),
+                    routes.len(),
+                    two_hop_count,
+                    multi_hop_count,
+                );
+
+                let multi_hop_opps = strategy::check_multi_hop_opportunities(
+                    &routes,
+                    pools,
+                    &states,
+                    config,
+                    block_base_fee,
+                    l1_data_fee_wei,
+                );
+
+                if let Some(best) = multi_hop_opps.first() {
+                    // Exact U256 profit doğrulaması
+                    let amount_wei = crate::math::exact::f64_to_u256_wei(best.optimal_amount_weth);
+                    let pool_states_ex: Vec<crate::types::PoolState> = best.pool_indices.iter()
+                        .map(|&i| states[i].read().clone()).collect();
+                    let pool_configs_ex: Vec<&crate::types::PoolConfig> = best.pool_indices.iter()
+                        .map(|&i| &pools[i]).collect();
+                    let state_refs_ex: Vec<&crate::types::PoolState> = pool_states_ex.iter().collect();
+                    let exact_profit = crate::math::compute_exact_profit_multi_hop(
+                        &state_refs_ex, &pool_configs_ex, &best.directions, amount_wei,
+                    );
+
+                    // Calldata boyutu hesapla
+                    let pool_addrs: Vec<alloy::primitives::Address> = best.pool_indices.iter()
+                        .map(|&i| pools[i].address).collect();
+                    let dirs_u8: Vec<u8> = best.directions.iter()
+                        .map(|&d| if d { 0u8 } else { 1u8 }).collect();
+                    let calldata = crate::simulator::encode_multi_hop_calldata(
+                        &pool_addrs, &dirs_u8, amount_wei, 0, 0,
+                    );
+
+                    eprintln!(
+                        "     {} [Multi-Hop] #{} {} | {:.4} WETH → {:.6} WETH kâr | {} | exact={} wei | {}B calldata | {}-hop NR({}/{})",
+                        "🔀".cyan(),
+                        best.route_idx,
+                        best.label,
+                        best.optimal_amount_weth,
+                        best.expected_profit_weth,
+                        if best.nr_converged { "✓" } else { "~" },
+                        exact_profit,
+                        calldata.len(),
+                        best.hop_count,
+                        best.nr_iterations,
+                        if best.nr_converged { "converged" } else { "scan" },
+                    );
                 }
             }
         }

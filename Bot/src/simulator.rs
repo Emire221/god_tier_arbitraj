@@ -709,6 +709,107 @@ pub fn format_compact_calldata_hex(calldata: &[u8]) -> String {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Multi-Hop Calldata Kodlayıcı (v29.0: Route Engine)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Multi-hop calldata formatı (değişken uzunluk):
+//
+//   Offset   Boyut   Alan
+//   ─────────────────────────────────────────────────────
+//   0x00      1 B    hopCount (2, 3 veya 4)
+//   0x01     32 B    amount (uint256, big-endian)
+//   0x21     16 B    minProfit (uint128, big-endian)
+//   0x31      4 B    deadlineBlock (uint32, big-endian)
+//
+//   --- Her hop için (hopCount × 21 byte): ---
+//   +0x00    20 B    pool adresi
+//   +0x14     1 B    yön (0x00=zeroForOne, 0x01=oneForZero)
+//
+//   Toplam: 53 + (hopCount × 21) byte
+//   2-hop: 53 + 42 = 95 byte
+//   3-hop: 53 + 63 = 116 byte
+//   4-hop: 53 + 84 = 137 byte
+//
+// Kontrat: fallback() uzunluğa bakarak 134-byte legacy mi, multi-hop mu karar verir.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Multi-hop calldata kodla (değişken uzunluk — 2/3/4 hop)
+pub fn encode_multi_hop_calldata(
+    pools: &[Address],
+    directions: &[u8],
+    amount_in_wei: U256,
+    min_profit: u128,
+    deadline_block: u32,
+) -> Vec<u8> {
+    let hop_count = pools.len();
+    debug_assert!(hop_count >= 2 && hop_count <= 4, "Hop sayısı 2-4 arası olmalı");
+    debug_assert_eq!(pools.len(), directions.len(), "Pool ve direction sayıları eşit olmalı");
+
+    // Header: 1 + 32 + 16 + 4 = 53 byte
+    // Hops: hopCount × 21 byte
+    let total_size = 53 + hop_count * 21;
+    let mut calldata = Vec::with_capacity(total_size);
+
+    // [0x00] hopCount — 1 byte
+    calldata.push(hop_count as u8);
+
+    // [0x01..0x21] amount — uint256, 32 byte big-endian
+    calldata.extend_from_slice(&amount_in_wei.to_be_bytes::<32>());
+
+    // [0x21..0x31] minProfit — uint128, 16 byte big-endian
+    calldata.extend_from_slice(&min_profit.to_be_bytes());
+
+    // [0x31..0x35] deadlineBlock — uint32, 4 byte big-endian
+    calldata.extend_from_slice(&deadline_block.to_be_bytes());
+
+    // [0x35..] Hop dizisi: her biri 21 byte (20 pool + 1 direction)
+    for (pool, &dir) in pools.iter().zip(directions.iter()) {
+        calldata.extend_from_slice(pool.as_slice()); // 20 byte
+        calldata.push(dir);                           // 1 byte
+    }
+
+    debug_assert_eq!(calldata.len(), total_size,
+        "Multi-hop calldata boyutu yanlış: beklenen={}, gerçek={}",
+        total_size, calldata.len()
+    );
+
+    calldata
+}
+
+/// Multi-hop calldata çözümle (test/debug için)
+#[allow(dead_code)]
+pub fn decode_multi_hop_calldata(data: &[u8]) -> Option<(Vec<Address>, Vec<u8>, U256, u128, u32)> {
+    if data.len() < 53 + 42 { // minimum 2-hop
+        return None;
+    }
+
+    let hop_count = data[0] as usize;
+    if hop_count < 2 || hop_count > 4 {
+        return None;
+    }
+
+    let expected_len = 53 + hop_count * 21;
+    if data.len() != expected_len {
+        return None;
+    }
+
+    let amount = U256::from_be_bytes::<32>(data[1..33].try_into().ok()?);
+    let min_profit = u128::from_be_bytes(data[33..49].try_into().ok()?);
+    let deadline_block = u32::from_be_bytes(data[49..53].try_into().ok()?);
+
+    let mut pools = Vec::with_capacity(hop_count);
+    let mut directions = Vec::with_capacity(hop_count);
+
+    for i in 0..hop_count {
+        let offset = 53 + i * 21;
+        pools.push(Address::from_slice(&data[offset..offset + 20]));
+        directions.push(data[offset + 20]);
+    }
+
+    Some((pools, directions, amount, min_profit, deadline_block))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Calldata Testleri (134-byte v9.0 formatı)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -946,6 +1047,7 @@ mod sequencer_reorg_tests {
                 token0_is_weth: true,
                 tick_spacing: 10,
                 quote_token_address: address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
+                base_token_address: address!("4200000000000000000000000000000000000006"),
             },
             PoolConfig {
                 address: POOL_B,
@@ -958,6 +1060,7 @@ mod sequencer_reorg_tests {
                 token0_is_weth: true,
                 tick_spacing: 1,
                 quote_token_address: address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
+                base_token_address: address!("4200000000000000000000000000000000000006"),
             },
         ]
     }

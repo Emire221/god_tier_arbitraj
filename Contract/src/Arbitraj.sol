@@ -90,8 +90,8 @@ error DeadlineExpired();
 /// @dev Sıfır adres (address(0)) kullanılamaz
 error ZeroAddress();
 
-/// @dev Calldata uzunluğu geçersiz (tam 134 byte olmalı)
-/// @dev v13.0: ZeroAmount yerine semantik olarak doğru hata
+/// @dev Calldata uzunluğu geçersiz (ne 134B 2-pool ne de geçerli multi-hop)
+/// @dev v29.0: Multi-hop desteği eklendi — geçerli uzunluklar: 134B veya 53+N×21B
 error InvalidCalldataLength();
 
 /// @dev executor ve admin aynı adres olamaz (rol ayrımı ihlali)
@@ -119,6 +119,8 @@ interface IUniswapV3Pool {
         uint160 sqrtPriceLimitX96,
         bytes calldata data
     ) external returns (int256 amount0, int256 amount1);
+    function token0() external view returns (address);
+    function token1() external view returns (address);
 }
 
 /// @dev Aerodrome Slipstream (Concentrated Liquidity) Pool arayüzü
@@ -172,6 +174,12 @@ contract ArbitrajBotu {
     event ArbitrageExecuted(
         address indexed poolA,
         address indexed poolB,
+        uint256 amountIn,
+        uint256 profit
+    );
+    /// @dev v29.0: Multi-hop arbitraj event'i
+    event MultiHopArbitrageExecuted(
+        uint8 hopCount,
         uint256 amountIn,
         uint256 profit
     );
@@ -230,11 +238,22 @@ contract ArbitrajBotu {
         // ── 1. EXECUTOR KONTROLÜ ─────────────────────────────────────────
         if (msg.sender != executor) revert Unauthorized();
 
-        // ── 1.5. CALLDATA UZUNLUK KONTROLÜ ───────────────────────────────
-        //    134 byte'dan farklı veri gelirse (eksik/fazla) anında revert.
-        //    Eksik veri EVM tarafından 0 ile doldurulur → minProfit=0, deadlineBlock=0
-        //    Bu, MEV botlarına sandviç fırsatı verir. Bu satır o riski kapatır.
-        if (msg.data.length != 134) revert InvalidCalldataLength();
+        // ── 1.5. CALLDATA UZUNLUK KONTROLÜ + YÖNLENDİRME ────────────────
+        //    v29.0: 134B = legacy 2-pool, diğer = multi-hop
+        //    Multi-hop format: 53 + hopCount×21 byte
+        uint256 dataLen = msg.data.length;
+        if (dataLen == 134) {
+            _executeTwoPool();
+        } else {
+            _executeMultiHop(dataLen);
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  LEGACY 2-POOL EXECUTION (134 byte calldata)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function _executeTwoPool() internal {
 
         // ── 2. REENTRANCY KİLİDİ (EIP-1153 Transient Storage) ────────────
         uint256 locked;
@@ -366,6 +385,154 @@ contract ArbitrajBotu {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    //  MULTI-HOP EXECUTION (v29.0) — 53 + hopCount×21 byte calldata
+    // ═════════════════════════════════════════════════════════════════════════
+    //
+    //  Multi-Hop Calldata Formatı:
+    //    Offset   Boyut   Alan
+    //    ─────────────────────────────────────────────────────
+    //    0x00      1 B    hopCount (3-4)
+    //    0x01     32 B    amount (uint256)
+    //    0x21     16 B    minProfit (uint128)
+    //    0x31      4 B    deadline (uint32)
+    //    0x35     21 B    hop[0]: pool (20B) + direction (1B)
+    //    0x4A     21 B    hop[1]: pool (20B) + direction (1B)
+    //    ...      21 B    hop[N-1]
+    //    ─────────────────────────────────────────────────────
+    //    TOPLAM  53 + N×21 byte
+    //
+    //  Akış:
+    //    1. İlk havuzdan flash swap (token borç al)
+    //    2. Callback: Sırayla ara havuzlarda swap yap
+    //    3. Son aşamada kâr token'ından ilk havuza borcu öde
+    //    4. Kâr kontrolü (minProfit)
+    //
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function _executeMultiHop(uint256 dataLen) internal {
+        // ── Reentrancy kilidi ────────────────────────────────────────────
+        uint256 locked;
+        assembly { locked := tload(0xFF) }
+        if (locked != 0) revert Locked();
+        assembly { tstore(0xFF, 1) }
+
+        // ── Calldata çözümleme — header ──────────────────────────────────
+        uint256 hopCount;
+        uint256 amount;
+        uint256 minProfit;
+        uint256 deadlineBlock;
+
+        assembly {
+            hopCount      := shr(248, calldataload(0x00))  // [0]         hopCount (1 byte)
+            amount        := calldataload(0x01)             // [1..33]     amount (uint256)
+            minProfit     := shr(128, calldataload(0x21))   // [33..49]    minProfit (uint128)
+            deadlineBlock := shr(224, calldataload(0x31))   // [49..53]    deadline (uint32)
+        }
+
+        // Doğrulama
+        if (hopCount < 3 || hopCount > 4) revert InvalidCalldataLength();
+        if (dataLen != 53 + hopCount * 21) revert InvalidCalldataLength();
+        if (amount == 0) revert ZeroAmount();
+        if (block.number > deadlineBlock) revert DeadlineExpired();
+
+        // ── İlk havuz bilgisini oku ──────────────────────────────────────
+        address firstPool;
+        uint256 firstDirection;
+        assembly {
+            // hop[0] offset = 0x35 (53 decimal)
+            firstPool     := shr(96,  calldataload(0x35))  // pool address
+            firstDirection := shr(248, calldataload(0x49))  // direction byte
+        }
+
+        if (!poolWhitelist[firstPool]) revert PoolNotWhitelisted();
+
+        // Tüm havuzları whiteliste kontrol et
+        for (uint256 i = 1; i < hopCount; ++i) {
+            address hopPool;
+            uint256 hopOffset = 53 + i * 21;
+            assembly {
+                hopPool := shr(96, calldataload(hopOffset))
+            }
+            if (!poolWhitelist[hopPool]) revert PoolNotWhitelisted();
+        }
+
+        // ── TSTORE — Multi-hop bağlamı ───────────────────────────────────
+        //    Slot 0x00: firstPool (callback güvenliği)
+        //    Slot 0x10: hopCount
+        //    Slot 0x11: currentHopIndex (başlangıç: 1)
+        //    Slot 0x12-0x15: hop pool adresleri (indeks 0-3)
+        //    Slot 0x16-0x19: hop yönleri (indeks 0-3)
+        //    Slot 0x20: multi-hop flag (1 = multi-hop aktif)
+        assembly {
+            tstore(0x00, firstPool)      // İlk havuz (callback doğrulaması)
+            tstore(0x10, hopCount)       // Toplam hop sayısı
+            tstore(0x11, 1)              // Sonraki işlenecek hop (0 = flash swap yapıldı)
+            tstore(0x20, 1)              // Multi-hop flag
+        }
+
+        // Tüm hop bilgilerini transient storage'a yaz
+        for (uint256 i = 0; i < hopCount; ++i) {
+            address hopPool;
+            uint256 hopDir;
+            uint256 hopOffset = 53 + i * 21;
+            assembly {
+                hopPool := shr(96, calldataload(hopOffset))
+                hopDir  := shr(248, calldataload(add(hopOffset, 20)))
+            }
+            assembly {
+                tstore(add(0x12, i), hopPool)    // Pool adresi
+                tstore(add(0x16, i), hopDir)     // Yön
+            }
+        }
+
+        // ── WETH bakiyesi (ÖNCE) — kâr token'ı her zaman WETH ───────────
+        address weth = address(0x4200000000000000000000000000000000000006);
+        uint256 balBefore;
+        assembly {
+            mstore(0x00, 0x70a0823100000000000000000000000000000000000000000000000000000000)
+            mstore(0x04, address())
+            let ok := staticcall(gas(), weth, 0x00, 0x24, 0x00, 0x20)
+            if or(iszero(ok), lt(returndatasize(), 0x20)) { revert(0, 0) }
+            balBefore := mload(0x00)
+        }
+
+        // ── Flash Swap — İlk havuzdan borç al ───────────────────────────
+        bool zeroForOne = (firstDirection == 0);
+        uint160 priceLimit = zeroForOne
+            ? MIN_SQRT_RATIO_PLUS_1
+            : MAX_SQRT_RATIO_MINUS_1;
+
+        IUniswapV3Pool(firstPool).swap(
+            address(this),
+            zeroForOne,
+            int256(amount),
+            priceLimit,
+            hex"02"    // data: 0x02 = multi-hop callback tetikleyici
+        );
+
+        // ── WETH bakiyesi (SONRA) ────────────────────────────────────────
+        uint256 balAfter;
+        assembly {
+            mstore(0x00, 0x70a0823100000000000000000000000000000000000000000000000000000000)
+            mstore(0x04, address())
+            let ok := staticcall(gas(), weth, 0x00, 0x24, 0x00, 0x20)
+            if or(iszero(ok), lt(returndatasize(), 0x20)) { revert(0, 0) }
+            balAfter := mload(0x00)
+        }
+
+        // ── Kâr kontrolü ─────────────────────────────────────────────────
+        if (balAfter <= balBefore) revert NoProfitRealized();
+        uint256 profit = balAfter - balBefore;
+        if (profit < minProfit) revert InsufficientProfit();
+
+        // ── Temizlik ─────────────────────────────────────────────────────
+        assembly { tstore(0xFF, 0) }
+        assembly { tstore(0x20, 0) }  // Multi-hop flag temizle
+
+        emit MultiHopArbitrageExecuted(uint8(hopCount), amount, profit);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     //  CALLBACK — Uniswap V3 / Aerodrome Slipstream Ortak Geri Çağrısı
     // ═════════════════════════════════════════════════════════════════════════
     //
@@ -449,6 +616,16 @@ contract ArbitrajBotu {
         int256 amount0Delta,
         int256 amount1Delta
     ) internal {
+        // ── MULTI-HOP FLAG KONTROLÜ ──────────────────────────────────────
+        uint256 isMultiHop;
+        assembly { isMultiHop := tload(0x20) }
+
+        if (isMultiHop == 1) {
+            _handleMultiHopCallback(amount0Delta, amount1Delta);
+            return;
+        }
+
+        // ── LEGACY 2-POOL CALLBACK (değişiklik yok) ─────────────────────
         // ── TRANSIENT STORAGE'DAN BAĞLAM OKU ─────────────────────────────
         address expectedPool;
         address aeroPool;
@@ -545,6 +722,101 @@ contract ArbitrajBotu {
         } else {
             revert InvalidCaller();
         }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  INTERNAL — Multi-Hop Callback Mantığı (v29.0)
+    // ═════════════════════════════════════════════════════════════════════════
+    //
+    //  Multi-hop callback zinciri:
+    //    Callback[0] (hop[0] pool → flash swap kaynağı):
+    //      1. Alınan miktarı belirle
+    //      2. hop[1] havuzunda swap yap → callback[1] tetiklenir
+    //      3. hop[0] havuzuna borcunu öde
+    //    Callback[1] (hop[1] pool):
+    //      1. Alınan miktarı belirle
+    //      2. hop[2] varsa: swap yap → callback[2]
+    //      3. hop[1]'e borcunu öde
+    //    Callback[N-1] (son hop):
+    //      1. Son havuza borcunu öde (transfer)
+    //
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function _handleMultiHopCallback(
+        int256 amount0Delta,
+        int256 amount1Delta
+    ) internal {
+        // Transient storage'dan multi-hop bağlamını oku
+        uint256 hopCount;
+        uint256 currentHop;
+        assembly {
+            hopCount   := tload(0x10)
+            currentHop := tload(0x11)
+        }
+
+        // Çağrıcı doğrulaması — msg.sender kayıtlı hop havuzlarından biri olmalı
+        bool callerValid = false;
+        uint256 callerHopIdx;
+        for (uint256 i = 0; i < hopCount; ++i) {
+            address hopPool;
+            assembly { hopPool := tload(add(0x12, i)) }
+            if (msg.sender == hopPool) {
+                callerValid = true;
+                callerHopIdx = i;
+                break;
+            }
+        }
+        if (!callerValid) revert InvalidCaller();
+
+        // Borçlu miktarı belirle (pozitif delta = borç)
+        uint256 amountOwed;
+        uint256 amountReceived;
+
+        if (amount0Delta > 0) {
+            amountOwed = uint256(amount0Delta);
+            amountReceived = amount1Delta < 0 ? uint256(-amount1Delta) : 0;
+        } else {
+            amountOwed = uint256(amount1Delta);
+            amountReceived = amount0Delta < 0 ? uint256(-amount0Delta) : 0;
+        }
+
+        // Sonraki hop varsa → zincirleme swap yap
+        if (currentHop < hopCount) {
+            address nextPool;
+            uint256 nextDir;
+            assembly {
+                nextPool := tload(add(0x12, currentHop))
+                nextDir  := tload(add(0x16, currentHop))
+            }
+
+            // currentHop'u artır (sonraki callback için)
+            assembly {
+                tstore(0x11, add(currentHop, 1))
+            }
+
+            bool nextZeroForOne = (nextDir == 0);
+            uint160 nextLimit = nextZeroForOne
+                ? MIN_SQRT_RATIO_PLUS_1
+                : MAX_SQRT_RATIO_MINUS_1;
+
+            IUniswapV3Pool(nextPool).swap(
+                address(this),
+                nextZeroForOne,
+                int256(amountReceived),
+                nextLimit,
+                hex"02"     // multi-hop callback devam
+            );
+        }
+
+        // Bu havuzun borcunu öde
+        // Borçlu token: amount0Delta > 0 ise token0, yoksa token1
+        address owedTokenAddr;
+        if (amount0Delta > 0) {
+            owedTokenAddr = IUniswapV3Pool(msg.sender).token0();
+        } else {
+            owedTokenAddr = IUniswapV3Pool(msg.sender).token1();
+        }
+        _safeTransfer(owedTokenAddr, msg.sender, amountOwed);
     }
 
     // ═════════════════════════════════════════════════════════════════════════════

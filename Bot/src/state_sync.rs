@@ -231,10 +231,10 @@ sol! {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// RPC durum sorgulama zaman aşımı (milisaniye).
-/// v22.0: 500ms → 2000ms. Base L2 ~2s blok süresi, yoğun dönemlerde
-/// RPC gecikmeleri 500ms'yi aşabilir → gereksiz timeout hataları.
-/// 2000ms yeterli süre tanır, 1 blok süresi içinde yanıt beklenir.
-const SYNC_TIMEOUT_MS: u64 = 2000;
+/// v28.0: 2000ms → 3000ms. Yoğun dönemlerde RPC gecikmeleri 2s'ı aşabilir.
+/// 3000ms yeterli süre tanır, Base L2 ~2s blok süresi içinde yanıt beklenir.
+/// Timeout durumunda bot eski veriyle çalışmaya devam eder (graceful degradation).
+const SYNC_TIMEOUT_MS: u64 = 3000;
 
 /// Maksimum yeniden deneme sayısı (timeout sonrası)
 const SYNC_MAX_RETRIES: u32 = 2;
@@ -616,6 +616,14 @@ pub async fn sync_all_pools<T: Transport + Clone, P: Provider<T, Ethereum> + Syn
                                 );
                                 continue;
                             }
+                            // v28.0: Graceful degradation — eski veri varsa kullan
+                            if state.read().is_initialized {
+                                eprintln!(
+                                    "     \u{26a0}\u{fe0f} [{}] Sync başarısız ({} deneme) — eski veri korunuyor (yaş: {}ms)",
+                                    config.name, MAX_RETRIES + 1, state.read().staleness_ms(),
+                                );
+                                return Ok(());
+                            }
                             return Err(e);
                         }
                         Err(_elapsed) => {
@@ -625,6 +633,15 @@ pub async fn sync_all_pools<T: Transport + Clone, P: Provider<T, Ethereum> + Syn
                                     config.name, SYNC_TIMEOUT_MS, attempt + 1, MAX_RETRIES,
                                 );
                                 continue;
+                            }
+                            // v28.0: Graceful degradation — timeout sonrası eski veri kullan
+                            if state.read().is_initialized {
+                                eprintln!(
+                                    "     \u{26a0}\u{fe0f} [{}] Sync timeout ({}ms, {} deneme) — eski veri korunuyor (yaş: {}ms)",
+                                    config.name, SYNC_TIMEOUT_MS, MAX_RETRIES + 1,
+                                    state.read().staleness_ms(),
+                                );
+                                return Ok(());
                             }
                             return Err(eyre::eyre!(
                                 "[{}] Sync timeout: {}ms i\u{00e7}inde yan\u{0131}t al\u{0131}namad\u{0131} ({} deneme)",
@@ -647,8 +664,9 @@ pub async fn sync_all_pools<T: Transport + Clone, P: Provider<T, Ethereum> + Syn
 ///   2. Başlatılmış tick'lerin liquidityNet bilgisini okur
 ///   3. PoolState.tick_bitmap'e yazar
 ///
-/// v27.1: Her havuz için 1000ms timeout — tek havuzun RPC gecikmesi
-/// tüm paralel pipeline'ı bloklayamaz.
+/// v28.0: 1000ms → 2000ms. Multicall3 2 RPC çağrısı yapar,
+/// yoğun dönemlerde 1s yetmeyebilir. Timeout durumunda eski bitmap
+/// geçerliliği staleness kontrolü ile yönetilir.
 pub async fn sync_all_tick_bitmaps<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
     provider: &P,
     pools: &[PoolConfig],
@@ -656,7 +674,7 @@ pub async fn sync_all_tick_bitmaps<T: Transport + Clone, P: Provider<T, Ethereum
     block_number: u64,
     scan_range: u32,
 ) -> Vec<Result<()>> {
-    const BITMAP_TIMEOUT_MS: u64 = 1000;
+    const BITMAP_TIMEOUT_MS: u64 = 2000;
 
     let futures: Vec<_> = pools.iter().zip(states.iter())
         .map(|(config, state)| {
@@ -690,27 +708,52 @@ pub async fn sync_all_tick_bitmaps<T: Transport + Clone, P: Provider<T, Ethereum
 /// GasPriceOracle.getL1Fee() çağrısı ile 134-byte kompakt calldata'nın
 /// L1'e yayınlanma maliyetini sorguler. Blok başına 1 kez çağrılması yeterlidir.
 ///
-/// v27.1: 500ms timeout eklendi — RPC gecikmesi paralel pipeline'ı bloklayamaz.
+/// v28.0: 500ms → 1000ms timeout. Timeout durumunda son başarılı sorgu
+/// sonucunu önbellek olarak kullanır (statik fallback yerine).
+/// Önbellek başlangıçta boştur — ilk timeout'ta konservatif fallback devreye girer.
 ///
 /// # Dönüş
-/// L1 data fee (wei). Hata/timeout durumunda konservatif fallback döner.
+/// L1 data fee (wei). Hata/timeout durumunda önbellek, yoksa konservatif fallback döner.
 pub async fn estimate_l1_data_fee<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
     provider: &P,
 ) -> u128 {
-    const L1_FEE_TIMEOUT_MS: u64 = 500;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const L1_FEE_TIMEOUT_MS: u64 = 1000;
     const FALLBACK_FEE_WEI: u128 = 500_000_000_000_000; // 0.0005 ETH
+
+    // v28.0: Son başarılı L1 fee sonucunu önbelleğe al.
+    // AtomicU64 kullanılır (u128'i 2 parçaya bölmedik çünkü L1 fee
+    // pratikte u64 aralığında kalır — ~18 ETH max).
+    static CACHED_L1_FEE: AtomicU64 = AtomicU64::new(0);
 
     match tokio::time::timeout(
         std::time::Duration::from_millis(L1_FEE_TIMEOUT_MS),
         estimate_l1_data_fee_inner(provider),
     ).await {
-        Ok(fee) => fee,
+        Ok(fee) => {
+            // Başarılı sorgu — önbelleği güncelle
+            if fee > 0 && fee < u64::MAX as u128 {
+                CACHED_L1_FEE.store(fee as u64, Ordering::Relaxed);
+            }
+            fee
+        }
         Err(_elapsed) => {
-            eprintln!(
-                "  ⚠️ [L1 Fee] GasPriceOracle sorgusu {}ms'de zaman aşımına uğradı — konservatif fallback kullanılıyor",
-                L1_FEE_TIMEOUT_MS,
-            );
-            FALLBACK_FEE_WEI
+            // Timeout — önbellekten son bilinen değeri kullan
+            let cached = CACHED_L1_FEE.load(Ordering::Relaxed);
+            if cached > 0 {
+                eprintln!(
+                    "  ⚠️ [L1 Fee] GasPriceOracle sorgusu {}ms'de zaman aşımına uğradı — önbellek kullanılıyor ({} wei)",
+                    L1_FEE_TIMEOUT_MS, cached,
+                );
+                cached as u128
+            } else {
+                eprintln!(
+                    "  ⚠️ [L1 Fee] GasPriceOracle sorgusu {}ms'de zaman aşımına uğradı — konservatif fallback kullanılıyor",
+                    L1_FEE_TIMEOUT_MS,
+                );
+                FALLBACK_FEE_WEI
+            }
         }
     }
 }

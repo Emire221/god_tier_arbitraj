@@ -22,6 +22,7 @@ use crate::types::{DexType, PoolConfig};
 // ─── Sabitler ───
 const BASE_WETH_LOWER: &str = "0x4200000000000000000000000000000000000006";
 const MATCHED_POOLS_PATH: &str = "matched_pools.json";
+const CORE_POOLS_PATH: &str = "core_pools.json";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DexScreener API Yanıt Yapıları
@@ -306,9 +307,13 @@ fn match_arbitrage_pairs(pools: &[DiscoveredPool]) -> Vec<MatchedPair> {
 
     for ((token0_addr, token1_addr), group) in &groups {
         // Her DEX'ten en yüksek likiditeli havuzu seç (O(N) tek geçiş)
+        // v29.0: Fee Tier Isolation — Her DEX+Fee çifti ayrı bir slot olarak ele alınır.
+        // Aynı DEX'in farklı fee tier'larındaki havuzlar (ör. Uniswap 0.01% vs 0.05%)
+        // artık ayrı ayrı arbitraj adayı olabilir; birbirini ezmez.
         let mut dex_best: HashMap<String, &DiscoveredPool> = HashMap::new();
         for pool in group {
-            let dex_key = pool.dex.to_lowercase();
+            let fee_bps = fee_tier_to_bps(pool.fee_tier);
+            let dex_key = format!("{}_{}", pool.dex.to_lowercase(), fee_bps);
             match dex_best.get(&dex_key) {
                 Some(existing) if existing.liquidity_usd >= pool.liquidity_usd => {}
                 _ => { dex_best.insert(dex_key, pool); }
@@ -487,6 +492,37 @@ pub fn load_matched_pools() -> Result<MatchedPoolsConfig> {
     Ok(config)
 }
 
+/// v29.0: Statik çekirdek havuz beyaz listesini yükle.
+/// core_pools.json varsa matched_pools.json yerine bu kullanılır.
+/// DexScreener bağımlılığını ortadan kaldırır.
+pub fn load_core_pools() -> Option<MatchedPoolsConfig> {
+    if !std::path::Path::new(CORE_POOLS_PATH).exists() {
+        return None;
+    }
+    match std::fs::read_to_string(CORE_POOLS_PATH) {
+        Ok(content) => {
+            match serde_json::from_str::<MatchedPoolsConfig>(&content) {
+                Ok(config) => {
+                    eprintln!(
+                        "  {} core_pools.json yüklendi ({} çift, {} havuz) — DexScreener atlanıyor",
+                        "📦", config.matched_pairs.len(),
+                        config.matched_pairs.iter().map(|p| p.pools.len()).sum::<usize>(),
+                    );
+                    Some(config)
+                }
+                Err(e) => {
+                    eprintln!("  ⚠️  core_pools.json parse hatası: {} — matched_pools.json'a düşülüyor", e);
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("  ⚠️  core_pools.json okunamadı: {} — matched_pools.json'a düşülüyor", e);
+            None
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Runtime Dönüşümü — JSON → PoolConfig + PairCombo
 // ─────────────────────────────────────────────────────────────────────────────
@@ -502,6 +538,8 @@ pub fn build_runtime(config: &MatchedPoolsConfig) -> Result<(Vec<PoolConfig>, Ve
     for pair in &config.matched_pairs {
         let quote_token_address = pair.quote_token.address.parse::<Address>()
             .map_err(|e| eyre::eyre!("Geçersiz quote token adresi '{}': {}", pair.quote_token.address, e))?;
+        let base_token_address = pair.base_token.address.parse::<Address>()
+            .map_err(|e| eyre::eyre!("Geçersiz base token adresi '{}': {}", pair.base_token.address, e))?;
 
         let mut pair_indices: Vec<usize> = Vec::new();
 
@@ -525,12 +563,13 @@ pub fn build_runtime(config: &MatchedPoolsConfig) -> Result<(Vec<PoolConfig>, Ve
                     name: format!("{}-{}", pool_entry.dex_id, pair.pair_name),
                     fee_bps: pool_entry.fee_bps,
                     fee_fraction: pool_entry.fee_bps as f64 / 10_000.0,
-                    token0_decimals: if pair.weth_is_token0 { 18 } else { pair.quote_token.decimals },
-                    token1_decimals: if pair.weth_is_token0 { pair.quote_token.decimals } else { 18 },
+                    token0_decimals: if pair.weth_is_token0 { pair.base_token.decimals } else { pair.quote_token.decimals },
+                    token1_decimals: if pair.weth_is_token0 { pair.quote_token.decimals } else { pair.base_token.decimals },
                     dex: dex_type,
                     token0_is_weth: pair.weth_is_token0,
                     tick_spacing: pool_entry.tick_spacing,
                     quote_token_address,
+                    base_token_address,
                 };
 
                 let idx = all_pools.len();

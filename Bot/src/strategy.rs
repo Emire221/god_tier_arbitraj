@@ -138,9 +138,37 @@ pub fn check_arbitrage_opportunity(
     let sell_state = if sell_idx == 0 { &state_a } else { &state_b };
     let avg_price_in_quote = (price_a + price_b) / 2.0;
 
-    // ─── TickBitmap referansları (varsa) ───────────────────────────
-    let sell_bitmap = sell_state.tick_bitmap.as_ref();
-    let buy_bitmap = buy_state.tick_bitmap.as_ref();
+    // ─── TickBitmap referansları (varsa + v28.0: tazelik doğrulaması) ─
+    // v28.0: TickBitmap'in yaşı tick_bitmap_max_age_blocks'u aşıyorsa
+    // eski veri kullanmak yerine None döndür → single-tick fallback.
+    // Eski bitmap ile hesaplama hatalı likidite tahmini ve MEV açığı yaratır.
+    let current_block = sell_state.last_block.max(buy_state.last_block);
+    let bitmap_max_age = config.tick_bitmap_max_age_blocks;
+
+    let sell_bitmap = sell_state.tick_bitmap.as_ref().filter(|bm| {
+        let age = current_block.saturating_sub(bm.snapshot_block);
+        if age > bitmap_max_age {
+            eprintln!(
+                "     \u{26a0}\u{fe0f} [TickBitmap] Sell havuzu bitmap'i eski ({} blok) — tek-tick fallback",
+                age,
+            );
+            false
+        } else {
+            true
+        }
+    });
+    let buy_bitmap = buy_state.tick_bitmap.as_ref().filter(|bm| {
+        let age = current_block.saturating_sub(bm.snapshot_block);
+        if age > bitmap_max_age {
+            eprintln!(
+                "     \u{26a0}\u{fe0f} [TickBitmap] Buy havuzu bitmap'i eski ({} blok) — tek-tick fallback",
+                age,
+            );
+            false
+        } else {
+            true
+        }
+    });
 
     // ─── v11.0: Hard Liquidity Cap — PreFilter + NR Öncesi Havuz Derinlik Kontrolü ─
     // Havuzun gerçek mevcut likiditesini hesapla (TickBitmap'ten).
@@ -164,19 +192,33 @@ pub fn check_arbitrage_opportunity(
     );
     let effective_cap = sell_hard_cap.min(buy_hard_cap);
 
-    if effective_cap < config.max_trade_size_weth * 0.1 {
-        eprintln!(
-            "     \u{26a0}\u{fe0f} [Liquidity] Havuz derinliği çok sığ: sell_cap={:.4} buy_cap={:.4} WETH (MAX_TRADE={:.1})",
-            sell_hard_cap, buy_hard_cap, config.max_trade_size_weth,
-        );
-    }
-
+    // v28.0: Sığ havuz çıkış kapısı — effective_cap ile gas maliyetini karşılaştır.
+    // Havuz derinliği gas maliyetinin 10 katından azsa, kârlı işlem imkânsız.
+    // Bu erken çıkış, NR + PreFilter hesaplamalarını tamamen atlar → CPU tasarrufu.
     if effective_cap <= 0.001 {
         eprintln!(
             "     \u{23ed}\u{fe0f} [Liquidity] Yetersiz likidite — NR atlanıyor (cap={:.6} WETH)",
             effective_cap,
         );
         return None;
+    }
+
+    // v28.0: Dinamik likidite uyarısı + ekonomik uygulanabilirlik kontrolü
+    if effective_cap < config.max_trade_size_weth * 0.1 {
+        eprintln!(
+            "     \u{26a0}\u{fe0f} [Liquidity] Havuz derinliği sığ: sell_cap={:.4} buy_cap={:.4} effective_cap={:.4} WETH (MAX_TRADE={:.1})",
+            sell_hard_cap, buy_hard_cap, effective_cap, config.max_trade_size_weth,
+        );
+        // v28.0: Sığ havuzda gas maliyetini karşılayacak spread var mı?
+        // Kaba tahmin: effective_cap * spread_pct/100 < min_net_profit → kesinlikle kârsız
+        let max_possible_gross = effective_cap * spread_pct / 100.0;
+        if max_possible_gross < config.min_net_profit_weth {
+            eprintln!(
+                "     \u{23ed}\u{fe0f} [EconViability] Sığ havuz + düşük spread → kâr imkânsız: max_gross={:.8} < min_profit={:.8} WETH",
+                max_possible_gross, config.min_net_profit_weth,
+            );
+            return None;
+        }
     }
 
     // ─── v19.0: O(1) PreFilter — NR'ye girmeden hızlı eleme ───
@@ -265,6 +307,12 @@ pub fn check_arbitrage_opportunity(
     // v16.0: Canlı on-chain fee kullanımı (live_fee_bps varsa statik fee yerine)
     let sell_fee = sell_state.live_fee_bps.map(|b| b as f64 / 10_000.0).unwrap_or(pools[sell_idx].fee_fraction);
     let buy_fee = buy_state.live_fee_bps.map(|b| b as f64 / 10_000.0).unwrap_or(pools[buy_idx].fee_fraction);
+    // v28.0: NR'ye max_trade_size_weth yerine effective_cap gönder.
+    // Eski: config.max_trade_size_weth (50.0) → NR içinde tekrar cap hesaplıyor,
+    //        çift hesaplama + sığ havuzlarda gereksiz tarama aralığı.
+    // Yeni: effective_cap zaten min(sell_cap, buy_cap) olarak hesaplandı,
+    //        NR bunu üst sınır olarak alır → tutarlı ve hızlı.
+    let nr_max = effective_cap.min(config.max_trade_size_weth);
     let nr_result = math::find_optimal_amount_with_bitmap(
         sell_state,
         sell_fee,
@@ -273,7 +321,7 @@ pub fn check_arbitrage_opportunity(
         dynamic_gas_cost_quote,
         config.flash_loan_fee_bps,
         avg_price_in_quote, // gerçek fiyat → kâr quote cinsinden döner
-        config.max_trade_size_weth,
+        nr_max,
         pools[sell_idx].token0_is_weth,
         pools[sell_idx].tick_spacing,
         pools[buy_idx].tick_spacing,
@@ -369,6 +417,23 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         return None;
     }
 
+    // ─── v28.0: Veri Tazeliği Kapısı (Freshness Gate) ──────────────
+    // Eski veriyle yapılan simülasyon ve işlem, frontrun/sandwich saldırılarına
+    // karşı savunmasızdır. İşlem gönderilmeden önce havuz verilerinin
+    // max_staleness_ms eşiğini aşmadığı doğrulanır.
+    {
+        let staleness_a = states[0].read().staleness_ms();
+        let staleness_b = states[1].read().staleness_ms();
+        let max_stale = staleness_a.max(staleness_b);
+        if max_stale > config.max_staleness_ms {
+            eprintln!(
+                "     \u{1f6d1} [FreshnessGate] Havuz verileri çok eski: {}ms > eşik {}ms — MEV koruması: işlem atlanıyor",
+                max_stale, config.max_staleness_ms,
+            );
+            return None;
+        }
+    }
+
     // ─── İstatistik Güncelle ─────────────────────────────────────
     // v15.0: total_opportunities ve max_spread_pct artık main.rs'de
     // her blokta güncelleniyor (fırsat koşulundan bağımsız).
@@ -392,7 +457,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
             compute_directions_and_tokens(
                 opportunity.buy_pool_idx,
                 pools[0].token0_is_weth,
-                &config.weth_address,
+                &pools[0].base_token_address,
                 &pools[0].quote_token_address,
             );
 
@@ -521,12 +586,12 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         let trade_weth = opportunity.optimal_amount_weth;
         let _buy_price = opportunity.buy_price_quote;
 
-        // v11.0: Yön ve token hesaplama
+        // v30.0: base_token_address kullanılır — cbETH/WETH gibi non-WETH-base çiftleri için kritik
         let (uni_dir, aero_dir, owed_token, received_token) =
             compute_directions_and_tokens(
                 opportunity.buy_pool_idx,
                 pools[0].token0_is_weth,
-                &config.weth_address,
+                &pools[0].base_token_address,
                 &pools[0].quote_token_address,
             );
 
@@ -843,32 +908,36 @@ async fn execute_on_chain_protected(
 ///
 /// # Dönüş: (uni_direction, aero_direction, owed_token, received_token)
 ///
-/// Mantık (token0=WETH, token1=Quote varsayımıyla):
-/// - buy_pool_idx=0 (UniV3 ucuz → WETH al): uni=1(oneForZero→WETH), aero=0(zeroForOne→WETH sat)
-///   owedToken=Quote, receivedToken=WETH
-/// - buy_pool_idx=1 (Slip ucuz → WETH al): uni=0(zeroForOne→Quote al), aero=1(oneForZero→Quote sat)
-///   owedToken=WETH, receivedToken=Quote
+/// v30.0: base_token_address parametresi — config.weth_address yerine PoolConfig'den gelir.
+/// cbETH/WETH gibi non-WETH-base çiftlerinde base_token=cbETH, quote_token=WETH olur.
+/// Eski: Her zaman config.weth_address kullanılıyordu → cbETH/WETH'te owedToken=receivedToken=WETH. BUG!
+///
+/// Mantık (token0=base, token1=quote varsayımıyla):
+/// - buy_pool_idx=0: uni=1(oneForZero→base al), aero=0(zeroForOne→base sat)
+///   owedToken=Quote, receivedToken=Base
+/// - buy_pool_idx=1: uni=0(zeroForOne→quote al), aero=1(oneForZero→quote sat)
+///   owedToken=Base, receivedToken=Quote
 fn compute_directions_and_tokens(
     buy_pool_idx: usize,
-    token0_is_weth: bool,
-    weth_address: &Address,
+    token0_is_base: bool,
+    base_token_address: &Address,
     quote_token_address: &Address,
 ) -> (u8, u8, Address, Address) {
-    if token0_is_weth {
-        // token0 = WETH, token1 = Quote (Base normal düzen)
+    if token0_is_base {
+        // token0 = base, token1 = quote (Base normal düzen: WETH < USDC)
         if buy_pool_idx == 0 {
-            // UniV3'ten WETH al → oneForZero(1), Slipstream'e WETH sat → zeroForOne(0)
-            (1u8, 0u8, *quote_token_address, *weth_address) // owe Quote, receive WETH
+            // Pool 0'dan base al → oneForZero(1), Pool 1'e base sat → zeroForOne(0)
+            (1u8, 0u8, *quote_token_address, *base_token_address) // owe Quote, receive Base
         } else {
-            // UniV3'ten Quote al → zeroForOne(0), Slipstream'e Quote sat → oneForZero(1)
-            (0u8, 1u8, *weth_address, *quote_token_address) // owe WETH, receive Quote
+            // Pool 0'dan quote al → zeroForOne(0), Pool 1'e quote sat → oneForZero(1)
+            (0u8, 1u8, *base_token_address, *quote_token_address) // owe Base, receive Quote
         }
     } else {
-        // token0 = Quote, token1 = WETH (ters düzen)
+        // token0 = quote, token1 = base (ters düzen: cbETH < WETH)
         if buy_pool_idx == 0 {
-            (0u8, 1u8, *weth_address, *quote_token_address) // owe WETH, receive Quote
+            (0u8, 1u8, *base_token_address, *quote_token_address) // owe Base, receive Quote
         } else {
-            (1u8, 0u8, *quote_token_address, *weth_address) // owe Quote, receive WETH
+            (1u8, 0u8, *quote_token_address, *base_token_address) // owe Quote, receive Base
         }
     }
 }
@@ -1036,6 +1105,151 @@ fn print_opportunity_report(
 // davranışlarını doğrular.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Multi-Hop Arbitraj Fırsat Tespiti (v29.0: Route Engine)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Multi-hop rotalar üzerinde arbitraj fırsatı tara.
+///
+/// Mevcut check_arbitrage_opportunity 2-pool'a odaklanır. Bu fonksiyon
+/// route_engine tarafından üretilen 3+ hop rotaları üzerinde NR optimizasyonu
+/// yaparak multi-hop fırsatları tespit eder.
+///
+/// # Parametreler
+/// - `routes`: route_engine::find_routes() çıktısı
+/// - `pools`: Tüm havuz yapılandırmaları
+/// - `states`: Tüm havuz durumları
+/// - `config`: Bot yapılandırması
+/// - `block_base_fee`: Mevcut blok taban ücreti
+/// - `l1_data_fee_wei`: L1 veri ücreti (OP Stack)
+///
+/// # Dönüş
+/// Kârlı rotalar (MultiHopOpportunity listesi, kâra göre sıralı)
+pub fn check_multi_hop_opportunities(
+    routes: &[crate::route_engine::Route],
+    pools: &[PoolConfig],
+    states: &[SharedPoolState],
+    config: &BotConfig,
+    block_base_fee: u64,
+    l1_data_fee_wei: u128,
+) -> Vec<crate::types::MultiHopOpportunity> {
+    let mut opportunities = Vec::new();
+    let l1_data_fee_weth = l1_data_fee_wei as f64 / 1e18;
+
+    for (route_idx, route) in routes.iter().enumerate() {
+        // Sadece 3+ hop rotalarını işle (2-hop'lar mevcut sistem tarafından kapsanıyor)
+        if route.hop_count() < 3 {
+            continue;
+        }
+
+        // Rotadaki tüm havuzlar aktif mi?
+        let all_active = route.hops.iter().all(|hop| {
+            if hop.pool_idx < states.len() {
+                let state = states[hop.pool_idx].read();
+                state.is_active() && state.staleness_ms() <= config.max_staleness_ms
+            } else {
+                false
+            }
+        });
+        if !all_active {
+            continue;
+        }
+
+        // Havuz durumlarını ve yapılandırmalarını topla
+        let pool_states: Vec<crate::types::PoolState> = route.hops.iter().map(|hop| {
+            states[hop.pool_idx].read().clone()
+        }).collect();
+        let pool_configs: Vec<&PoolConfig> = route.hops.iter().map(|hop| {
+            &pools[hop.pool_idx]
+        }).collect();
+        let directions: Vec<bool> = route.hops.iter().map(|hop| hop.zero_for_one).collect();
+
+        let state_refs: Vec<&crate::types::PoolState> = pool_states.iter().collect();
+
+        // Multi-hop gas tahmini: base 310K + hop başına 130K ek
+        let multi_hop_gas: u64 = 310_000 + (route.hop_count() as u64 - 2) * 130_000;
+        let dynamic_gas_cost_weth = if block_base_fee > 0 {
+            let l2 = (multi_hop_gas as f64 * block_base_fee as f64) / 1e18;
+            ((l2 + l1_data_fee_weth) * 1.20).max(0.00002)
+        } else {
+            ((config.gas_cost_fallback_weth + l1_data_fee_weth) * 1.20).max(0.00002)
+        };
+
+        // Ortalama ETH fiyatı (ilk havuzdan)
+        let avg_price = pool_states[0].eth_price_usd.max(1.0);
+        let gas_cost_usd = dynamic_gas_cost_weth * avg_price;
+
+        // Multi-hop NR optimizasyonu
+        let nr_result = math::find_optimal_amount_multi_hop(
+            &state_refs,
+            &pool_configs,
+            &directions,
+            gas_cost_usd,
+            config.flash_loan_fee_bps,
+            avg_price,
+            config.max_trade_size_weth,
+        );
+
+        // Kârı WETH'e çevir
+        let expected_profit_weth = if avg_price > 0.0 {
+            nr_result.expected_profit / avg_price
+        } else {
+            continue;
+        };
+
+        // Minimum kâr eşiği kontrolü
+        if expected_profit_weth < config.min_net_profit_weth || nr_result.optimal_amount <= 0.0 {
+            continue;
+        }
+
+        let pool_indices: Vec<usize> = route.hops.iter().map(|h| h.pool_idx).collect();
+
+        // Token path doğrulaması: rota WETH ile başlayıp WETH ile bitmeli
+        let token_path_valid = route.tokens.first() == route.tokens.last();
+        if !token_path_valid {
+            continue;
+        }
+
+        // Hop token_in/token_out tutarlılık kontrolü
+        let hops_consistent = route.hops.windows(2).all(|w| {
+            w[0].token_out == w[1].token_in
+        });
+        if !hops_consistent {
+            continue;
+        }
+
+        // Rota tipi logla
+        let _route_type = if route.is_triangular() {
+            "triangular"
+        } else if route.is_two_hop() {
+            "two-hop"
+        } else {
+            "quad"
+        };
+
+        opportunities.push(crate::types::MultiHopOpportunity {
+            route_idx,
+            pool_indices,
+            directions: directions.clone(),
+            optimal_amount_weth: nr_result.optimal_amount,
+            expected_profit_weth,
+            label: route.label.clone(),
+            nr_converged: nr_result.converged,
+            nr_iterations: nr_result.iterations,
+            hop_count: route.hop_count(),
+        });
+    }
+
+    // Kâra göre azalan sıra
+    opportunities.sort_by(|a, b| {
+        b.expected_profit_weth
+            .partial_cmp(&a.expected_profit_weth)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    opportunities
+}
+
 #[cfg(test)]
 mod gas_spike_tests {
     use super::*;
@@ -1097,6 +1311,7 @@ mod gas_spike_tests {
                 token0_is_weth: true,
                 tick_spacing: 10,
                 quote_token_address: address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
+                base_token_address: address!("4200000000000000000000000000000000000006"),
             },
             PoolConfig {
                 address: POOL_B_ADDR,
@@ -1109,6 +1324,7 @@ mod gas_spike_tests {
                 token0_is_weth: true,
                 tick_spacing: 1,
                 quote_token_address: address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
+                base_token_address: address!("4200000000000000000000000000000000000006"),
             },
         ]
     }

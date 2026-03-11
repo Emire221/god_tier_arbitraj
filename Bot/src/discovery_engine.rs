@@ -613,6 +613,7 @@ async fn factory_listener(
             (false, parsed.token0)
         };
 
+        let base_addr_resolved = if token0_is_weth { parsed.token0 } else { parsed.token1 };
         let pool_config = PoolConfig {
             address: parsed.pool_address,
             name: format!("{}-WETH/{}",
@@ -631,6 +632,7 @@ async fn factory_listener(
             token0_is_weth,
             tick_spacing: parsed.tick_spacing,
             quote_token_address: quote_addr,
+            base_token_address: base_addr_resolved,
         };
 
         eprintln!(
@@ -982,6 +984,7 @@ fn parse_dexscreener_pools(json: &serde_json::Value, config: &DiscoveryConfig) -
 
         let tick_spacing = infer_tick_spacing_from_fee(dex_id, fee_bps);
 
+        let btoken = if token0_is_weth { base_addr } else { quote_addr };
         let pool_config = PoolConfig {
             address: pool_addr,
             name: format!("{}-WETH", dex_id),
@@ -993,6 +996,7 @@ fn parse_dexscreener_pools(json: &serde_json::Value, config: &DiscoveryConfig) -
             token0_is_weth,
             tick_spacing,
             quote_token_address: qtoken,
+            base_token_address: btoken,
         };
 
         results.push(PendingPool {
@@ -1131,6 +1135,7 @@ fn parse_gecko_terminal_pools(
             (infer_decimals(&base_addr), 18u8, base_addr)
         };
 
+        let btoken = if token0_is_weth { base_addr } else { quote_addr };
         let pool_config = PoolConfig {
             address: pool_addr,
             name: format!("Gecko-WETH"),
@@ -1142,6 +1147,7 @@ fn parse_gecko_terminal_pools(
             token0_is_weth,
             tick_spacing: 10,
             quote_token_address: qtoken,
+            base_token_address: btoken,
         };
 
         results.push(PendingPool {

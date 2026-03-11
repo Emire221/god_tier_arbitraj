@@ -788,6 +788,300 @@ mod tests {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Multi-Hop Arbitraj Matematiği (v29.0: Route Engine Entegrasyonu)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Multi-hop (N-havuz zinciri) arbitraj kâr hesabı.
+///
+/// Akış: WETH girdi → Pool1 → Pool2 → ... → PoolN → WETH çıktı
+/// Her adımda exact::compute_exact_swap kullanılır.
+/// Kâr = son çıktı (WETH) - girdi (WETH) - flash_loan_fee - gas_cost
+///
+/// # Parametreler
+/// - `amount_in_weth`: Girdi WETH miktarı (f64)
+/// - `pool_states`: Rotadaki her havuzun durumu (sıralı)
+/// - `pool_configs`: Rotadaki her havuzun yapılandırması (sıralı)
+/// - `directions`: Her hop'un swap yönü (zero_for_one)
+/// - `gas_cost_usd`: Tahmini gas maliyeti (USD)
+/// - `flash_loan_fee_bps`: Flash loan ücreti (bps)
+/// - `eth_price_usd`: ETH/USD fiyatı
+///
+/// # Dönüş
+/// USD cinsinden net kâr (negatif olabilir)
+pub fn compute_arbitrage_profit_multi_hop(
+    amount_in_weth: f64,
+    pool_states: &[&PoolState],
+    pool_configs: &[&crate::types::PoolConfig],
+    directions: &[bool],
+    gas_cost_usd: f64,
+    flash_loan_fee_bps: f64,
+    eth_price_usd: f64,
+) -> f64 {
+    if amount_in_weth <= 0.0 || pool_states.is_empty() || pool_states.len() != directions.len() {
+        return f64::NEG_INFINITY;
+    }
+
+    // f64 → U256 wei
+    let initial_amount_wei = alloy::primitives::U256::from(
+        crate::types::safe_f64_to_u128(amount_in_weth * 1e18)
+    );
+    if initial_amount_wei.is_zero() {
+        return f64::NEG_INFINITY;
+    }
+
+    // Zincir boyunca swap et: her hop'un çıktısı bir sonrakinin girdisi
+    let mut current_amount = initial_amount_wei;
+
+    for (i, (state, config)) in pool_states.iter().zip(pool_configs.iter()).enumerate() {
+        let fee_pips = state.live_fee_bps
+            .map(|b| b * 100)
+            .unwrap_or(config.fee_bps * 100);
+
+        let bitmap = state.tick_bitmap.as_ref();
+
+        let result = exact::compute_exact_swap(
+            state.sqrt_price_x96,
+            state.liquidity,
+            state.tick,
+            current_amount,
+            directions[i],
+            fee_pips,
+            bitmap,
+        );
+
+        if result.amount_out.is_zero() {
+            return f64::NEG_INFINITY;
+        }
+
+        current_amount = result.amount_out;
+    }
+
+    // Flash loan geri ödeme
+    let flash_loan_fee_rate = flash_loan_fee_bps / 10_000.0;
+    let flash_loan_fee_wei = alloy::primitives::U256::from(
+        crate::types::safe_f64_to_u128(amount_in_weth * flash_loan_fee_rate * 1e18)
+    );
+    let repay_amount = initial_amount_wei + flash_loan_fee_wei;
+
+    // Net kâr → USD
+    if current_amount > repay_amount {
+        let profit_wei = current_amount - repay_amount;
+        let profit_weth = exact::u256_to_f64(profit_wei) / 1e18;
+        profit_weth * eth_price_usd - gas_cost_usd
+    } else {
+        let loss_wei = repay_amount - current_amount;
+        let loss_weth = exact::u256_to_f64(loss_wei) / 1e18;
+        -(loss_weth * eth_price_usd) - gas_cost_usd
+    }
+}
+
+/// Multi-hop Newton-Raphson optimizer sonucu
+#[derive(Debug, Clone)]
+pub struct MultiHopOptimalResult {
+    pub optimal_amount: f64,
+    pub expected_profit: f64,
+    pub converged: bool,
+    pub iterations: u32,
+}
+
+/// Multi-hop Newton-Raphson ile optimal flash loan miktarını bul.
+///
+/// Mevcut 2-pool NR ile aynı hibrit yaklaşım:
+///   1. Kaba tarama (20 adım, quadratic spacing)
+///   2. Newton-Raphson ince ayar (max 40 iterasyon)
+pub fn find_optimal_amount_multi_hop(
+    pool_states: &[&PoolState],
+    pool_configs: &[&crate::types::PoolConfig],
+    directions: &[bool],
+    gas_cost_usd: f64,
+    flash_loan_fee_bps: f64,
+    eth_price_usd: f64,
+    max_amount_weth: f64,
+) -> MultiHopOptimalResult {
+    let max_iterations: u32 = 40;
+    let tolerance = 1e-8;
+    let min_amount = 0.0001;
+
+    // Multi-hop likidite kapasitesini hesapla (her havuzun minimum cap'i)
+    let mut effective_max = max_amount_weth;
+    for (state, config) in pool_states.iter().zip(pool_configs.iter()) {
+        let cap = exact::hard_liquidity_cap_weth(
+            state.sqrt_price_x96,
+            state.liquidity,
+            state.tick,
+            config.token0_is_weth,
+            state.tick_bitmap.as_ref(),
+            config.tick_spacing,
+        );
+        effective_max = effective_max.min(cap);
+    }
+
+    if effective_max <= min_amount {
+        return MultiHopOptimalResult {
+            optimal_amount: 0.0,
+            expected_profit: 0.0,
+            converged: false,
+            iterations: 0,
+        };
+    }
+
+    // AŞAMA 1: Kaba tarama
+    let mut best_amount = 0.0;
+    let mut best_profit = f64::NEG_INFINITY;
+    let scan_steps = 20;
+
+    for i in 1..=scan_steps {
+        let fraction = i as f64 / scan_steps as f64;
+        let amount = min_amount + (effective_max - min_amount) * fraction * fraction;
+
+        let profit = compute_arbitrage_profit_multi_hop(
+            amount, pool_states, pool_configs, directions,
+            gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+        );
+
+        if profit > best_profit {
+            best_profit = profit;
+            best_amount = amount;
+        }
+    }
+
+    if best_profit <= f64::NEG_INFINITY + 1.0 || best_amount <= 0.0 {
+        return MultiHopOptimalResult {
+            optimal_amount: 0.0,
+            expected_profit: best_profit.max(0.0),
+            converged: false,
+            iterations: 0,
+        };
+    }
+
+    // AŞAMA 2: Newton-Raphson ince ayar
+    let mut x = best_amount;
+    let mut converged = false;
+    let mut final_iterations: u32 = 0;
+
+    for i in 0..max_iterations {
+        final_iterations = i + 1;
+        let h = (x * 1e-7).max(1e-10);
+
+        // Birinci türev (merkezi fark)
+        let f_plus = compute_arbitrage_profit_multi_hop(
+            x + h, pool_states, pool_configs, directions,
+            gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+        );
+        let f_minus = compute_arbitrage_profit_multi_hop(
+            x - h, pool_states, pool_configs, directions,
+            gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+        );
+        let f_prime = (f_plus - f_minus) / (2.0 * h);
+
+        // İkinci türev
+        let h2 = (x * 1e-5).max(1e-8);
+        let fp_plus_h = {
+            let fph = compute_arbitrage_profit_multi_hop(
+                x + h2 + h, pool_states, pool_configs, directions,
+                gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+            );
+            let fmh = compute_arbitrage_profit_multi_hop(
+                x + h2 - h, pool_states, pool_configs, directions,
+                gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+            );
+            (fph - fmh) / (2.0 * h)
+        };
+        let fp_minus_h = {
+            let fph = compute_arbitrage_profit_multi_hop(
+                x - h2 + h, pool_states, pool_configs, directions,
+                gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+            );
+            let fmh = compute_arbitrage_profit_multi_hop(
+                x - h2 - h, pool_states, pool_configs, directions,
+                gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+            );
+            (fph - fmh) / (2.0 * h)
+        };
+        let f_double_prime = (fp_plus_h - fp_minus_h) / (2.0 * h2);
+
+        if f_double_prime.abs() < 1e-20 {
+            break;
+        }
+
+        let step = f_prime / f_double_prime;
+        let mut x_new = x - step;
+
+        if (x_new - x).abs() > effective_max * 0.5 {
+            x_new = x - step * 0.25;
+        }
+
+        x_new = x_new.clamp(min_amount, effective_max);
+
+        if (x_new - x).abs() < tolerance {
+            converged = true;
+            x = x_new;
+            break;
+        }
+
+        x = x_new;
+    }
+
+    x = x.clamp(min_amount, effective_max);
+
+    let final_profit = compute_arbitrage_profit_multi_hop(
+        x, pool_states, pool_configs, directions,
+        gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+    );
+
+    MultiHopOptimalResult {
+        optimal_amount: x,
+        expected_profit: final_profit,
+        converged,
+        iterations: final_iterations,
+    }
+}
+
+/// Multi-hop exact directional kâr hesabı (U256 cinsinden).
+/// minProfit calldata değeri için kullanılır.
+///
+/// Akış: amount_wei → Pool1 → Pool2 → ... → PoolN → çıktı
+/// Kâr = çıktı - amount_wei (WETH wei)
+pub fn compute_exact_profit_multi_hop(
+    pool_states: &[&PoolState],
+    pool_configs: &[&crate::types::PoolConfig],
+    directions: &[bool],
+    amount_wei: alloy::primitives::U256,
+) -> alloy::primitives::U256 {
+    if amount_wei.is_zero() || pool_states.is_empty() {
+        return alloy::primitives::U256::ZERO;
+    }
+
+    let mut current = amount_wei;
+    for (i, (state, config)) in pool_states.iter().zip(pool_configs.iter()).enumerate() {
+        let fee_pips = state.live_fee_bps
+            .map(|b| b * 100)
+            .unwrap_or(config.fee_bps * 100);
+
+        let result = exact::compute_exact_swap(
+            state.sqrt_price_x96,
+            state.liquidity,
+            state.tick,
+            current,
+            directions[i],
+            fee_pips,
+            state.tick_bitmap.as_ref(),
+        );
+
+        if result.amount_out.is_zero() {
+            return alloy::primitives::U256::ZERO;
+        }
+        current = result.amount_out;
+    }
+
+    if current > amount_wei {
+        current - amount_wei
+    } else {
+        alloy::primitives::U256::ZERO
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  BÖLÜM: U256 EXACT-MATH — Wei Seviyesinde Hassas Swap Matematiği
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1407,6 +1701,17 @@ pub mod exact {
             // 0-63 bit aralığında — tam hassasiyet (f64 mantissa 53 bit)
             limbs[0] as f64
         }
+    }
+
+    /// f64 WETH miktarını U256 wei'ye dönüştür (1 WETH = 10^18 wei).
+    /// Multi-hop shadow-mode doğrulamasında kullanılır.
+    #[inline]
+    pub fn f64_to_u256_wei(weth_f64: f64) -> U256 {
+        if weth_f64 <= 0.0 {
+            return U256::ZERO;
+        }
+        let wei = weth_f64 * 1e18;
+        U256::from(wei as u128)
     }
 
     /// Fee fraction (ör: 0.0005) → fee pips (ör: 500, 1e6 bazında).

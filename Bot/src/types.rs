@@ -56,6 +56,10 @@ pub fn token_whitelist() -> HashSet<Address> {
         address!("2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22"),
         // cbBTC — Coinbase Wrapped BTC (8 decimals)
         address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
+        // AERO — Aerodrome Finance token
+        address!("940181a94A35A4569E4529A3CDfB74e38FD98631"),
+        // DEGEN — Degen token (18 decimals)
+        address!("4ed4E862860beD51a9570b96d89aF5E1B0Efefed"),
     ])
 }
 
@@ -254,12 +258,14 @@ pub struct PoolConfig {
     pub token0_decimals: u8,
     pub token1_decimals: u8,
     pub dex: DexType,
-    /// token0 WETH mi? (Base: WETH < USDC adres sırasında → token0=WETH)
+    /// token0 WETH (veya base_token) mi? (Base: WETH < USDC adres sırasında → token0=WETH)
     pub token0_is_weth: bool,
     /// Tick aralığı (Uniswap V3 %0.05 = 10, Aerodrome değişken)
     pub tick_spacing: i32,
     /// Quote token adresi (çift bazlı — matched_pools.json'dan)
     pub quote_token_address: Address,
+    /// Base (sol taraf) token adresi — WETH pair'lerinde WETH, non-WETH pair'lerinde ilgili token
+    pub base_token_address: Address,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -412,6 +418,33 @@ pub struct ArbitrageOpportunity {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Multi-Hop Arbitraj Fırsatı (v29.0: Route Engine)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Multi-hop arbitraj fırsatı (3+ havuzlu triangular/quad arbitraj)
+#[derive(Debug, Clone)]
+pub struct MultiHopOpportunity {
+    /// Rota indeksi (route_engine tarafından üretilen rota listesinde)
+    pub route_idx: usize,
+    /// Rotadaki havuz indeksleri (sıralı)
+    pub pool_indices: Vec<usize>,
+    /// Her hop'un swap yönü
+    pub directions: Vec<bool>,
+    /// Newton-Raphson ile hesaplanan optimal WETH miktarı
+    pub optimal_amount_weth: f64,
+    /// Beklenen net kâr (WETH cinsinden)
+    pub expected_profit_weth: f64,
+    /// Rota açıklaması (log/debug)
+    pub label: String,
+    /// Newton-Raphson yakınsadı mı?
+    pub nr_converged: bool,
+    /// Newton-Raphson iterasyon sayısı
+    pub nr_iterations: u32,
+    /// Hop sayısı
+    pub hop_count: usize,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // REVM Simülasyon Sonucu
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -555,7 +588,10 @@ impl BotConfig {
         let flash_loan_fee_bps = Self::parse_env_f64("FLASH_LOAN_FEE_BPS", 5.0);
         // v22.0: Default 0.0001 → 0.001 WETH (gas maliyetini karşılayacak eşik)
         let min_net_profit_weth = Self::parse_env_f64("MIN_NET_PROFIT_WETH", 0.001);
-        let max_trade_size_weth = Self::parse_env_f64("MAX_TRADE_SIZE_WETH", 50.0);
+        // v28.0: Default 50.0 → 5.0 WETH. Base L2 havuz derinlikleri genelde
+        // 0.05-2 WETH aralığındadır. Bot effective_cap ile sınırlar ama yüksek
+        // default NR tarama aralığını şişirir ve hesaplama süresi harcar.
+        let max_trade_size_weth = Self::parse_env_f64("MAX_TRADE_SIZE_WETH", 5.0);
 
         let stats_interval = std::env::var("STATS_INTERVAL")
             .unwrap_or_else(|_| "10".into())
@@ -567,10 +603,11 @@ impl BotConfig {
             .parse::<u32>()
             .unwrap_or(0);
 
+        // v28.0: Default 2000 → 3000ms (SYNC_TIMEOUT_MS ile uyumlu)
         let max_staleness_ms = std::env::var("MAX_STALENESS_MS")
-            .unwrap_or_else(|_| "2000".into())
+            .unwrap_or_else(|_| "3000".into())
             .parse::<u128>()
-            .unwrap_or(2000);
+            .unwrap_or(3000);
 
         let chain_id = std::env::var("CHAIN_ID")
             .unwrap_or_else(|_| "8453".into())

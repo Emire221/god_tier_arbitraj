@@ -1,13 +1,13 @@
 # God-Tier Arbitraj — Base Network Flash Swap Arbitrage System
 
-> **Kuantum Beyin III** — Sub-millisecond cross-DEX arbitrage engine for Base L2, combining a Rust off-chain bot with an ultra-optimized Solidity smart contract.
+> **Kuantum Beyin IV** — Sub-millisecond cross-DEX arbitrage engine for Base L2, combining a Rust off-chain bot with an ultra-optimized Solidity smart contract.
 
 ```
  ╔══════════════════════════════════════════════════════════════╗
- ║       ARBITRAJ BOTU v9.0 — Kuantum Beyin III                ║
+ ║       ARBITRAJ BOTU v25.0 — Kuantum Beyin IV                ║
  ║       Base Network Çapraz-DEX Arbitraj Sistemi              ║
  ╠══════════════════════════════════════════════════════════════╣
- ║  54 Rust Tests ✓  58 Solidity Tests ✓  Chaos Injector ✓    ║
+ ║  40 Rust Tests ✓  69 Solidity Tests ✓  Chaos Injector ✓    ║
  ╚══════════════════════════════════════════════════════════════╝
 ```
 
@@ -20,9 +20,9 @@
 - [How the Contract Works (Solidity)](#how-the-contract-works-solidity)
 - [134-Byte Compact Calldata Format](#134-byte-compact-calldata-format)
 - [Security Model](#security-model)
-- [Test Suite — 112 Tests](#test-suite--112-tests)
-  - [Rust Tests (54)](#rust-tests-54)
-  - [Solidity Tests (58)](#solidity-tests-58)
+- [Test Suite — 109 Tests](#test-suite--109-tests)
+  - [Rust Tests (40)](#rust-tests-40)
+  - [Solidity Tests (69)](#solidity-tests-69)
 - [Chaos Injector — End-to-End Hell Simulation](#chaos-injector--end-to-end-hell-simulation)
 - [Project Structure](#project-structure)
 - [Quick Start](#quick-start)
@@ -43,7 +43,7 @@
 │          │                         │                                │
 │          │    ┌─────────────────┐   │                                │
 │          └────┤  ArbitrajBotu   ├───┘                                │
-│               │  Contract v9.0 │                                    │
+│               │  Contract v25.0│                                    │
 │               │  (134B Calldata│                                    │
 │               │   Flash Swap)  │                                    │
 │               └────────┬───────┘                                    │
@@ -59,6 +59,13 @@
 │  │  Sync    │──│  Engine    │──│  Simulator │  │  (AES-256)    │   │
 │  │(Multicall│  │(Newton-    │  │(Local EVM) │  │               │   │
 │  │ + Bitmap)│  │ Raphson)   │  │            │  │               │   │
+│  └──────────┘  └────────────┘  └────────────┘  └───────────────┘   │
+│                                                                     │
+│  ┌──────────┐  ┌────────────┐  ┌────────────┐  ┌───────────────┐   │
+│  │ Discovery│  │  Executor  │  │  Transport │  │ Pool Discovery│   │
+│  │  Engine  │  │ (Private   │  │  Pool      │  │ (DexScreener) │   │
+│  │(Factory  │  │  RPC/MEV)  │  │(IPC>WSS>   │  │               │   │
+│  │ Events)  │  │            │  │ HTTP)      │  │               │   │
 │  └──────────┘  └────────────┘  └────────────┘  └───────────────┘   │
 │                                                                     │
 │  Transport Priority: IPC > WSS > HTTP (Sub-1ms target)             │
@@ -79,30 +86,38 @@
 
 ## How the Bot Works (Rust)
 
-**Crate:** `arbitraj_botu v9.0` — 6 modules, ~5000 lines of Rust
+**Crate:** `arbitraj_botu v25.0` — 11 modules, ~10,000 lines of Rust
 
 ### Modules
 
 | Module | Lines | Purpose |
 |--------|-------|---------|
-| `main.rs` | 910 | Entry point, block loop, reconnect logic, transport selection |
-| `types.rs` | 959 | All data structures: `BotConfig`, `PoolState`, `SharedPoolState`, `SimulationResult` |
-| `math.rs` | 2547 | AMM math engine: multi-tick swaps, Newton-Raphson optimizer, dampening |
-| `state_sync.rs` | 1080+ | RPC pool state synchronization via Multicall3, TickBitmap management |
-| `simulator.rs` | 1050+ | REVM-based local EVM simulation, calldata encoding/decoding |
-| `strategy.rs` | 1226 | Opportunity detection, dynamic gas cost, TX building & submission |
-| `key_manager.rs` | — | AES-256-GCM encrypted private key management with PBKDF2 |
+| `main.rs` | 1367 | Entry point, block loop, reconnect logic, transport selection |
+| `types.rs` | 732 | All data structures: `BotConfig`, `PoolState`, `SharedPoolState`, `SimulationResult` |
+| `math.rs` | 1536 | AMM math engine: multi-tick swaps, Newton-Raphson optimizer, dampening |
+| `state_sync.rs` | 1197 | RPC pool state synchronization via Multicall3, TickBitmap management |
+| `simulator.rs` | 1031 | REVM-based local EVM simulation, calldata encoding/decoding |
+| `strategy.rs` | 1162 | Opportunity detection, dynamic gas cost, TX building & submission |
+| `key_manager.rs` | 418 | AES-256-GCM encrypted private key management with PBKDF2 |
+| `discovery_engine.rs` | 1235 | Multi-source pool discovery: Factory events, API aggregation |
+| `pool_discovery.rs` | 490 | DexScreener API integration, pair matching, JSON export |
+| `transport.rs` | 338 | HFT-grade RPC connection pool (IPC > WSS > HTTP), health monitoring |
+| `executor.rs` | 503 | Private RPC MEV protection, `eth_sendBundle`, dynamic bribe tiers |
 
 ### Key Features
 
-- **Multi-Transport:** Auto-selects IPC → WSS → HTTP for lowest latency
+- **Multi-Transport:** Auto-selects IPC → WSS → HTTP for lowest latency (HFT-grade connection pool)
 - **REVM Simulation:** Zero-latency local EVM execution replaces `eth_call` RPC
 - **Dynamic Gas:** Previous REVM simulation's gas → next block's gas cost estimate (no hardcoded values)
 - **TickBitmap Depth:** Real multi-tick swap simulation using on-chain bitmap snapshots
 - **Newton-Raphson:** Optimal trade size maximizing profit minus gas minus flash loan fee
 - **Circuit Breaker:** Consecutive failure threshold stops execution to prevent capital loss
-- **Shadow Mode:** Log-only mode for dry-run testing against live data
+- **Shadow Mode:** Log-only mode for dry-run testing against live data with full statistics
 - **Encrypted Keys:** AES-256-GCM + PBKDF2 key storage (never plaintext on disk)
+- **Auto Pool Discovery:** Factory event scanning + DexScreener API for real-time pair detection
+- **MEV Executor:** Private RPC only (`eth_sendBundle`) with dynamic bribe tiers — no public mempool
+- **L1 Data Fee Awareness:** Accounts for Base OP Stack L1 data posting costs in profit calculations
+- **Hot Reload:** Runtime configuration updates without bot restart
 
 ### Block Processing Pipeline
 
@@ -146,7 +161,7 @@ Exponential backoff: Immediate → 100ms × 3 → 200ms → 400ms → 800ms → 
 
 ## How the Contract Works (Solidity)
 
-**Contract:** `ArbitrajBotu v9.0` — 508 lines, Solidity `^0.8.27`, Cancun EVM
+**Contract:** `ArbitrajBotu v25.0` — 599 lines, Solidity `^0.8.27`, Cancun EVM
 
 ### Design Philosophy
 
@@ -258,15 +273,15 @@ Standard ABI encoding for the same data: **292+ bytes**. Savings: **54%**.
 
 ---
 
-## Test Suite — 112 Tests
+## Test Suite — 109 Tests
 
-**54 Rust unit tests + 58 Solidity tests = 112 total tests**
+**40 Rust unit tests + 69 Solidity tests = 109 total tests**
 
 All tests pass: `cargo test` ✓ | `forge test` ✓
 
-### Rust Tests (54)
+### Rust Tests (40)
 
-#### Math Engine (22 tests)
+#### Math Engine (13 tests)
 
 Core AMM math: swap simulations, price calculations, optimizer convergence.
 
@@ -274,35 +289,21 @@ Core AMM math: swap simulations, price calculations, optimizer convergence.
 |------|--------|---------|
 | `test_compute_eth_price_token0_weth` | math | sqrtPriceX96 → ETH price (token0=WETH) |
 | `test_compute_eth_price_various` | math | Price accuracy across 1500-5000 range |
-| `test_swap_weth_to_usdc_token0_weth` | math | 1 WETH → ~2000 USDC dampened swap |
-| `test_swap_usdc_to_weth_token0_weth` | math | 2000 USDC → ~1 WETH reverse swap |
-| `test_large_swap_dampening` | math | Price impact: large > small swap |
-| `test_max_safe_swap_amount` | math | Liquidity-capped max trade size |
-| `test_tick_price_roundtrip` | math | tick → price → tick lossless conversion |
-| `test_newton_raphson_tick_aware` | math | NR optimizer convergence with tick awareness |
 | `test_newton_raphson_with_bitmap` | math | NR optimizer with real TickBitmap data |
-| `test_multitick_swap_with_bitmap` | math | Multi-tick swap using TickBitmap engine |
-| `test_multitick_swap_tick_crossings_detail` | math | Tick crossing path verification |
 | `stres_compute_eth_price` | math | Stress: ETH price across extreme ranges |
-| `stres_dampening_sifir_likidite` | math | Stress: Zero liquidity edge case |
-| `stres_max_safe_swap_amount` | math | Stress: Max swap with extreme inputs |
-| `stres_multitick_with_bitmap` | math | Stress: Multi-tick with large amounts |
-| `stres_sqrt_price_x96_to_tick` | math | Stress: Price-to-tick edge cases |
-| `stres_swap_usdc_to_weth` | math | Stress: USDC→WETH with extreme values |
-| `stres_swap_weth_to_usdc` | math | Stress: WETH→USDC with extreme values |
 | `stres_tick_to_price_ratio` | math | Stress: Tick-to-price ratio boundaries |
+| `test_get_sqrt_ratio_at_tick_zero` | math::exact | tick=0 → sqrtRatio correctness |
+| `test_get_sqrt_ratio_at_tick_boundaries` | math::exact | MIN/MAX tick boundaries |
+| `test_get_sqrt_ratio_negative_tick` | math::exact | Negative tick handling |
+| `test_mul_div_basic` | math::exact | MulDiv basic arithmetic |
+| `test_mul_div_large_numbers` | math::exact | MulDiv with U256 large numbers |
 | `test_compute_swap_step_basic` | math::exact | Exact integer swap step (U256) |
 | `test_exact_swap_no_bitmap` | math::exact | Exact swap without bitmap |
 | `test_exact_swap_with_bitmap` | math::exact | Exact swap with bitmap data |
-| `test_get_sqrt_ratio_at_tick_zero` | math::exact | tick=0 → sqrtRatio correctness |
-| `test_get_sqrt_ratio_negative_tick` | math::exact | Negative tick handling |
-| `test_get_sqrt_ratio_at_tick_boundaries` | math::exact | MIN/MAX tick boundaries |
-| `test_mul_div_basic` | math::exact | MulDiv basic arithmetic |
-| `test_mul_div_large_numbers` | math::exact | MulDiv with U256 large numbers |
 
-#### Calldata Encoding (8 tests)
+#### Calldata & Sequencer (13 tests)
 
-134-byte compact calldata construction and validation.
+134-byte compact calldata construction, validation, and L2 sequencer reorg protection.
 
 | Test | Module | Purpose |
 |------|--------|---------|
@@ -314,13 +315,6 @@ Core AMM math: swap simulations, price calculations, optimizer convergence.
 | `test_format_compact_calldata_hex` | simulator | Hex string formatting |
 | `test_min_profit_max_u128` | simulator | uint128 max value encoding |
 | `test_real_base_scenario` | simulator | Real Base mainnet addresses |
-
-#### L2 Sequencer Reorg Protection (5 tests)
-
-Validates bot behavior during Base sequencer instability.
-
-| Test | Module | Purpose |
-|------|--------|---------|
 | `test_sequencer_reorg_handling` | simulator | Stale state (>5s) → opportunity rejected |
 | `test_sequencer_reorg_phantom_opportunity` | simulator | Zero sqrt_price (uninitialized) → rejected |
 | `test_sequencer_full_outage_both_pools_stale` | simulator | Both pools stale → no false positive |
@@ -364,7 +358,7 @@ AES-256-GCM encrypted private key storage.
 
 ---
 
-### Solidity Tests (58)
+### Solidity Tests (69)
 
 #### Compact Calldata (4 tests)
 
@@ -542,8 +536,8 @@ The Chaos Injector creates a **hostile market environment** to verify the bot su
 
 ### Success Criteria
 
-- **Stage 1:** All 58 Solidity tests pass with 10K fuzz runs
-- **Stage 2:** All 54 Rust tests pass
+- **Stage 1:** All 69 Solidity tests pass with 10K fuzz runs
+- **Stage 2:** All 40 Rust tests pass
 - **Stage 3:** Bot WETH balance never decreases (ZARAR = immediate abort)
 
 ---
@@ -565,14 +559,18 @@ god_tier_arbitraj/
 │       ├── state_sync.rs        ← RPC sync: Multicall3, TickBitmap management
 │       ├── simulator.rs         ← REVM simulation engine, calldata encoding
 │       ├── strategy.rs          ← Opportunity detection, TX building, submission
-│       └── key_manager.rs       ← AES-256-GCM encrypted key management
+│       ├── key_manager.rs       ← AES-256-GCM encrypted key management
+│       ├── discovery_engine.rs  ← Multi-source pool discovery (Factory events, API)
+│       ├── pool_discovery.rs    ← DexScreener API integration, pair matching
+│       ├── transport.rs         ← HFT-grade RPC connection pool, health monitoring
+│       └── executor.rs          ← Private RPC MEV protection, eth_sendBundle
 │
 ├── Contract/                    ← Solidity smart contract (Foundry)
 │   ├── foundry.toml             ← Foundry config (Cancun EVM, optimizer 1M runs)
 │   ├── src/
-│   │   └── Arbitraj.sol         ← ArbitrajBotu v9.0 (508 lines, 134B calldata)
+│   │   └── Arbitraj.sol         ← ArbitrajBotu v25.0 (599 lines, 134B calldata)
 │   ├── test/
-│   │   └── Arbitraj.t.sol       ← 58 tests (unit + fuzz + adversarial)
+│   │   └── Arbitraj.t.sol       ← 69 tests (unit + fuzz + adversarial)
 │   └── lib/
 │       ├── forge-std/           ← Foundry test framework
 │       └── aave-v3-core/        ← AAVE V3 (flash loan reference)
@@ -593,11 +591,11 @@ god_tier_arbitraj/
 ```bash
 # 1. Compile and test the Rust bot
 cd Bot
-cargo test          # 54 tests
+cargo test          # 40 tests
 
 # 2. Compile and test the Solidity contract
 cd Contract
-forge test          # 58 tests
+forge test          # 69 tests
 
 # 3. Run the full pipeline (fuzz + unit + chaos)
 ./run_all_tests.sh
@@ -613,18 +611,19 @@ RPC_WSS_URL=wss://base-mainnet.your-rpc.io
 RPC_HTTP_URL=https://base-mainnet.your-rpc.io
 
 # Contract
-CONTRACT_ADDRESS=0x...
-POOL_A_ADDRESS=0x...    # Uniswap V3 WETH/USDC
-POOL_B_ADDRESS=0x...    # Aerodrome Slipstream WETH/USDC
+ARBITRAGE_CONTRACT_ADDRESS=0x...
+
+# MEV Protection (Base L2 — Flashbots Protect)
+PRIVATE_RPC_URL=https://rpc.flashbots.net?chainId=8453
 
 # Keys (use key_manager for encrypted storage)
-PRIVATE_KEY=0x...       # Executor hot wallet
+KEYSTORE_PATH=./keystore.json
 
 # Strategy
-MIN_NET_PROFIT_USD=0.50
-GAS_COST_USD=0.10
+MIN_NET_PROFIT_WETH=0.001
+GAS_COST_FALLBACK_WETH=0.00005
 MAX_TRADE_SIZE_WETH=50.0
-SHADOW_MODE=true        # Set false for live execution
+EXECUTION_ENABLED=false  # Set true for live execution
 ```
 
 ---
@@ -635,10 +634,12 @@ SHADOW_MODE=true        # Set false for live execution
 |-------|------------|---------|
 | Smart Contract | Solidity 0.8.27, Cancun EVM | On-chain arbitrage execution |
 | Bot Runtime | Rust, Tokio | Async block processing |
-| EVM Interface | Alloy | RPC calls, TX signing, types |
-| Local Simulation | REVM | Zero-latency EVM execution |
+| EVM Interface | Alloy 0.1 | RPC calls, TX signing, types |
+| Local Simulation | REVM 9 | Zero-latency EVM execution |
 | State Locking | parking_lot RwLock | Lock-free concurrent reads |
 | Cryptography | AES-256-GCM, PBKDF2 | Key encryption |
+| MEV Protection | Flashbots Protect (Base) | Private TX submission |
+| Pool Discovery | DexScreener API + Factory Events | Auto pair detection |
 | Testing | Foundry (Forge), cargo test | Fuzz + unit + integration |
 | Chaos Testing | Anvil + Bash + Cast | Live-fork stress testing |
 

@@ -1,12 +1,12 @@
-﻿// ============================================================================
-//  DISCOVERY ENGINE v1.0 â€” On-Chain & Real-Time Otonom KeÅŸif Motoru
+// ============================================================================
+//  DISCOVERY ENGINE v1.0 — On-Chain & Real-Time Otonom Keşif Motoru
 //
-//  5 Ana BileÅŸen:
-//  âœ“ [AdÄ±m 1] Factory Listener â€” WSS log dinleyici (PoolCreated event)
-//  âœ“ [AdÄ±m 2] Multi-API Aggregator â€” DexScreener + GeckoTerminal fallback
-//  âœ“ [AdÄ±m 3] Hot-Reload â€” Ã‡alÄ±ÅŸma zamanÄ± sÄ±cak gÃ¼ncelleme (RwLock)
-//  âœ“ [AdÄ±m 4] Garbage Collector â€” SoÄŸuk havuz temizleme + dinamik odak
-//  âœ“ [AdÄ±m 5] Opportunity Scorer â€” AkÄ±llÄ± kÃ¢r potansiyeli puanlamasÄ±
+//  5 Ana Bileşen:
+//  ✓ [Adım 1] Factory Listener — WSS log dinleyici (PoolCreated event)
+//  ✓ [Adım 2] Multi-API Aggregator — DexScreener + GeckoTerminal fallback
+//  ✓ [Adım 3] Hot-Reload — Çalışma zamanı sıcak güncelleme (RwLock)
+//  ✓ [Adım 4] Garbage Collector — Soğuk havuz temizleme + dinamik odak
+//  ✓ [Adım 5] Opportunity Scorer — Akıllı kâr potansiyeli puanlaması
 // ============================================================================
 
 use alloy::primitives::{address, Address, B256, U256};
@@ -26,9 +26,9 @@ use crate::types::{
     token_whitelist, DexType, PoolConfig, PoolState, SharedPoolState,
 };
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
 // Sabitler
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// Uniswap V3 PoolCreated event topic0
 /// keccak256("PoolCreated(address,address,uint24,int24,address)")
@@ -55,16 +55,16 @@ const GECKO_TERMINAL_API: &str = "https://api.geckoterminal.com/api/v2";
 #[allow(dead_code)]
 const BASE_WETH: Address = address!("4200000000000000000000000000000000000006");
 
-/// VarsayÄ±lan yapÄ±landÄ±rma deÄŸerleri
+/// Varsayılan yapılandırma değerleri
 const DEFAULT_MAX_ACTIVE_POOLS: usize = 50;
 const DEFAULT_COOLDOWN_BLOCKS: u64 = 500;
 const DEFAULT_SCORE_INTERVAL_BLOCKS: u64 = 300; // ~10 dakika (Base ~2s blok)
 const DEFAULT_API_POLL_INTERVAL_SECS: u64 = 300; // 5 dakika
 const DEFAULT_GC_INTERVAL_BLOCKS: u64 = 150;     // ~5 dakika
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// KeÅŸif KaynaÄŸÄ±
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
+// Keşif Kaynağı
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -86,36 +86,36 @@ impl std::fmt::Display for DiscoverySource {
     }
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// KeÅŸif YapÄ±landÄ±rmasÄ±
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
+// Keşif Yapılandırması
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct DiscoveryConfig {
-    /// Maksimum aktif izleme havuzu sayÄ±sÄ±
+    /// Maksimum aktif izleme havuzu sayısı
     pub max_active_pools: usize,
-    /// Hareketsiz havuz cool-down eÅŸiÄŸi (blok sayÄ±sÄ±)
+    /// Hareketsiz havuz cool-down eşiği (blok sayısı)
     pub cooldown_blocks: u64,
-    /// Skor gÃ¼ncelleme aralÄ±ÄŸÄ± (blok sayÄ±sÄ±)
+    /// Skor güncelleme aralığı (blok sayısı)
     pub score_interval_blocks: u64,
-    /// API yoklama aralÄ±ÄŸÄ± (saniye)
+    /// API yoklama aralığı (saniye)
     pub api_poll_interval_secs: u64,
-    /// Ã‡Ã¶p toplayÄ±cÄ± aralÄ±ÄŸÄ± (blok sayÄ±sÄ±)
+    /// Çöp toplayıcı aralığı (blok sayısı)
     pub gc_interval_blocks: u64,
-    /// Minimum likidite eÅŸiÄŸi (USD)
+    /// Minimum likidite eşiği (USD)
     pub min_liquidity_usd: f64,
-    /// Minimum 24s hacim eÅŸiÄŸi (USD)
+    /// Minimum 24s hacim eşiği (USD)
     pub min_volume_24h_usd: f64,
     /// Maksimum havuz komisyonu (basis points)
     pub max_fee_bps: u32,
-    /// WSS RPC URL (factory listener iÃ§in)
+    /// WSS RPC URL (factory listener için)
     pub wss_url: String,
     /// WETH adresi
     pub weth_address: Address,
 }
 
 impl DiscoveryConfig {
-    /// BotConfig'ten discovery yapÄ±landÄ±rmasÄ± oluÅŸtur
+    /// BotConfig'ten discovery yapılandırması oluştur
     pub fn from_bot_config(
         wss_url: &str,
         max_fee_bps: u32,
@@ -136,9 +136,9 @@ impl DiscoveryConfig {
     }
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Bekleyen Havuz (Pending Pool) â€” KeÅŸfedilmiÅŸ ama henÃ¼z aktif deÄŸil
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
+// Bekleyen Havuz (Pending Pool) — Keşfedilmiş ama henüz aktif değil
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -149,24 +149,24 @@ pub struct PendingPool {
     pub score: f64,
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Havuz Aktivite Ä°zleme (Garbage Collector iÃ§in)
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
+// Havuz Aktivite İzleme (Garbage Collector için)
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct PoolActivity {
-    /// Son swap gÃ¶zlemlenen blok
+    /// Son swap gözlemlenen blok
     pub last_swap_block: u64,
-    /// Son N blok iÃ§indeki swap sayÄ±sÄ±
+    /// Son N blok içindeki swap sayısı
     pub swap_count: u32,
-    /// KÃ¼mÃ¼latif spread (ortalama hesabÄ± iÃ§in)
+    /// Kümülatif spread (ortalama hesabı için)
     pub cumulative_spread: f64,
-    /// Spread Ã¶lÃ§Ã¼m sayÄ±sÄ±
+    /// Spread ölçüm sayısı
     pub spread_samples: u32,
     /// Son 1 saatlik tahmini hacim (USD)
     pub estimated_volume_1h: f64,
-    /// Skora dahil edilme zamanÄ±
+    /// Skora dahil edilme zamanı
     pub last_score_update: Instant,
 }
 
@@ -183,27 +183,27 @@ impl Default for PoolActivity {
     }
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
 // Havuz Skoru (Opportunity Score)
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct PoolScore {
-    /// Genel fÄ±rsat skoru (yÃ¼ksek = daha iyi)
+    /// Genel fırsat skoru (yüksek = daha iyi)
     pub score: f64,
     /// Son 1 saatlik hacim (USD)
     pub volume_1h: f64,
-    /// Tahmini spread dalgalanmasÄ±
+    /// Tahmini spread dalgalanması
     pub spread_volatility: f64,
-    /// Havuz komisyonu (fraction, Ã¶r: 0.0005)
+    /// Havuz komisyonu (fraction, ör: 0.0005)
     pub fee_fraction: f64,
-    /// Son gÃ¼ncelleme anÄ±
+    /// Son güncelleme anı
     pub updated_at: Instant,
 }
 
 impl PoolScore {
-    /// FÄ±rsat Skoru = (Hacim Ã— Spread DalgalanmasÄ±) / Komisyon
+    /// Fırsat Skoru = (Hacim × Spread Dalgalanması) / Komisyon
     pub fn calculate(volume_1h: f64, spread_volatility: f64, fee_fraction: f64) -> f64 {
         if fee_fraction <= 0.0 {
             return 0.0;
@@ -212,28 +212,28 @@ impl PoolScore {
     }
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// LIVE POOL REGISTRY â€” PaylaÅŸÄ±mlÄ± CanlÄ± Havuz KayÄ±t Defteri
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
+// LIVE POOL REGISTRY — Paylaşımlı Canlı Havuz Kayıt Defteri
+// ─────────────────────────────────────────────────────────────────────────────
 
 pub struct LivePoolRegistry {
-    /// Bekleyen ekleme kuyruÄŸu (keÅŸif motoru tarafÄ±ndan doldurulur)
+    /// Bekleyen ekleme kuyruğu (keşif motoru tarafından doldurulur)
     pending_additions: Vec<PendingPool>,
-    /// Havuz aktivite izleme (indeks bazlÄ±)
+    /// Havuz aktivite izleme (indeks bazlı)
     activity: HashMap<usize, PoolActivity>,
-    /// Havuz skorlarÄ± (indeks bazlÄ±)
+    /// Havuz skorları (indeks bazlı)
     scores: HashMap<usize, PoolScore>,
-    /// Uykudaki havuzlar (aktif izlemeden Ã§Ä±karÄ±lmÄ±ÅŸ)
+    /// Uykudaki havuzlar (aktif izlemeden çıkarılmış)
     sleeping_pools: Vec<PoolConfig>,
     /// Aktif havuz indeksleri (false = uyuyor/atla)
     active_flags: Vec<bool>,
-    /// Bilinen havuz adresleri (tekrar eklemeyi Ã¶nle)
+    /// Bilinen havuz adresleri (tekrar eklemeyi önle)
     known_addresses: std::collections::HashSet<Address>,
-    /// Son Ã§Ã¶p toplama bloÄŸu
+    /// Son çöp toplama bloğu
     last_gc_block: u64,
-    /// Son skor gÃ¼ncelleme bloÄŸu
+    /// Son skor güncelleme bloğu
     last_score_block: u64,
-    /// Ä°statistikler
+    /// İstatistikler
     pub stats: RegistryStats,
 }
 
@@ -248,7 +248,7 @@ pub struct RegistryStats {
 }
 
 impl LivePoolRegistry {
-    /// Mevcut havuz listesinden registry oluÅŸtur
+    /// Mevcut havuz listesinden registry oluştur
     pub fn new(pools: &[PoolConfig]) -> Self {
         let mut known = std::collections::HashSet::new();
         for pool in pools {
@@ -267,9 +267,9 @@ impl LivePoolRegistry {
         }
     }
 
-    /// KeÅŸif motorundan gelen yeni havuzu bekleyen kuyruÄŸa ekle
+    /// Keşif motorundan gelen yeni havuzu bekleyen kuyruğa ekle
     pub fn enqueue_pending(&mut self, pool: PendingPool) {
-        // Tekrar eklemeyi Ã¶nle
+        // Tekrar eklemeyi önle
         if self.known_addresses.contains(&pool.config.address) {
             return;
         }
@@ -278,12 +278,12 @@ impl LivePoolRegistry {
         self.pending_additions.push(pool);
     }
 
-    /// Bekleyen havuzlarÄ± Ã§ek (ana dÃ¶ngÃ¼ tarafÄ±ndan Ã§aÄŸrÄ±lÄ±r)
+    /// Bekleyen havuzları çek (ana döngü tarafından çağrılır)
     pub fn take_pending(&mut self) -> Vec<PendingPool> {
         std::mem::take(&mut self.pending_additions)
     }
 
-    /// Havuz aktivitesini gÃ¼ncelle (swap gÃ¶zlemlendiÄŸinde)
+    /// Havuz aktivitesini güncelle (swap gözlemlendiğinde)
     #[allow(dead_code)]
     pub fn record_swap(&mut self, pool_idx: usize, block_number: u64) {
         let activity = self.activity.entry(pool_idx).or_default();
@@ -291,26 +291,26 @@ impl LivePoolRegistry {
         activity.swap_count += 1;
     }
 
-    /// Spread gÃ¶zlemini kaydet (skor hesabÄ± iÃ§in)
+    /// Spread gözlemini kaydet (skor hesabı için)
     pub fn record_spread(&mut self, pool_idx: usize, spread_pct: f64) {
         let activity = self.activity.entry(pool_idx).or_default();
         activity.cumulative_spread += spread_pct;
         activity.spread_samples += 1;
     }
 
-    /// Hacim bilgisini gÃ¼ncelle (API'den)
+    /// Hacim bilgisini güncelle (API'den)
     #[allow(dead_code)]
     pub fn update_volume(&mut self, pool_idx: usize, volume_1h: f64) {
         let activity = self.activity.entry(pool_idx).or_default();
         activity.estimated_volume_1h = volume_1h;
     }
 
-    /// Havuzun aktif olup olmadÄ±ÄŸÄ±nÄ± kontrol et
+    /// Havuzun aktif olup olmadığını kontrol et
     pub fn is_active(&self, pool_idx: usize) -> bool {
         self.active_flags.get(pool_idx).copied().unwrap_or(false)
     }
 
-    /// SoÄŸuk havuzlarÄ± tespit et ve uyku listesine al
+    /// Soğuk havuzları tespit et ve uyku listesine al
     pub fn garbage_collect(
         &mut self,
         pools: &[PoolConfig],
@@ -326,11 +326,11 @@ impl LivePoolRegistry {
             }
 
             let should_deactivate = if let Some(activity) = self.activity.get(&idx) {
-                // Son N blok boyunca swap gÃ¶zlemlenmemiÅŸ
+                // Son N blok boyunca swap gözlemlenmemiş
                 let blocks_since_swap = current_block.saturating_sub(activity.last_swap_block);
                 let no_swaps = blocks_since_swap > cooldown_blocks;
 
-                // Spread sÄ±fÄ±ra yakÄ±n (fÄ±rsat yok)
+                // Spread sıfıra yakın (fırsat yok)
                 let avg_spread = if activity.spread_samples > 0 {
                     activity.cumulative_spread / activity.spread_samples as f64
                 } else {
@@ -340,7 +340,7 @@ impl LivePoolRegistry {
 
                 no_swaps && low_spread
             } else {
-                // HiÃ§ aktivite kaydÄ± yok â€” soÄŸuk
+                // Hiç aktivite kaydı yok — soğuk
                 current_block.saturating_sub(0) > cooldown_blocks
             };
 
@@ -354,19 +354,19 @@ impl LivePoolRegistry {
             }
         }
 
-        // Aktif havuz sayÄ±sÄ±nÄ± kontrol et (taÅŸma uyarÄ±sÄ±)
+        // Aktif havuz sayısını kontrol et (taşma uyarısı)
         let active_count = self.active_flags.iter().filter(|&&a| a).count();
         if active_count > max_active {
             eprintln!(
-                "  {} [Registry] Aktif havuz sayÄ±sÄ± ({}) maksimum limitin ({}) Ã¼stÃ¼nde",
-                "âš ï¸".yellow(), active_count, max_active,
+                "  {} [Registry] Aktif havuz sayısı ({}) maksimum limitin ({}) üstünde",
+                "⚠️".yellow(), active_count, max_active,
             );
         }
 
         deactivated
     }
 
-    /// TÃ¼m aktif havuzlarÄ±n skorlarÄ±nÄ± yeniden hesapla
+    /// Tüm aktif havuzların skorlarını yeniden hesapla
     pub fn recalculate_scores(
         &mut self,
         pools: &[PoolConfig],
@@ -399,14 +399,14 @@ impl LivePoolRegistry {
         self.last_score_block = current_block;
         self.stats.score_recalculations += 1;
 
-        // Spread sayaÃ§larÄ±nÄ± sÄ±fÄ±rla (yeni periyod iÃ§in)
+        // Spread sayaçlarını sıfırla (yeni periyod için)
         for activity in self.activity.values_mut() {
             activity.cumulative_spread = 0.0;
             activity.spread_samples = 0;
         }
     }
 
-    /// En yÃ¼ksek skorlu N havuzun indekslerini dÃ¶ndÃ¼r
+    /// En yüksek skorlu N havuzun indekslerini döndür
     pub fn top_scored_indices(&self, n: usize) -> Vec<usize> {
         let mut scored: Vec<(usize, f64)> = self.scores.iter()
             .filter(|(&idx, _)| self.is_active(idx))
@@ -416,7 +416,7 @@ impl LivePoolRegistry {
         scored.into_iter().take(n).map(|(idx, _)| idx).collect()
     }
 
-    /// Uyuyan havuzlarÄ± puanlarÄ±na gÃ¶re yeniden aktive et (sÄ±cak havuz yer aÃ§tÄ±ÄŸÄ±nda)
+    /// Uyuyan havuzları puanlarına göre yeniden aktive et (sıcak havuz yer açtığında)
     #[allow(dead_code)]
     pub fn reactivate_best_sleeping(
         &mut self,
@@ -434,8 +434,8 @@ impl LivePoolRegistry {
             }
             let new_idx = pools.len();
 
-            // v26.0: Reactivated havuzlar iÃ§in pair combo Ã¼ret
-            // (aynÄ± quote token'a sahip mevcut havuzlarla arbitraj Ã§ifti)
+            // v26.0: Reactivated havuzlar için pair combo üret
+            // (aynı quote token'a sahip mevcut havuzlarla arbitraj çifti)
             for (existing_idx, existing_pool) in pools.iter().enumerate() {
                 if existing_pool.quote_token_address == pool.quote_token_address
                     && existing_pool.address != pool.address
@@ -459,9 +459,9 @@ impl LivePoolRegistry {
     }
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// DISCOVERY ENGINE â€” TÃ¼m BileÅŸenlerin OrkestratÃ¶rÃ¼
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
+// DISCOVERY ENGINE — Tüm Bileşenlerin Orkestratörü
+// ─────────────────────────────────────────────────────────────────────────────
 
 pub struct DiscoveryEngine {
     registry: Arc<RwLock<LivePoolRegistry>>,
@@ -473,9 +473,9 @@ impl DiscoveryEngine {
         Self { registry, config }
     }
 
-    /// TÃ¼m arka plan gÃ¶revlerini baÅŸlat
+    /// Tüm arka plan görevlerini başlat
     pub fn start(&self, cancel_token: CancellationToken) {
-        // â”€â”€ GÃ¶rev 1: On-Chain Factory Listener â”€â”€
+        // ── Görev 1: On-Chain Factory Listener ──
         {
             let registry = self.registry.clone();
             let config = self.config.clone();
@@ -484,15 +484,15 @@ impl DiscoveryEngine {
             tokio::spawn(async move {
                 tokio::select! {
                     _ = token.cancelled() => {
-                        eprintln!("  {} Factory listener graceful shutdown", "ğŸ”Œ");
+                        eprintln!("  {} Factory listener graceful shutdown", "🔌");
                     }
                     result = factory_listener(registry, &config) => {
                         match result {
                             Ok(_) => {}
                             Err(e) => {
                                 eprintln!(
-                                    "  {} Factory listener hatasÄ± (API keÅŸfi devam ediyor): {}",
-                                    "âš ï¸", e
+                                    "  {} Factory listener hatası (API keşfi devam ediyor): {}",
+                                    "⚠️", e
                                 );
                             }
                         }
@@ -501,7 +501,7 @@ impl DiscoveryEngine {
             });
         }
 
-        // â”€â”€ GÃ¶rev 2: Multi-API Aggregator â”€â”€
+        // ── Görev 2: Multi-API Aggregator ──
         {
             let registry = self.registry.clone();
             let config = self.config.clone();
@@ -510,7 +510,7 @@ impl DiscoveryEngine {
             tokio::spawn(async move {
                 tokio::select! {
                     _ = token.cancelled() => {
-                        eprintln!("  {} API aggregator graceful shutdown", "ğŸ”Œ");
+                        eprintln!("  {} API aggregator graceful shutdown", "🔌");
                     }
                     _ = api_aggregator_loop(registry, &config) => {}
                 }
@@ -518,25 +518,25 @@ impl DiscoveryEngine {
         }
 
         println!(
-            "  {} KeÅŸif Motoru v1.0 baÅŸlatÄ±ldÄ±: Factory WSS + Multi-API + Skorlama + GC",
-            "ğŸ”".cyan()
+            "  {} Keşif Motoru v1.0 başlatıldı: Factory WSS + Multi-API + Skorlama + GC",
+            "🔍".cyan()
         );
     }
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// [ADIM 1] ON-CHAIN FACTORY LISTENER â€” WebSocket PoolCreated Dinleyici
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
+// [ADIM 1] ON-CHAIN FACTORY LISTENER — WebSocket PoolCreated Dinleyici
+// ─────────────────────────────────────────────────────────────────────────────
 
-/// Bilinen DEX factory kontratlarÄ±ndan PoolCreated eventlerini dinler.
-/// Yeni havuz yaratÄ±ldÄ±ÄŸÄ± milisaniyede yakalar ve registry'ye ekler.
+/// Bilinen DEX factory kontratlarından PoolCreated eventlerini dinler.
+/// Yeni havuz yaratıldığı milisaniyede yakalar ve registry'ye ekler.
 async fn factory_listener(
     registry: Arc<RwLock<LivePoolRegistry>>,
     config: &DiscoveryConfig,
 ) -> Result<()> {
     let ws = WsConnect::new(&config.wss_url);
     let provider = ProviderBuilder::new().on_ws(ws).await
-        .map_err(|e| eyre::eyre!("Factory listener WSS baÄŸlantÄ± hatasÄ±: {}", e))?;
+        .map_err(|e| eyre::eyre!("Factory listener WSS bağlantı hatası: {}", e))?;
 
     // Dinlenecek factory adresleri
     let factories = vec![
@@ -555,12 +555,12 @@ async fn factory_listener(
         .event_signature(vec![topic_uni, topic_aero]);
 
     let sub = provider.subscribe_logs(&filter).await
-        .map_err(|e| eyre::eyre!("Factory event abonelik hatasÄ±: {}", e))?;
+        .map_err(|e| eyre::eyre!("Factory event abonelik hatası: {}", e))?;
     let mut stream = sub.into_stream();
 
     println!(
-        "  {} On-Chain Factory Listener aktif â€” 4 DEX factory dinleniyor",
-        "ğŸ­".green()
+        "  {} On-Chain Factory Listener aktif — 4 DEX factory dinleniyor",
+        "🏭".green()
     );
 
     let whitelist = token_whitelist();
@@ -574,7 +574,7 @@ async fn factory_listener(
         let factory_address = log.inner.address;
         let topic0 = topics[0];
 
-        // Event tipine gÃ¶re parsing
+        // Event tipine göre parsing
         let parsed = if topic0 == topic_uni {
             parse_pool_created_uni_v3(&log, factory_address)
         } else if topic0 == topic_aero {
@@ -588,12 +588,12 @@ async fn factory_listener(
             None => continue,
         };
 
-        // Token whitelist kontrolÃ¼ â€” sadece gÃ¼venli tokenlarla iÅŸlem
+        // Token whitelist kontrolü — sadece güvenli tokenlarla işlem
         if !whitelist.contains(&parsed.token0) || !whitelist.contains(&parsed.token1) {
             continue;
         }
 
-        // WETH iÃ§eren Ã§iftleri filtrele (arbitraj bot WETH bazlÄ± Ã§alÄ±ÅŸÄ±yor)
+        // WETH içeren çiftleri filtrele (arbitraj bot WETH bazlı çalışıyor)
         let has_weth = parsed.token0 == config.weth_address
             || parsed.token1 == config.weth_address;
         if !has_weth {
@@ -606,7 +606,7 @@ async fn factory_listener(
             continue;
         }
 
-        // PoolConfig oluÅŸtur
+        // PoolConfig oluştur
         let (token0_is_weth, quote_addr) = if parsed.token0 == config.weth_address {
             (true, parsed.token1)
         } else {
@@ -634,8 +634,8 @@ async fn factory_listener(
         };
 
         eprintln!(
-            "  {} [Factory] Yeni havuz tespit edildi: {} ({}) â€” Fee: {}bps | Adres: {}",
-            "ğŸ­".green(),
+            "  {} [Factory] Yeni havuz tespit edildi: {} ({}) — Fee: {}bps | Adres: {}",
+            "🏭".green(),
             pool_config.name, parsed.dex_type,
             fee_bps, parsed.pool_address,
         );
@@ -646,12 +646,12 @@ async fn factory_listener(
             config: pool_config,
             source: DiscoverySource::FactoryEvent,
             discovered_at: Instant::now(),
-            score: 0.0, // Ä°lk skor â€” henÃ¼z veri yok
+            score: 0.0, // İlk skor — henüz veri yok
         });
         reg.stats.factory_events_received += 1;
     }
 
-    Err(eyre::eyre!("Factory event stream kapandÄ±"))
+    Err(eyre::eyre!("Factory event stream kapandı"))
 }
 
 /// Uniswap V3 PoolCreated event parsing
@@ -669,7 +669,7 @@ fn parse_pool_created_uni_v3(
     let token0 = Address::from_word(topics[1]);
     let token1 = Address::from_word(topics[2]);
     let fee_raw = U256::from_be_bytes(topics[3].0);
-    let fee_bps = (fee_raw.to::<u64>() / 100) as u32; // fee â†’ bps (Uni V3 fee = basis points * 100)
+    let fee_bps = (fee_raw.to::<u64>() / 100) as u32; // fee → bps (Uni V3 fee = basis points * 100)
 
     // data: tickSpacing (int24, left-padded to 32 bytes) + pool (address, left-padded)
     let data: &[u8] = log.inner.data.data.as_ref();
@@ -677,7 +677,7 @@ fn parse_pool_created_uni_v3(
         return None;
     }
 
-    // tickSpacing: bytes [0..32] â†’ int24 (last 3 bytes, signed)
+    // tickSpacing: bytes [0..32] → int24 (last 3 bytes, signed)
     let tick_spacing_bytes = &data[29..32];
     let tick_spacing = {
         let mut buf = [0u8; 4];
@@ -689,7 +689,7 @@ fn parse_pool_created_uni_v3(
         i32::from_be_bytes(buf)
     };
 
-    // pool address: bytes [32..64] â†’ last 20 bytes
+    // pool address: bytes [32..64] → last 20 bytes
     let pool_address = Address::from_slice(&data[44..64]);
 
     let dex_type = factory_to_dex_type(factory);
@@ -734,7 +734,7 @@ fn parse_pool_created_aerodrome(
     }
     let pool_address = Address::from_slice(&data[12..32]);
 
-    // Aerodrome fee: tick_spacing'e gÃ¶re tahmin
+    // Aerodrome fee: tick_spacing'e göre tahmin
     let fee_bps = match tick_spacing.abs() {
         1 => 1,
         10 | 50 => 5,
@@ -762,7 +762,7 @@ struct ParsedPoolCreated {
     dex_type: DexType,
 }
 
-/// Factory adresi â†’ DexType eÅŸleÅŸtirme
+/// Factory adresi → DexType eşleştirme
 fn factory_to_dex_type(factory: Address) -> DexType {
     if factory == FACTORY_AERODROME_CL {
         DexType::Aerodrome
@@ -773,7 +773,7 @@ fn factory_to_dex_type(factory: Address) -> DexType {
     }
 }
 
-/// Token adresi â†’ decimal tahmin
+/// Token adresi → decimal tahmin
 fn infer_decimals(token: &Address) -> u8 {
     let lower = format!("{}", token).to_lowercase();
     if lower.ends_with("0000000000000000000006") { 18 }
@@ -785,18 +785,18 @@ fn infer_decimals(token: &Address) -> u8 {
     else { 18 }
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// [ADIM 2] MULTI-API AGGREGATOR â€” DexScreener + GeckoTerminal
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
+// [ADIM 2] MULTI-API AGGREGATOR — DexScreener + GeckoTerminal
+// ─────────────────────────────────────────────────────────────────────────────
 
-/// Periyodik API yoklama dÃ¶ngÃ¼sÃ¼ â€” birden fazla kaynaktan havuz keÅŸfi
+/// Periyodik API yoklama döngüsü — birden fazla kaynaktan havuz keşfi
 async fn api_aggregator_loop(
     registry: Arc<RwLock<LivePoolRegistry>>,
     config: &DiscoveryConfig,
 ) {
     let interval = std::time::Duration::from_secs(config.api_poll_interval_secs);
 
-    // Ä°lk yoklamayÄ± 30s geciktir (baÅŸlangÄ±Ã§ senkronizasyonu bitmeden yarÄ±ÅŸma olmasÄ±n)
+    // İlk yoklamayı 30s geciktir (başlangıç senkronizasyonu bitmeden yarışma olmasın)
     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 
     loop {
@@ -811,15 +811,15 @@ async fn api_aggregator_loop(
                 if count > 0 {
                     reg.stats.api_discoveries += count as u64;
                     eprintln!(
-                        "  {} [DexScreener] {} yeni havuz keÅŸfedildi",
-                        "ğŸŒ".cyan(), count
+                        "  {} [DexScreener] {} yeni havuz keşfedildi",
+                        "🌐".cyan(), count
                     );
                 }
             }
             Err(e) => {
                 eprintln!(
-                    "  {} [DexScreener] API hatasÄ± â€” GeckoTerminal'e geÃ§iliyor: {}",
-                    "âš ï¸".yellow(), e
+                    "  {} [DexScreener] API hatası — GeckoTerminal'e geçiliyor: {}",
+                    "⚠️".yellow(), e
                 );
 
                 // Kaynak 2: GeckoTerminal (fallback)
@@ -833,15 +833,15 @@ async fn api_aggregator_loop(
                         if count > 0 {
                             reg.stats.api_discoveries += count as u64;
                             eprintln!(
-                                "  {} [GeckoTerminal] {} yeni havuz keÅŸfedildi (fallback)",
-                                "ğŸ¦".green(), count
+                                "  {} [GeckoTerminal] {} yeni havuz keşfedildi (fallback)",
+                                "🦎".green(), count
                             );
                         }
                     }
                     Err(e2) => {
                         eprintln!(
-                            "  {} [GeckoTerminal] Fallback da baÅŸarÄ±sÄ±z: {}",
-                            "âŒ".red(), e2
+                            "  {} [GeckoTerminal] Fallback da başarısız: {}",
+                            "❌".red(), e2
                         );
                     }
                 }
@@ -852,7 +852,7 @@ async fn api_aggregator_loop(
     }
 }
 
-/// DexScreener API sorgusu â€” dÃ¼ÅŸÃ¼k fee'li WETH Ã§iftlerini keÅŸfet
+/// DexScreener API sorgusu — düşük fee'li WETH çiftlerini keşfet
 async fn discover_dexscreener(config: &DiscoveryConfig) -> Result<Vec<PendingPool>> {
     let url = format!(
         "https://api.dexscreener.com/latest/dex/tokens/{}",
@@ -862,21 +862,21 @@ async fn discover_dexscreener(config: &DiscoveryConfig) -> Result<Vec<PendingPoo
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .map_err(|e| eyre::eyre!("HTTP istemci hatasÄ±: {}", e))?;
+        .map_err(|e| eyre::eyre!("HTTP istemci hatası: {}", e))?;
 
     let resp = client
         .get(&url)
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| eyre::eyre!("DexScreener istek hatasÄ±: {}", e))?;
+        .map_err(|e| eyre::eyre!("DexScreener istek hatası: {}", e))?;
 
     if !resp.status().is_success() {
         return Err(eyre::eyre!("DexScreener HTTP {}", resp.status()));
     }
 
     let json: serde_json::Value = resp.json().await
-        .map_err(|e| eyre::eyre!("DexScreener JSON hatasÄ±: {}", e))?;
+        .map_err(|e| eyre::eyre!("DexScreener JSON hatası: {}", e))?;
 
     parse_dexscreener_pools(&json, config)
 }
@@ -887,7 +887,7 @@ fn parse_dexscreener_pools(json: &serde_json::Value, config: &DiscoveryConfig) -
 
     let pairs = json.get("pairs")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| eyre::eyre!("DexScreener yanÄ±tÄ±nda 'pairs' bulunamadÄ±"))?;
+        .ok_or_else(|| eyre::eyre!("DexScreener yanıtında 'pairs' bulunamadı"))?;
 
     for pair in pairs {
         let chain_id = pair.get("chainId").and_then(|v| v.as_str()).unwrap_or("");
@@ -929,12 +929,12 @@ fn parse_dexscreener_pools(json: &serde_json::Value, config: &DiscoveryConfig) -
             Err(_) => continue,
         };
 
-        // Whitelist kontrolÃ¼
+        // Whitelist kontrolü
         if !whitelist.contains(&base_addr) || !whitelist.contains(&quote_addr) {
             continue;
         }
 
-        // WETH Ã§ifti kontrolÃ¼
+        // WETH çifti kontrolü
         let has_weth = base_addr == config.weth_address || quote_addr == config.weth_address;
         if !has_weth {
             continue;
@@ -999,14 +999,14 @@ fn parse_dexscreener_pools(json: &serde_json::Value, config: &DiscoveryConfig) -
             config: pool_config,
             source: DiscoverySource::DexScreener,
             discovered_at: Instant::now(),
-            score: vol24 * 0.001, // Ã–n skor: hacim bazlÄ±
+            score: vol24 * 0.001, // Ön skor: hacim bazlı
         });
     }
 
     Ok(results)
 }
 
-/// GeckoTerminal API sorgusu â€” DexScreener fallback
+/// GeckoTerminal API sorgusu — DexScreener fallback
 async fn discover_gecko_terminal(config: &DiscoveryConfig) -> Result<Vec<PendingPool>> {
     // GeckoTerminal v2 API: trending pools on Base
     let url = format!(
@@ -1017,21 +1017,21 @@ async fn discover_gecko_terminal(config: &DiscoveryConfig) -> Result<Vec<Pending
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .map_err(|e| eyre::eyre!("HTTP istemci hatasÄ±: {}", e))?;
+        .map_err(|e| eyre::eyre!("HTTP istemci hatası: {}", e))?;
 
     let resp = client
         .get(&url)
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| eyre::eyre!("GeckoTerminal istek hatasÄ±: {}", e))?;
+        .map_err(|e| eyre::eyre!("GeckoTerminal istek hatası: {}", e))?;
 
     if !resp.status().is_success() {
         return Err(eyre::eyre!("GeckoTerminal HTTP {}", resp.status()));
     }
 
     let json: serde_json::Value = resp.json().await
-        .map_err(|e| eyre::eyre!("GeckoTerminal JSON hatasÄ±: {}", e))?;
+        .map_err(|e| eyre::eyre!("GeckoTerminal JSON hatası: {}", e))?;
 
     parse_gecko_terminal_pools(&json, config)
 }
@@ -1045,7 +1045,7 @@ fn parse_gecko_terminal_pools(
 
     let data = json.get("data")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| eyre::eyre!("GeckoTerminal yanÄ±tÄ±nda 'data' bulunamadÄ±"))?;
+        .ok_or_else(|| eyre::eyre!("GeckoTerminal yanıtında 'data' bulunamadı"))?;
 
     for pool_data in data {
         let attributes = match pool_data.get("attributes") {
@@ -1082,18 +1082,18 @@ fn parse_gecko_terminal_pools(
             Err(_) => continue,
         };
 
-        // Whitelist kontrolÃ¼
+        // Whitelist kontrolü
         if !whitelist.contains(&base_addr) || !whitelist.contains(&quote_addr) {
             continue;
         }
 
-        // WETH Ã§ifti kontrolÃ¼
+        // WETH çifti kontrolü
         let has_weth = base_addr == config.weth_address || quote_addr == config.weth_address;
         if !has_weth {
             continue;
         }
 
-        // Hacim kontrolÃ¼
+        // Hacim kontrolü
         let vol24 = attributes.get("volume_usd")
             .and_then(|v| v.get("h24"))
             .and_then(|v| v.as_str())
@@ -1103,7 +1103,7 @@ fn parse_gecko_terminal_pools(
             continue;
         }
 
-        // Reserve/likidite kontrolÃ¼
+        // Reserve/likidite kontrolü
         let reserve_usd = attributes.get("reserve_in_usd")
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<f64>().ok())
@@ -1155,14 +1155,14 @@ fn parse_gecko_terminal_pools(
     Ok(results)
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// [ADIM 3] HOT-RELOAD â€” Bekleyen HavuzlarÄ± CanlÄ± Sisteme Enjekte Et
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
+// [ADIM 3] HOT-RELOAD — Bekleyen Havuzları Canlı Sisteme Enjekte Et
+// ─────────────────────────────────────────────────────────────────────────────
 
-/// Bekleyen havuzlarÄ± aktif listeye ekle ve gerekli pair_combo'larÄ± oluÅŸtur.
-/// Ana dÃ¶ngÃ¼ tarafÄ±ndan her blokta Ã§aÄŸrÄ±lÄ±r.
+/// Bekleyen havuzları aktif listeye ekle ve gerekli pair_combo'ları oluştur.
+/// Ana döngü tarafından her blokta çağrılır.
 ///
-/// DÃ¶nÃ¼ÅŸ: Eklenen yeni havuz sayÄ±sÄ±
+/// Dönüş: Eklenen yeni havuz sayısı
 pub fn apply_pending_updates(
     registry: &Arc<RwLock<LivePoolRegistry>>,
     pools: &mut Vec<PoolConfig>,
@@ -1183,7 +1183,7 @@ pub fn apply_pending_updates(
     for pending_pool in pending {
         let new_addr = pending_pool.config.address;
 
-        // Mevcut havuzlarda zaten var mÄ±?
+        // Mevcut havuzlarda zaten var mı?
         if pools.iter().any(|p| p.address == new_addr) {
             continue;
         }
@@ -1191,12 +1191,12 @@ pub fn apply_pending_updates(
         let new_idx = pools.len();
         let new_pool = pending_pool.config;
 
-        // AynÄ± quote token'a sahip mevcut havuzlarla pair combo oluÅŸtur
+        // Aynı quote token'a sahip mevcut havuzlarla pair combo oluştur
         for (existing_idx, existing_pool) in pools.iter().enumerate() {
             if existing_pool.quote_token_address == new_pool.quote_token_address
                 && existing_pool.address != new_pool.address
             {
-                // AynÄ± token Ã§ifti, farklÄ± DEX â†’ arbitraj Ã§ifti
+                // Aynı token çifti, farklı DEX → arbitraj çifti
                 let pair_name = format!("WETH/{:.8}", format!("{}", new_pool.quote_token_address));
                 pair_combos.push(PairCombo {
                     pair_name,
@@ -1221,21 +1221,21 @@ pub fn apply_pending_updates(
     if added > 0 {
         eprintln!(
             "  {} [Hot-Reload] {} yeni havuz aktif izlemeye eklendi (toplam: {})",
-            "ğŸ”¥".green(), added, pools.len(),
+            "🔥".green(), added, pools.len(),
         );
     }
 
     added
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// [ADIM 4] GARBAGE COLLECTOR â€” SoÄŸuk HavuzlarÄ± Temizle
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
+// [ADIM 4] GARBAGE COLLECTOR — Soğuk Havuzları Temizle
+// ─────────────────────────────────────────────────────────────────────────────
 
-/// Hareketsiz havuzlarÄ± deaktive et ve yerine sÄ±cak havuzlar ekle.
-/// Ana dÃ¶ngÃ¼ tarafÄ±ndan periyodik olarak Ã§aÄŸrÄ±lÄ±r.
+/// Hareketsiz havuzları deaktive et ve yerine sıcak havuzlar ekle.
+/// Ana döngü tarafından periyodik olarak çağrılır.
 ///
-/// DÃ¶nÃ¼ÅŸ: Deaktive edilen havuz sayÄ±sÄ±
+/// Dönüş: Deaktive edilen havuz sayısı
 pub fn run_garbage_collector(
     registry: &Arc<RwLock<LivePoolRegistry>>,
     pools: &[PoolConfig],
@@ -1244,7 +1244,7 @@ pub fn run_garbage_collector(
 ) -> Vec<usize> {
     let mut reg = registry.write();
 
-    // GC zamanÄ± geldi mi?
+    // GC zamanı geldi mi?
     if current_block.saturating_sub(reg.last_gc_block) < config.gc_interval_blocks {
         return Vec::new();
     }
@@ -1258,8 +1258,8 @@ pub fn run_garbage_collector(
 
     if !deactivated.is_empty() {
         eprintln!(
-            "  {} [GC] {} havuz uyku moduna alÄ±ndÄ± (blok #{}): {:?}",
-            "ğŸ§¹".yellow(),
+            "  {} [GC] {} havuz uyku moduna alındı (blok #{}): {:?}",
+            "🧹".yellow(),
             deactivated.len(),
             current_block,
             deactivated.iter()
@@ -1273,14 +1273,14 @@ pub fn run_garbage_collector(
     deactivated
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// [ADIM 5] OPPORTUNITY SCORER â€” KÃ¢r Potansiyeli PuanlamasÄ±
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
+// [ADIM 5] OPPORTUNITY SCORER — Kâr Potansiyeli Puanlaması
+// ─────────────────────────────────────────────────────────────────────────────
 
-/// TÃ¼m aktif havuzlarÄ±n fÄ±rsat skorlarÄ±nÄ± yeniden hesapla.
-/// FormÃ¼l: Score = (Son 1 Saatlik Hacim Ã— Spread DalgalanmasÄ±) / Havuz Komisyonu
+/// Tüm aktif havuzların fırsat skorlarını yeniden hesapla.
+/// Formül: Score = (Son 1 Saatlik Hacim × Spread Dalgalanması) / Havuz Komisyonu
 ///
-/// Ana dÃ¶ngÃ¼ tarafÄ±ndan periyodik olarak (her ~10 dakikada bir) Ã§aÄŸrÄ±lÄ±r.
+/// Ana döngü tarafından periyodik olarak (her ~10 dakikada bir) çağrılır.
 pub fn update_scores(
     registry: &Arc<RwLock<LivePoolRegistry>>,
     pools: &[PoolConfig],
@@ -1310,8 +1310,8 @@ pub fn update_scores(
             })
             .collect();
         eprintln!(
-            "  {} [Scorer] Skor gÃ¼ncellendi â€” Top 5: {}",
-            "ğŸ“Š".cyan(),
+            "  {} [Scorer] Skor güncellendi — Top 5: {}",
+            "📊".cyan(),
             scores_str.join(" | "),
         );
     }
@@ -1319,7 +1319,7 @@ pub fn update_scores(
     true
 }
 
-/// Havuz spread gÃ¶zlemlerini kaydet (ana dÃ¶ngÃ¼den her blokta Ã§aÄŸrÄ±lÄ±r)
+/// Havuz spread gözlemlerini kaydet (ana döngüden her blokta çağrılır)
 pub fn record_spread_observation(
     registry: &Arc<RwLock<LivePoolRegistry>>,
     pool_a_idx: usize,
@@ -1357,9 +1357,9 @@ pub fn record_swap_activity(
     reg.record_swap(pool_idx, block_number);
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// YardÄ±mcÄ± Fonksiyonlar
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
+// Yardımcı Fonksiyonlar
+// ─────────────────────────────────────────────────────────────────────────────
 
 fn infer_dex_type_from_id(dex_id: &str) -> Option<DexType> {
     let lower = dex_id.to_lowercase();
@@ -1392,20 +1392,20 @@ fn infer_tick_spacing_from_fee(dex_id: &str, fee_bps: u32) -> i32 {
     }
 }
 
-/// KeÅŸif motoru istatistiklerini gÃ¼zel formatlÄ± Ã§Ä±ktÄ± olarak yazdÄ±r
+/// Keşif motoru istatistiklerini güzel formatlı çıktı olarak yazdır
 pub fn print_discovery_stats(registry: &Arc<RwLock<LivePoolRegistry>>, pools: &[PoolConfig]) {
     let reg = registry.read();
     let active_count = reg.active_flags.iter().filter(|&&a| a).count();
     let sleeping_count = reg.sleeping_pools.len();
 
-    println!("  {} â”€â”€â”€ KeÅŸif Motoru Ä°statistikleri â”€â”€â”€â”€â”€â”€â”€â”€â”€", "â”‚".yellow());
-    println!("  {}  Toplam KeÅŸfedilen   : {}", "â”‚".yellow(), reg.stats.total_discovered);
-    println!("  {}  Factory Eventleri   : {}", "â”‚".yellow(), reg.stats.factory_events_received);
-    println!("  {}  API KeÅŸifleri       : {}", "â”‚".yellow(), reg.stats.api_discoveries);
-    println!("  {}  Aktif Havuz         : {}", "â”‚".yellow(), active_count);
-    println!("  {}  Uyuyan Havuz        : {}", "â”‚".yellow(), sleeping_count);
-    println!("  {}  GC Temizlenen       : {}", "â”‚".yellow(), reg.stats.pools_garbage_collected);
-    println!("  {}  Skor GÃ¼ncelleme     : {}", "â”‚".yellow(), reg.stats.score_recalculations);
+    println!("  {} ─── Keşif Motoru İstatistikleri ─────────", "│".yellow());
+    println!("  {}  Toplam Keşfedilen   : {}", "│".yellow(), reg.stats.total_discovered);
+    println!("  {}  Factory Eventleri   : {}", "│".yellow(), reg.stats.factory_events_received);
+    println!("  {}  API Keşifleri       : {}", "│".yellow(), reg.stats.api_discoveries);
+    println!("  {}  Aktif Havuz         : {}", "│".yellow(), active_count);
+    println!("  {}  Uyuyan Havuz        : {}", "│".yellow(), sleeping_count);
+    println!("  {}  GC Temizlenen       : {}", "│".yellow(), reg.stats.pools_garbage_collected);
+    println!("  {}  Skor Güncelleme     : {}", "│".yellow(), reg.stats.score_recalculations);
 
     // Top 3 skorlu havuz
     let top3 = reg.top_scored_indices(3);
@@ -1417,6 +1417,6 @@ pub fn print_discovery_stats(registry: &Arc<RwLock<LivePoolRegistry>>, pools: &[
                 Some(format!("{}: {:.0}", name, score))
             })
             .collect();
-        println!("  {}  En Ä°yi Havuzlar     : {}", "â”‚".yellow(), top_str.join(", "));
+        println!("  {}  En İyi Havuzlar     : {}", "│".yellow(), top_str.join(", "));
     }
 }

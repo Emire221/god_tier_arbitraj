@@ -1,23 +1,23 @@
-﻿// ============================================================================
-//  KEY MANAGER v1.0 â€” Åifreli Private Key YÃ¶netimi
+// ============================================================================
+//  KEY MANAGER v1.0 — Şifreli Private Key Yönetimi
 //
-//  GÃ¼venlik KatmanlarÄ±:
-//  âœ“ AES-256-GCM ile ÅŸifreleme (AEAD â€” kimlik doÄŸrulamalÄ± ÅŸifreleme)
-//  âœ“ PBKDF2-HMAC-SHA256 ile parola tabanlÄ± anahtar tÃ¼retimi (600K iterasyon)
-//  âœ“ Zeroize ile gÃ¼venli hafÄ±za temizliÄŸi (drop sonrasÄ± RAM'de iz kalmaz)
-//  âœ“ Disk Ã¼zerinde dÃ¼z metin private key ASLA bulunmaz
+//  Güvenlik Katmanları:
+//  ✓ AES-256-GCM ile şifreleme (AEAD — kimlik doğrulamalı şifreleme)
+//  ✓ PBKDF2-HMAC-SHA256 ile parola tabanlı anahtar türetimi (600K iterasyon)
+//  ✓ Zeroize ile güvenli hafıza temizliği (drop sonrası RAM'de iz kalmaz)
+//  ✓ Disk üzerinde düz metin private key ASLA bulunmaz
 //
-//  KullanÄ±m ModlarÄ±:
-//  1. Åifreli Keystore DosyasÄ± (keystore.enc) â€” En gÃ¼venli
-//     - Ä°lk kurulumda: encrypt_and_save() ile oluÅŸtur
-//     - Runtime: load_and_decrypt() ile bellek iÃ§i Ã§Ã¶z
+//  Kullanım Modları:
+//  1. Şifreli Keystore Dosyası (keystore.enc) — En güvenli
+//     - İlk kurulumda: encrypt_and_save() ile oluştur
+//     - Runtime: load_and_decrypt() ile bellek içi çöz
 //     - Parola: KEY_PASSWORD env var veya terminal prompt
 //
-//  2. Ortam DeÄŸiÅŸkeni (PRIVATE_KEY) â€” Geriye uyumluluk
-//     - GÃ¼venlik UYARISI loglanÄ±r
-//     - YalnÄ±zca geÃ§iÅŸ dÃ¶nemi iÃ§in
+//  2. Ortam Değişkeni (PRIVATE_KEY) — Geriye uyumluluk
+//     - Güvenlik UYARISI loglanır
+//     - Yalnızca geçiş dönemi için
 //
-//  Keystore Dosya FormatÄ± (JSON):
+//  Keystore Dosya Formatı (JSON):
 //  {
 //    "version": 1,
 //    "kdf": "pbkdf2-hmac-sha256",
@@ -29,9 +29,9 @@
 //  }
 // ============================================================================
 
-// NOT: generic-array 0.14 â†’ 1.x geÃ§iÅŸ sÃ¼recinde aes-gcm 0.10 upstream
-// deprecated uyarÄ±larÄ± Ã¼retir. Bug deÄŸil, ekosistem geÃ§iÅŸ uyarÄ±sÄ±dÄ±r.
-// aes-gcm generic-array 1.x desteÄŸi eklediÄŸinde bu kaldÄ±rÄ±lacak.
+// NOT: generic-array 0.14 → 1.x geçiş sürecinde aes-gcm 0.10 upstream
+// deprecated uyarıları üretir. Bug değil, ekosistem geçiş uyarısıdır.
+// aes-gcm generic-array 1.x desteği eklediğinde bu kaldırılacak.
 #![allow(deprecated)]
 
 use aes_gcm::{
@@ -46,11 +46,11 @@ use zeroize::Zeroizing;
 use eyre::Result;
 use std::path::Path;
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
 // Sabitler
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
 
-/// PBKDF2 iterasyon sayÄ±sÄ± â€” OWASP 2024 Ã¶nerisi (SHA-256 iÃ§in â‰¥600K)
+/// PBKDF2 iterasyon sayısı — OWASP 2024 önerisi (SHA-256 için ≥600K)
 const PBKDF2_ITERATIONS: u32 = 600_000;
 
 /// Salt boyutu (byte)
@@ -62,9 +62,9 @@ const NONCE_SIZE: usize = 12;
 /// Keystore dosya versiyonu
 const KEYSTORE_VERSION: u32 = 1;
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Keystore YapÄ±sÄ± (JSON serileÅŸtirme iÃ§in)
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
+// Keystore Yapısı (JSON serileştirme için)
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct KeystoreFile {
@@ -76,48 +76,48 @@ struct KeystoreFile {
     ciphertext: String, // hex-encoded (ciphertext + auth tag)
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
 // Key Manager
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
 
-/// Åifreli private key yÃ¶neticisi.
+/// Şifreli private key yöneticisi.
 ///
-/// Private key hiÃ§bir zaman diske dÃ¼z metin olarak yazÄ±lmaz.
-/// Bellekte tutulur ve drop edildiÄŸinde zeroize ile gÃ¼venli ÅŸekilde silinir.
+/// Private key hiçbir zaman diske düz metin olarak yazılmaz.
+/// Bellekte tutulur ve drop edildiğinde zeroize ile güvenli şekilde silinir.
 pub struct KeyManager {
-    /// Ã‡Ã¶zÃ¼lmÃ¼ÅŸ private key (bellekte, zeroize destekli)
+    /// Çözülmüş private key (bellekte, zeroize destekli)
     decrypted_key: Option<Zeroizing<String>>,
-    /// Anahtar kaynaÄŸÄ± (log/debug iÃ§in)
+    /// Anahtar kaynağı (log/debug için)
     source: KeySource,
 }
 
-/// Private key'in nereden yÃ¼klendiÄŸi
+/// Private key'in nereden yüklendiği
 #[derive(Debug, Clone)]
 pub enum KeySource {
-    /// Åifreli keystore dosyasÄ±ndan
+    /// Şifreli keystore dosyasından
     EncryptedKeystore(String),
-    /// Ortam deÄŸiÅŸkeninden (gÃ¼venli DEÄÄ°L â€” uyarÄ± verilir)
+    /// Ortam değişkeninden (güvenli DEĞİL — uyarı verilir)
     EnvironmentVariable,
-    /// HenÃ¼z yÃ¼klenmedi
+    /// Henüz yüklenmedi
     None,
 }
 
 impl std::fmt::Display for KeySource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            KeySource::EncryptedKeystore(path) => write!(f, "Åifreli Keystore ({})", path),
-            KeySource::EnvironmentVariable => write!(f, "Ortam DeÄŸiÅŸkeni (GÃœVENSÄ°Z)"),
-            KeySource::None => write!(f, "YÃ¼klenmedi"),
+            KeySource::EncryptedKeystore(path) => write!(f, "Şifreli Keystore ({})", path),
+            KeySource::EnvironmentVariable => write!(f, "Ortam Değişkeni (GÜVENSİZ)"),
+            KeySource::None => write!(f, "Yüklenmedi"),
         }
     }
 }
 
 impl KeyManager {
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // OluÅŸturma ve YÃ¼kleme
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─────────────────────────────────────────────────────────────────────
+    // Oluşturma ve Yükleme
+    // ─────────────────────────────────────────────────────────────────────
 
-    /// BoÅŸ KeyManager oluÅŸtur
+    /// Boş KeyManager oluştur
         #[allow(dead_code)]
         pub fn new() -> Self {
         Self {
@@ -126,42 +126,42 @@ impl KeyManager {
         }
     }
 
-    /// Private key'i ÅŸifrele ve dosyaya kaydet.
+    /// Private key'i şifrele ve dosyaya kaydet.
     ///
-    /// # GÃ¼venlik
-    /// - Parola â†’ PBKDF2-HMAC-SHA256 (600K iter) â†’ 32-byte AES key
-    /// - AES-256-GCM ile ÅŸifreleme (AEAD â€” bÃ¼tÃ¼nlÃ¼k + gizlilik)
+    /// # Güvenlik
+    /// - Parola → PBKDF2-HMAC-SHA256 (600K iter) → 32-byte AES key
+    /// - AES-256-GCM ile şifreleme (AEAD — bütünlük + gizlilik)
     /// - Rastgele 32-byte salt + 12-byte nonce
     ///
-    /// # KullanÄ±m
+    /// # Kullanım
     /// ```ignore
-    /// KeyManager::encrypt_and_save("0xabc...private_key", "gÃ¼Ã§lÃ¼_parola", "keystore.enc")?;
+    /// KeyManager::encrypt_and_save("0xabc...private_key", "güçlü_parola", "keystore.enc")?;
     /// ```
     pub fn encrypt_and_save(private_key: &str, password: &str, path: &str) -> Result<()> {
-        // 1. Rastgele salt ve nonce Ã¼ret
+        // 1. Rastgele salt ve nonce üret
         let mut salt = [0u8; SALT_SIZE];
         let mut nonce_bytes = [0u8; NONCE_SIZE];
         rand::thread_rng().fill_bytes(&mut salt);
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
 
-        // 2. Paroladan AES-256 anahtarÄ± tÃ¼ret (PBKDF2)
+        // 2. Paroladan AES-256 anahtarı türet (PBKDF2)
         let mut derived_key = Zeroizing::new([0u8; 32]);
         pbkdf2::<Hmac<Sha256>>(
             password.as_bytes(),
             &salt,
             PBKDF2_ITERATIONS,
             derived_key.as_mut(),
-        ).map_err(|e| eyre::eyre!("PBKDF2 anahtar tÃ¼retme hatasÄ±: {:?}", e))?;
+        ).map_err(|e| eyre::eyre!("PBKDF2 anahtar türetme hatası: {:?}", e))?;
 
-        // 3. AES-256-GCM ile ÅŸifrele
+        // 3. AES-256-GCM ile şifrele
         let cipher = Aes256Gcm::new_from_slice(derived_key.as_ref())
-            .map_err(|e| eyre::eyre!("AES-256-GCM oluÅŸturma hatasÄ±: {}", e))?;
+            .map_err(|e| eyre::eyre!("AES-256-GCM oluşturma hatası: {}", e))?;
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ciphertext = cipher
             .encrypt(nonce, private_key.as_bytes())
-            .map_err(|e| eyre::eyre!("Åifreleme hatasÄ±: {}", e))?;
+            .map_err(|e| eyre::eyre!("Şifreleme hatası: {}", e))?;
 
-        // 4. Keystore dosyasÄ±nÄ± oluÅŸtur
+        // 4. Keystore dosyasını oluştur
         let keystore = KeystoreFile {
             version: KEYSTORE_VERSION,
             kdf: "pbkdf2-hmac-sha256".into(),
@@ -172,29 +172,29 @@ impl KeyManager {
         };
 
         let json = serde_json::to_string_pretty(&keystore)
-            .map_err(|e| eyre::eyre!("JSON serileÅŸtirme hatasÄ±: {}", e))?;
+            .map_err(|e| eyre::eyre!("JSON serileştirme hatası: {}", e))?;
 
         std::fs::write(path, json)
-            .map_err(|e| eyre::eyre!("Keystore dosyasÄ± yazma hatasÄ±: {}", e))?;
+            .map_err(|e| eyre::eyre!("Keystore dosyası yazma hatası: {}", e))?;
 
         Ok(())
     }
 
-    /// Åifreli keystore dosyasÄ±ndan private key'i yÃ¼kle ve Ã§Ã¶z.
+    /// Şifreli keystore dosyasından private key'i yükle ve çöz.
     ///
-    /// # GÃ¼venlik
-    /// - Ã‡Ã¶zÃ¼len anahtar sadece bellekte tutulur (Zeroizing<String>)
-    /// - Drop edildiÄŸinde otomatik zeroize
-    /// - Disk eriÅŸimi olan saldÄ±rgan anahtarÄ± okuyamaz
+    /// # Güvenlik
+    /// - Çözülen anahtar sadece bellekte tutulur (Zeroizing<String>)
+    /// - Drop edildiğinde otomatik zeroize
+    /// - Disk erişimi olan saldırgan anahtarı okuyamaz
     pub fn load_from_keystore(path: &str, password: &str) -> Result<Self> {
-        // 1. DosyayÄ± oku ve JSON Ã§Ã¶zÃ¼mle
+        // 1. Dosyayı oku ve JSON çözümle
         let json = std::fs::read_to_string(path)
-            .map_err(|e| eyre::eyre!("Keystore dosyasÄ± okunamadÄ± ({}): {}", path, e))?;
+            .map_err(|e| eyre::eyre!("Keystore dosyası okunamadı ({}): {}", path, e))?;
 
         let keystore: KeystoreFile = serde_json::from_str(&json)
-            .map_err(|e| eyre::eyre!("Keystore JSON Ã§Ã¶zÃ¼mleme hatasÄ±: {}", e))?;
+            .map_err(|e| eyre::eyre!("Keystore JSON çözümleme hatası: {}", e))?;
 
-        // Versiyon kontrolÃ¼
+        // Versiyon kontrolü
         if keystore.version != KEYSTORE_VERSION {
             return Err(eyre::eyre!(
                 "Desteklenmeyen keystore versiyonu: {} (beklenen: {})",
@@ -205,38 +205,38 @@ impl KeyManager {
 
         // 2. Hex decode
         let salt = hex::decode(&keystore.salt)
-            .map_err(|e| eyre::eyre!("Salt hex Ã§Ã¶zÃ¼mleme hatasÄ±: {}", e))?;
+            .map_err(|e| eyre::eyre!("Salt hex çözümleme hatası: {}", e))?;
         let nonce_bytes = hex::decode(&keystore.nonce)
-            .map_err(|e| eyre::eyre!("Nonce hex Ã§Ã¶zÃ¼mleme hatasÄ±: {}", e))?;
+            .map_err(|e| eyre::eyre!("Nonce hex çözümleme hatası: {}", e))?;
         let ciphertext = hex::decode(&keystore.ciphertext)
-            .map_err(|e| eyre::eyre!("Ciphertext hex Ã§Ã¶zÃ¼mleme hatasÄ±: {}", e))?;
+            .map_err(|e| eyre::eyre!("Ciphertext hex çözümleme hatası: {}", e))?;
 
-        // 3. PBKDF2 ile anahtar tÃ¼ret
+        // 3. PBKDF2 ile anahtar türet
         let mut derived_key = Zeroizing::new([0u8; 32]);
         pbkdf2::<Hmac<Sha256>>(
             password.as_bytes(),
             &salt,
             keystore.kdf_iterations,
             derived_key.as_mut(),
-        ).map_err(|e| eyre::eyre!("PBKDF2 anahtar tÃ¼retme hatasÄ±: {:?}", e))?;
+        ).map_err(|e| eyre::eyre!("PBKDF2 anahtar türetme hatası: {:?}", e))?;
 
-        // 4. AES-256-GCM ile Ã§Ã¶z
+        // 4. AES-256-GCM ile çöz
         let cipher = Aes256Gcm::new_from_slice(derived_key.as_ref())
-            .map_err(|e| eyre::eyre!("AES-256-GCM oluÅŸturma hatasÄ±: {}", e))?;
+            .map_err(|e| eyre::eyre!("AES-256-GCM oluşturma hatası: {}", e))?;
 
         if nonce_bytes.len() != NONCE_SIZE {
-            return Err(eyre::eyre!("GeÃ§ersiz nonce boyutu: {}", nonce_bytes.len()));
+            return Err(eyre::eyre!("Geçersiz nonce boyutu: {}", nonce_bytes.len()));
         }
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let plaintext = cipher
             .decrypt(nonce, ciphertext.as_ref())
             .map_err(|_| eyre::eyre!(
-                "Åifre Ã§Ã¶zme baÅŸarÄ±sÄ±z! YanlÄ±ÅŸ parola veya bozuk keystore dosyasÄ±."
+                "Şifre çözme başarısız! Yanlış parola veya bozuk keystore dosyası."
             ))?;
 
         let key_string = String::from_utf8(plaintext)
-            .map_err(|_| eyre::eyre!("Ã‡Ã¶zÃ¼len anahtar geÃ§erli UTF-8 deÄŸil"))?;
+            .map_err(|_| eyre::eyre!("Çözülen anahtar geçerli UTF-8 değil"))?;
 
         Ok(Self {
             decrypted_key: Some(Zeroizing::new(key_string)),
@@ -244,12 +244,12 @@ impl KeyManager {
         })
     }
 
-    /// Ortam deÄŸiÅŸkeninden private key oku (geriye uyumluluk).
+    /// Ortam değişkeninden private key oku (geriye uyumluluk).
     ///
-    /// # GÃ¼venlik UyarÄ±sÄ±
-    /// Bu mod GÃœVENLÄ° DEÄÄ°LDÄ°R. Disk Ã¼zerinde .env dosyasÄ±nda dÃ¼z metin
-    /// private key bulunur. MÃ¼mkÃ¼n olan en kÄ±sa sÃ¼rede ÅŸifreli keystore'a
-    /// geÃ§iÅŸ yapÄ±lmalÄ±dÄ±r.
+    /// # Güvenlik Uyarısı
+    /// Bu mod GÜVENLİ DEĞİLDİR. Disk üzerinde .env dosyasında düz metin
+    /// private key bulunur. Mümkün olan en kısa sürede şifreli keystore'a
+    /// geçiş yapılmalıdır.
     pub fn load_from_env(env_key: &str) -> Result<Self> {
         let key = std::env::var(env_key)
             .ok()
@@ -267,128 +267,128 @@ impl KeyManager {
         }
     }
 
-    /// Otomatik yÃ¼kleme: Ã–nce keystore dene, yoksa env var'a dÃ¼ÅŸ.
+    /// Otomatik yükleme: Önce keystore dene, yoksa env var'a düş.
     ///
-    /// Ã–ncelik sÄ±rasÄ±:
-    /// 1. KEYSTORE_PATH env var â†’ ÅŸifreli dosyadan yÃ¼kle
-    /// 2. PRIVATE_KEY env var â†’ dÃ¼z metin (UYARI ile)
-    /// 3. HiÃ§biri â†’ key yok
+    /// Öncelik sırası:
+    /// 1. KEYSTORE_PATH env var → şifreli dosyadan yükle
+    /// 2. PRIVATE_KEY env var → düz metin (UYARI ile)
+    /// 3. Hiçbiri → key yok
     pub fn auto_load() -> Result<Self> {
-        // 1. Keystore dosyasÄ± var mÄ±?
+        // 1. Keystore dosyası var mı?
         let keystore_path = std::env::var("KEYSTORE_PATH")
             .ok()
             .filter(|p| !p.is_empty());
 
         if let Some(ref path) = keystore_path {
             if Path::new(path).exists() {
-                // ParolayÄ± al: env var veya terminal prompt
+                // Parolayı al: env var veya terminal prompt
                 let password = Self::get_password()?;
                 return Self::load_from_keystore(path, &password);
             }
         }
 
-        // 2. Ortam deÄŸiÅŸkeninden oku (geriye uyumluluk)
+        // 2. Ortam değişkeninden oku (geriye uyumluluk)
         let manager = Self::load_from_env("PRIVATE_KEY")?;
         if manager.has_key() {
             eprintln!(
-                "  âš ï¸  GÃœVENLÄ°K UYARISI: Private key dÃ¼z metin ortam deÄŸiÅŸkeninden okundu!"
+                "  ⚠️  GÜVENLİK UYARISI: Private key düz metin ortam değişkeninden okundu!"
             );
             eprintln!(
-                "  âš ï¸  Åifreli keystore'a geÃ§mek iÃ§in: cargo run -- --encrypt-key"
+                "  ⚠️  Şifreli keystore'a geçmek için: cargo run -- --encrypt-key"
             );
         }
 
         Ok(manager)
     }
 
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // EriÅŸim
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─────────────────────────────────────────────────────────────────────
+    // Erişim
+    // ─────────────────────────────────────────────────────────────────────
 
-    /// Private key'e eriÅŸim (bellekteki Ã§Ã¶zÃ¼lmÃ¼ÅŸ deÄŸer)
+    /// Private key'e erişim (bellekteki çözülmüş değer)
     pub fn private_key(&self) -> Option<&str> {
         self.decrypted_key.as_ref().map(|k| k.as_str())
     }
 
-    /// Key yÃ¼klÃ¼ mÃ¼?
+    /// Key yüklü mü?
     pub fn has_key(&self) -> bool {
         self.decrypted_key.is_some()
     }
 
-    /// Anahtar kaynaÄŸÄ±
+    /// Anahtar kaynağı
     pub fn source(&self) -> &KeySource {
         &self.source
     }
 
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // YardÄ±mcÄ±lar
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─────────────────────────────────────────────────────────────────────
+    // Yardımcılar
+    // ─────────────────────────────────────────────────────────────────────
 
-    /// ParolayÄ± ortam deÄŸiÅŸkeninden veya terminal'den al
+    /// Parolayı ortam değişkeninden veya terminal'den al
     fn get_password() -> Result<String> {
-        // Ã–nce env var dene (CI/CD ve otomatik deploy iÃ§in)
+        // Önce env var dene (CI/CD ve otomatik deploy için)
         if let Ok(pwd) = std::env::var("KEY_PASSWORD") {
             if !pwd.is_empty() {
                 return Ok(pwd);
             }
         }
 
-        // Terminal'den gÃ¼venli parola giriÅŸi
-        eprint!("ğŸ” Keystore parolassÄ±: ");
+        // Terminal'den güvenli parola girişi
+        eprint!("🔐 Keystore parolassı: ");
         rpassword::read_password()
-            .map_err(|e| eyre::eyre!("Parola okuma hatasÄ±: {}", e))
+            .map_err(|e| eyre::eyre!("Parola okuma hatası: {}", e))
     }
 
-    /// CLI: Private key'i ÅŸifreleyip keystore dosyasÄ±na kaydet
+    /// CLI: Private key'i şifreleyip keystore dosyasına kaydet
     ///
-    /// # KullanÄ±m
+    /// # Kullanım
     /// ```ignore
     /// KeyManager::cli_encrypt_key()?;
     /// ```
     pub fn cli_encrypt_key() -> Result<()> {
-        println!("\nğŸ” Private Key Åifreleme AracÄ±");
-        println!("â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€");
-        println!("Bu araÃ§ private key'inizi AES-256-GCM ile ÅŸifreler.");
-        println!("Åifreli dosya gÃ¼venle disk Ã¼zerinde saklanabilir.\n");
+        println!("\n🔐 Private Key Şifreleme Aracı");
+        println!("─────────────────────────────────────────");
+        println!("Bu araç private key'inizi AES-256-GCM ile şifreler.");
+        println!("Şifreli dosya güvenle disk üzerinde saklanabilir.\n");
 
         // Private key al
         eprint!("Private key (0x...): ");
         let private_key = rpassword::read_password()
-            .map_err(|e| eyre::eyre!("Private key okuma hatasÄ±: {}", e))?;
+            .map_err(|e| eyre::eyre!("Private key okuma hatası: {}", e))?;
 
         if private_key.is_empty() {
-            return Err(eyre::eyre!("Private key boÅŸ olamaz!"));
+            return Err(eyre::eyre!("Private key boş olamaz!"));
         }
 
-        // Parola al (iki kez, doÄŸrulama)
-        eprint!("Åifreleme parolasÄ±: ");
+        // Parola al (iki kez, doğrulama)
+        eprint!("Şifreleme parolası: ");
         let password = rpassword::read_password()
-            .map_err(|e| eyre::eyre!("Parola okuma hatasÄ±: {}", e))?;
-        eprint!("ParolayÄ± tekrar girin: ");
+            .map_err(|e| eyre::eyre!("Parola okuma hatası: {}", e))?;
+        eprint!("Parolayı tekrar girin: ");
         let password_confirm = rpassword::read_password()
-            .map_err(|e| eyre::eyre!("Parola okuma hatasÄ±: {}", e))?;
+            .map_err(|e| eyre::eyre!("Parola okuma hatası: {}", e))?;
 
         if password != password_confirm {
-            return Err(eyre::eyre!("Parolalar eÅŸleÅŸmiyor!"));
+            return Err(eyre::eyre!("Parolalar eşleşmiyor!"));
         }
 
         if password.len() < 8 {
-            return Err(eyre::eyre!("Parola en az 8 karakter olmalÄ±dÄ±r!"));
+            return Err(eyre::eyre!("Parola en az 8 karakter olmalıdır!"));
         }
 
         // Dosya yolu
         let path = std::env::var("KEYSTORE_PATH")
             .unwrap_or_else(|_| "keystore.enc".into());
 
-        // Åifrele ve kaydet
-        println!("\nâ³ Anahtar tÃ¼retiliyor (PBKDF2, {} iterasyon)...", PBKDF2_ITERATIONS);
+        // Şifrele ve kaydet
+        println!("\n⏳ Anahtar türetiliyor (PBKDF2, {} iterasyon)...", PBKDF2_ITERATIONS);
         Self::encrypt_and_save(&private_key, &password, &path)?;
 
-        println!("âœ… Keystore baÅŸarÄ±yla oluÅŸturuldu: {}", path);
-        println!("\nğŸ“‹ .env dosyanÄ±za ekleyin:");
+        println!("✅ Keystore başarıyla oluşturuldu: {}", path);
+        println!("\n📋 .env dosyanıza ekleyin:");
         println!("   KEYSTORE_PATH={}", path);
-        println!("   KEY_PASSWORD=<parolanÄ±z>  (veya runtime'da prompt)");
-        println!("\nâš ï¸  PRIVATE_KEY satÄ±rÄ±nÄ± .env'den SÄ°LMEYÄ° unutmayÄ±n!");
+        println!("   KEY_PASSWORD=<parolanız>  (veya runtime'da prompt)");
+        println!("\n⚠️  PRIVATE_KEY satırını .env'den SİLMEYİ unutmayın!");
 
         Ok(())
     }
@@ -396,15 +396,15 @@ impl KeyManager {
 
 impl Drop for KeyManager {
     fn drop(&mut self) {
-        // Zeroizing<String> otomatik olarak belleÄŸi temizler.
-        // Ek gÃ¼venlik: source bilgisini de temizle
+        // Zeroizing<String> otomatik olarak belleği temizler.
+        // Ek güvenlik: source bilgisini de temizle
         self.source = KeySource::None;
     }
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
 // Testler
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -417,16 +417,16 @@ mod tests {
         let password = "test_password_123";
         let path = "test_keystore_roundtrip.enc";
 
-        // Åifrele
+        // Şifrele
         KeyManager::encrypt_and_save(private_key, password, path).unwrap();
-        assert!(Path::new(path).exists(), "Keystore dosyasÄ± oluÅŸmalÄ±");
+        assert!(Path::new(path).exists(), "Keystore dosyası oluşmalı");
 
-        // Ã‡Ã¶z
+        // Çöz
         let manager = KeyManager::load_from_keystore(path, password).unwrap();
         assert_eq!(
             manager.private_key().unwrap(),
             private_key,
-            "Ã‡Ã¶zÃ¼len key orijinalle eÅŸleÅŸmeli"
+            "Çözülen key orijinalle eşleşmeli"
         );
 
         // Temizle
@@ -443,7 +443,7 @@ mod tests {
         KeyManager::encrypt_and_save(private_key, password, path).unwrap();
 
         let result = KeyManager::load_from_keystore(path, wrong_password);
-        assert!(result.is_err(), "YanlÄ±ÅŸ parola ile Ã§Ã¶zme baÅŸarÄ±sÄ±z olmalÄ±");
+        assert!(result.is_err(), "Yanlış parola ile çözme başarısız olmalı");
 
         fs::remove_file(path).ok();
     }
@@ -454,7 +454,7 @@ mod tests {
         fs::write(path, "this is not valid json").unwrap();
 
         let result = KeyManager::load_from_keystore(path, "any_password");
-        assert!(result.is_err(), "Bozuk dosya ile yÃ¼kleme baÅŸarÄ±sÄ±z olmalÄ±");
+        assert!(result.is_err(), "Bozuk dosya ile yükleme başarısız olmalı");
 
         fs::remove_file(path).ok();
     }
@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn test_env_var_fallback() {
-        // NONEXISTENT_KEY env var yok â†’ key yÃ¼klenmemeli
+        // NONEXISTENT_KEY env var yok → key yüklenmemeli
         let manager = KeyManager::load_from_env("NONEXISTENT_TEST_KEY_12345").unwrap();
         assert!(!manager.has_key());
     }
@@ -485,8 +485,8 @@ mod tests {
         let json1 = fs::read_to_string(path1).unwrap();
         let json2 = fs::read_to_string(path2).unwrap();
 
-        // Salt ve nonce rastgele â†’ ciphertext farklÄ± olmalÄ±
-        assert_ne!(json1, json2, "FarklÄ± key'ler farklÄ± ciphertext Ã¼retmeli");
+        // Salt ve nonce rastgele → ciphertext farklı olmalı
+        assert_ne!(json1, json2, "Farklı key'ler farklı ciphertext üretmeli");
 
         fs::remove_file(path1).ok();
         fs::remove_file(path2).ok();

@@ -10,7 +10,6 @@
 // ============================================================================
 
 use alloy::providers::{Provider, ProviderBuilder, RootProvider, WsConnect};
-use alloy::pubsub::PubSubFrontend;
 use eyre::Result;
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -24,7 +23,7 @@ use std::time::Duration;
 /// Tek bir RPC node'unun durumu
 struct NodeState {
     /// Provider instance (bağlantı kurulmuşsa) — v22.0: RwLock ile cache
-    provider: RwLock<Option<RootProvider<PubSubFrontend>>>,
+    provider: RwLock<Option<RootProvider>>,
     /// WebSocket URL'i
     url: String,
     /// Node sağlıklı mı? (atomik — lock-free okuma)
@@ -49,7 +48,7 @@ struct NodeState {
 ///   - En yüksek blok sayısına göre 2+ blok geride kalan node devre dışı bırakılır
 pub struct RpcPool {
     /// IPC provider (varsa — en düşük gecikme)
-    ipc_provider: RwLock<Option<RootProvider<PubSubFrontend>>>,
+    ipc_provider: RwLock<Option<RootProvider>>,
     /// IPC sağlıklı mı?
     ipc_healthy: AtomicBool,
     /// IPC yolu (reconnect için)
@@ -138,7 +137,7 @@ impl RpcPool {
 
     /// En düşük gecikmeli sağlıklı provider'ı döndür.
     /// Öncelik: IPC > Round-Robin WSS
-    pub async fn get_provider(&self) -> Result<RootProvider<PubSubFrontend>> {
+    pub async fn get_provider(&self) -> Result<RootProvider> {
         // 1. IPC sağlıklıysa onu kullan
         if self.ipc_healthy.load(Ordering::Acquire) {
             let guard = self.ipc_provider.read();
@@ -312,38 +311,77 @@ impl RpcPool {
 
     // ── İç Bağlantı Yardımcıları ────────────────────────────────────────────
 
-    /// IPC sokete bağlan
-    /// v22.0: IPC path tanımlıysa local WS proxy olarak kullanılır.
-    /// Alloy 0.1'de native IPC desteği yoktur — local node'un WS
-    /// endpointi üzerinden bağlantı kurulur (eşdeğer gecikme).
-    async fn try_connect_ipc(&self, ipc_path: &str) -> Result<RootProvider<PubSubFrontend>> {
-        // Alloy IPC provider — Base node'un IPC soketi
-        // Windows: \\.\pipe\geth.ipc
-        // Linux/Mac: /tmp/geth.ipc veya /path/to/base-node/geth.ipc
+    /// IPC sokete bağlan — gerçek Unix domain socket veya WSS/HTTP fallback.
+    ///
+    /// v25.0: Alloy IPC desteği ile gerçek IPC bağlantısı denenir.
+    /// IPC başarısız olursa sırasıyla WSS ve HTTP fallback uygulanır.
+    async fn try_connect_ipc(&self, ipc_path: &str) -> Result<RootProvider> {
+        // 1. Gerçek IPC soketi dene (Unix: /path/to/geth.ipc, Windows: \\.\pipe\geth.ipc)
+        if std::path::Path::new(ipc_path).exists() {
+            eprintln!(
+                "  ℹ️  IPC soket dosyası bulundu: {} — doğrudan IPC bağlantısı deneniyor",
+                ipc_path
+            );
+            match alloy::providers::IpcConnect::new(ipc_path.to_string()) {
+                ipc_connect => {
+                    match ProviderBuilder::default()
+                        .connect_ipc(ipc_connect)
+                        .await
+                    {
+                        Ok(provider) => {
+                            let _block = provider.get_block_number().await
+                                .map_err(|e| eyre::eyre!("IPC sağlık kontrolü başarısız: {}", e))?;
+                            eprintln!("  ✅ Gerçek IPC bağlantı başarılı: {}", ipc_path);
+                            return Ok(provider);
+                        }
+                        Err(e) => {
+                            eprintln!("  ⚠️  Gerçek IPC bağlantı başarısız: {} — WSS fallback deneniyor", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. WSS fallback — ipc_path bir URL olabilir (wss://...)
+        if ipc_path.starts_with("wss://") || ipc_path.starts_with("ws://") {
+            eprintln!("  ℹ️  IPC path URL formatında — WSS olarak bağlanılıyor: {}", ipc_path);
+            let ws = WsConnect::new(ipc_path);
+            let provider = ProviderBuilder::default()
+                .connect_ws(ws)
+                .await
+                .map_err(|e| eyre::eyre!("WSS bağlantı hatası ({}): {}", ipc_path, e))?;
+            let _block = provider.get_block_number().await
+                .map_err(|e| eyre::eyre!("WSS sağlık kontrolü başarısız: {}", e))?;
+            return Ok(provider);
+        }
+
+        // 3. HTTP fallback — ipc_path bir HTTP URL olabilir
+        if ipc_path.starts_with("http://") || ipc_path.starts_with("https://") {
+            eprintln!("  ℹ️  IPC path HTTP formatında — HTTP provider kullanılamaz (PubSub gerekli)");
+        }
+
+        // 4. Son çare: IPC dosyası bulunamadı, local WSS dene
         eprintln!(
-            "  ℹ️  IPC path '{}' tanımlı — Alloy 0.1 native IPC desteklemediğinden local WS proxy kullanılıyor",
+            "  ⚠️  IPC soket '{}' bulunamadı — local WSS fallback deneniyor (ws://127.0.0.1:8546)",
             ipc_path
         );
-        let ws_url = format!("ws://127.0.0.1:8546");
-
-        let ws = WsConnect::new(&ws_url);
-        let provider = ProviderBuilder::new()
-            .on_ws(ws)
+        let ws_url = "ws://127.0.0.1:8546";
+        let ws = WsConnect::new(ws_url);
+        let provider = ProviderBuilder::default()
+            .connect_ws(ws)
             .await
-            .map_err(|e| eyre::eyre!("IPC/Local WS bağlantı hatası ({}): {}", ipc_path, e))?;
-
-        // Bağlantı testi
+            .map_err(|e| eyre::eyre!("Local WSS fallback hatası: {}", e))?;
         let _block = provider.get_block_number().await
-            .map_err(|e| eyre::eyre!("IPC sağlık kontrolü başarısız: {}", e))?;
+            .map_err(|e| eyre::eyre!("Local WSS sağlık kontrolü başarısız: {}", e))?;
 
         Ok(provider)
     }
 
     /// WebSocket'e bağlan
-    async fn try_connect_ws(url: &str) -> Result<RootProvider<PubSubFrontend>> {
+    async fn try_connect_ws(url: &str) -> Result<RootProvider> {
         let ws = WsConnect::new(url);
-        let provider = ProviderBuilder::new()
-            .on_ws(ws)
+        let provider = ProviderBuilder::default()
+            .connect_ws(ws)
             .await
             .map_err(|e| eyre::eyre!("WSS bağlantı hatası ({}): {}", &url[..url.len().min(40)], e))?;
 

@@ -29,8 +29,6 @@
 
 use alloy::primitives::{address, Address, Bytes, U256};
 use alloy::providers::Provider;
-use alloy::transports::Transport;
-use alloy::network::Ethereum;
 use alloy::sol;
 use alloy::sol_types::SolCall;
 use eyre::Result;
@@ -248,7 +246,7 @@ const SYNC_MAX_RETRIES: u32 = 2;
 /// v10.0: slot0 ve liquidity sorguları artık paralel (tokio::join!)
 ///        Eski: 2 sıralı RPC çağrısı (2 RTT)
 ///        Yeni: 1 paralel çağrı (1 RTT) — blok başına ~2-5ms kazanç
-pub async fn sync_pool_state<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
+pub async fn sync_pool_state<P: Provider + Sync>(
     provider: &P,
     pool_config: &PoolConfig,
     pool_state: &SharedPoolState,
@@ -293,7 +291,7 @@ pub async fn sync_pool_state<T: Transport + Clone, P: Provider<T, Ethereum> + Sy
 }
 
 /// sync_pool_state iç implementasyonu (timeout wrapper'sız)
-async fn sync_pool_state_inner<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
+async fn sync_pool_state_inner<P: Provider + Sync>(
     provider: &P,
     pool_config: &PoolConfig,
     pool_state: &SharedPoolState,
@@ -314,8 +312,11 @@ async fn sync_pool_state_inner<T: Transport + Clone, P: Provider<T, Ethereum> + 
                 .map_err(|e| eyre::eyre!("[{}] slot0 okuma hatası (V3/7-alan/uint8): {}", pool_config.name, e))?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[{}] liquidity okuma hatası: {}", pool_config.name, e))?;
-            let fee_bps: Option<u32> = fee_result.ok().map(|f| f._0 / 100);
-            (slot0.sqrtPriceX96, slot0.tick, liq._0, fee_bps)
+            let fee_bps: Option<u32> = fee_result.ok().map(|f| {
+                let fee_u32: u32 = f.to();
+                fee_u32 / 100
+            });
+            (slot0.sqrtPriceX96, slot0.tick.as_i32(), liq, fee_bps)
         }
         DexType::PancakeSwapV3 => {
             let pool = IPancakeSwapV3Pool::new(pool_config.address, provider);
@@ -335,8 +336,11 @@ async fn sync_pool_state_inner<T: Transport + Clone, P: Provider<T, Ethereum> + 
                 ))?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[{}] liquidity okuma hatası: {}", pool_config.name, e))?;
-            let fee_bps: Option<u32> = fee_result.ok().map(|f| f._0 / 100);
-            (slot0.sqrtPriceX96, slot0.tick, liq._0, fee_bps)
+            let fee_bps: Option<u32> = fee_result.ok().map(|f| {
+                let fee_u32: u32 = f.to();
+                fee_u32 / 100
+            });
+            (slot0.sqrtPriceX96, slot0.tick.as_i32(), liq, fee_bps)
         }
         DexType::Aerodrome => {
             let pool = IAerodromePool::new(pool_config.address, provider);
@@ -356,8 +360,11 @@ async fn sync_pool_state_inner<T: Transport + Clone, P: Provider<T, Ethereum> + 
                 ))?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[{}] liquidity okuma hatası: {}", pool_config.name, e))?;
-            let fee_bps: Option<u32> = fee_result.ok().map(|f| f._0 / 100);
-            (slot0.sqrtPriceX96, slot0.tick, liq._0, fee_bps)
+            let fee_bps: Option<u32> = fee_result.ok().map(|f| {
+                let fee_u32: u32 = f.to();
+                fee_u32 / 100
+            });
+            (slot0.sqrtPriceX96, slot0.tick.as_i32(), liq, fee_bps)
         }
     };
 
@@ -434,7 +441,7 @@ fn extract_initialized_bits(word: U256, word_pos: i16, tick_spacing: i32) -> Vec
 ///   4. Tüm veriyi TickBitmapData yapısına paketler
 ///
 /// Performans: Eski: 30-50 ayrı RPC çağrısı → Yeni: 2 Multicall3 çağrısı (2 RTT)
-pub async fn sync_tick_bitmap<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
+pub async fn sync_tick_bitmap<P: Provider + Sync>(
     provider: &P,
     pool_config: &PoolConfig,
     pool_state: &SharedPoolState,
@@ -488,7 +495,7 @@ pub async fn sync_tick_bitmap<T: Transport + Clone, P: Provider<T, Ethereum> + S
             .map_err(|e| eyre::eyre!("[{}] Multicall3 tickBitmap hatası: {}", pool_config.name, e))?;
 
         // Sonuçları çözümle
-        for (i, result) in results.returnData.iter().enumerate() {
+        for (i, result) in results.iter().enumerate() {
             if result.success && result.returnData.len() >= 32 {
                 let word = U256::from_be_slice(&result.returnData[result.returnData.len()-32..]);
                 let word_pos = word_positions[i];
@@ -531,7 +538,7 @@ pub async fn sync_tick_bitmap<T: Transport + Clone, P: Provider<T, Ethereum> + S
             .map_err(|e| eyre::eyre!("[{}] Multicall3 ticks hatası: {}", pool_config.name, e))?;
 
         // Sonuçları çözümle
-        for (i, result) in tick_results.returnData.iter().enumerate() {
+        for (i, result) in tick_results.iter().enumerate() {
             if result.success && result.returnData.len() >= 64 {
                 // İlk 32 byte = liquidityGross (uint128), sonraki 32 byte = liquidityNet (int128)
                 // ABI decode: her parametre 32 byte padded
@@ -566,7 +573,7 @@ pub async fn sync_tick_bitmap<T: Transport + Clone, P: Provider<T, Ethereum> + S
 // Havuz Bytecode Önbellekleme (REVM Simülasyonu İçin)
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub async fn cache_pool_bytecode<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
+pub async fn cache_pool_bytecode<P: Provider + Sync>(
     provider: &P,
     pool_config: &PoolConfig,
     pool_state: &SharedPoolState,
@@ -586,7 +593,7 @@ pub async fn cache_pool_bytecode<T: Transport + Clone, P: Provider<T, Ethereum> 
 // Toplu Senkronizasyon
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub async fn sync_all_pools<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
+pub async fn sync_all_pools<P: Provider + Sync>(
     provider: &P,
     pools: &[PoolConfig],
     states: &[SharedPoolState],
@@ -667,7 +674,7 @@ pub async fn sync_all_pools<T: Transport + Clone, P: Provider<T, Ethereum> + Syn
 /// v28.0: 1000ms → 2000ms. Multicall3 2 RPC çağrısı yapar,
 /// yoğun dönemlerde 1s yetmeyebilir. Timeout durumunda eski bitmap
 /// geçerliliği staleness kontrolü ile yönetilir.
-pub async fn sync_all_tick_bitmaps<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
+pub async fn sync_all_tick_bitmaps<P: Provider + Sync>(
     provider: &P,
     pools: &[PoolConfig],
     states: &[SharedPoolState],
@@ -714,7 +721,7 @@ pub async fn sync_all_tick_bitmaps<T: Transport + Clone, P: Provider<T, Ethereum
 ///
 /// # Dönüş
 /// L1 data fee (wei). Hata/timeout durumunda önbellek, yoksa konservatif fallback döner.
-pub async fn estimate_l1_data_fee<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
+pub async fn estimate_l1_data_fee<P: Provider + Sync>(
     provider: &P,
 ) -> u128 {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -759,7 +766,7 @@ pub async fn estimate_l1_data_fee<T: Transport + Clone, P: Provider<T, Ethereum>
 }
 
 /// estimate_l1_data_fee iç implementasyonu (timeout wrapper'sız)
-async fn estimate_l1_data_fee_inner<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
+async fn estimate_l1_data_fee_inner<P: Provider + Sync>(
     provider: &P,
 ) -> u128 {
     const FALLBACK_FEE_WEI: u128 = 500_000_000_000_000; // 0.0005 ETH
@@ -775,8 +782,7 @@ async fn estimate_l1_data_fee_inner<T: Transport + Clone, P: Provider<T, Ethereu
         .call()
         .await
     {
-        Ok(result) => {
-            let fee = result._0;
+        Ok(fee) => {
             // U256 → u128 safe conversion
             if fee > alloy::primitives::U256::from(u128::MAX) {
                 u128::MAX
@@ -805,7 +811,7 @@ async fn estimate_l1_data_fee_inner<T: Transport + Clone, P: Provider<T, Ethereu
     }
 }
 
-pub async fn cache_all_bytecodes<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
+pub async fn cache_all_bytecodes<P: Provider + Sync>(
     provider: &P,
     pools: &[PoolConfig],
     states: &[SharedPoolState],
@@ -826,8 +832,11 @@ fn encode_tick_bitmap_call(_dex: DexType, word_pos: i16) -> Vec<u8> {
 ///   selector = keccak256("ticks(int24)")[0..4] = 0xf30dba93
 fn encode_ticks_call(_dex: DexType, tick: i32) -> Vec<u8> {
     // ticks(int24) — ABI: selector(4) + int24 padded to 32 bytes
-    // Alloy int24 = i32 olarak temsil eder
-    let call = IUniswapV3Pool::ticksCall { tick: tick.try_into().unwrap_or(0) };
+    // Alloy v1.7: int24 = Signed<24, 1> olarak temsil edilir
+    use alloy::primitives::Signed;
+    let tick_signed: Signed<24, 1> = Signed::try_from(tick as i64)
+        .unwrap_or(Signed::ZERO);
+    let call = IUniswapV3Pool::ticksCall { tick: tick_signed };
     IUniswapV3Pool::ticksCall::abi_encode(&call)
 }
 
@@ -944,7 +953,7 @@ pub fn check_pending_tx_relevance(
 /// - Ok(true): Durum güncellendi (yeni swap tespit edildi)
 /// - Ok(false): Güncelleme gerekmedi
 /// - Err: RPC hatası
-pub async fn optimistic_refresh_pool<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
+pub async fn optimistic_refresh_pool<P: Provider + Sync>(
     provider: &P,
     pool_config: &PoolConfig,
     pool_state: &SharedPoolState,
@@ -965,7 +974,7 @@ pub async fn optimistic_refresh_pool<T: Transport + Clone, P: Provider<T, Ethere
                 .map_err(|e| eyre::eyre!("[OPT:{}] slot0 okuma hatası (V3/uint8): {}", pool_config.name, e))?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[OPT:{}] liquidity okuma hatası: {}", pool_config.name, e))?;
-            (slot0.sqrtPriceX96, slot0.tick, liq._0)
+            (slot0.sqrtPriceX96, slot0.tick.as_i32(), liq)
         }
         DexType::PancakeSwapV3 => {
             let pool = IPancakeSwapV3Pool::new(pool_config.address, provider);
@@ -979,7 +988,7 @@ pub async fn optimistic_refresh_pool<T: Transport + Clone, P: Provider<T, Ethere
                 .map_err(|e| eyre::eyre!("[OPT:{}] slot0 okuma hatası (PCS-V3/uint32): {}", pool_config.name, e))?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[OPT:{}] liquidity okuma hatası: {}", pool_config.name, e))?;
-            (slot0.sqrtPriceX96, slot0.tick, liq._0)
+            (slot0.sqrtPriceX96, slot0.tick.as_i32(), liq)
         }
         DexType::Aerodrome => {
             let pool = IAerodromePool::new(pool_config.address, provider);
@@ -993,7 +1002,7 @@ pub async fn optimistic_refresh_pool<T: Transport + Clone, P: Provider<T, Ethere
                 .map_err(|e| eyre::eyre!("[OPT:{}] slot0 okuma hatası (Aero/6-alan): {}", pool_config.name, e))?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[OPT:{}] liquidity okuma hatası: {}", pool_config.name, e))?;
-            (slot0.sqrtPriceX96, slot0.tick, liq._0)
+            (slot0.sqrtPriceX96, slot0.tick.as_i32(), liq)
         }
     };
 
@@ -1154,7 +1163,7 @@ pub fn process_swap_event_log(
 ///
 /// # Dönüş
 /// Bu fonksiyon sonsuz döngüde çalışır. Bağlantı koparsa Err döner.
-pub async fn start_swap_event_listener<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
+pub async fn start_swap_event_listener<P: Provider + Sync>(
     provider: &P,
     pools: &[PoolConfig],
     states: &[SharedPoolState],

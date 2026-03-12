@@ -1,13 +1,13 @@
 // ============================================================================
-//  EXECUTOR v20.0 — MEV Korumalı İşlem Gönderimi (Yalnızca Private RPC)
+//  EXECUTOR v25.0 — Base L2 Private RPC İşlem Gönderimi
 //
 //  Özellikler:
-//  ✓ eth_sendBundle (Flashbots/Private RPC) ile sandwich koruması
-//  ✓ v20.0: PGA fallback TAMAMEN KALDIRILDI — L1 Data Fee kanaması önlenir
-//  ✓ Private RPC yoksa veya başarısızsa işlem İPTAL EDİLİR
+//  ✓ eth_sendRawTransaction (Private RPC endpoint) ile sandwich koruması
+//  ✓ v25.0: eth_sendBundle KALDIRILDI — Base L2'de Flashbots builder YOK
+//  ✓ Private RPC yoksa işlem İPTAL EDİLİR
 //  ✓ Fire-and-forget receipt bekleme (pipeline bloke olmaz)
-//  ✓ 4s timeout (Base 2s blok süresi × 2)
-//  ✓ Dinamik bribe hesabı (kârın %25'i validator'a tip)
+//  ✓ 10s timeout (5 blok Base L2)
+//  ✓ Dinamik bribe hesabı (kârın %25'i priority fee olarak)
 //  ✓ Zero-copy calldata referansları
 //  ✓ unwrap() yasak — tüm hatalar eyre ile yönetilir
 // ============================================================================
@@ -18,31 +18,9 @@ use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::network::EthereumWallet;
 use eyre::Result;
-use serde::Serialize;
 use std::sync::Arc;
 
 use crate::types::*;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// MEV Bundle Yapıları (Flashbots uyumlu JSON-RPC)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// eth_sendBundle isteği (Flashbots / MEV-Share / Private RPC uyumlu)
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BundleRequest {
-    /// İmzalanmış raw transaction listesi (hex encoded)
-    txs: Vec<String>,
-    /// Hedef blok numarası (hex)
-    block_number: String,
-    /// Opsiyonel: Minimum timestamp
-    #[serde(skip_serializing_if = "Option::is_none")]
-    min_timestamp: Option<u64>,
-    /// Opsiyonel: Maksimum timestamp
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_timestamp: Option<u64>,
-}
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MEV Korumalı Executor
@@ -50,27 +28,26 @@ struct BundleRequest {
 
 /// MEV-korumalı işlem yürütücüsü (Yalnızca Private RPC).
 ///
-/// İşlem gönderme stratejisi:
-///   1. Private/Flashbots RPC varsa → eth_sendBundle dene
-///   2. Bundle başarısızsa → İşlem İPTAL (v20.0: PGA fallback kaldırıldı)
-///   3. Private RPC yoksa → İşlem İPTAL (gönderilmez)
+/// v25.0 Kritik Değişiklik:
+///   Base L2 (Coinbase Sequencer) geleneksel Flashbots Builder yapısını
+///   desteklemez. eth_sendBundle işlemleri sessizce yutulur/reddedilir.
+///   Bunun yerine, Private RPC endpoint'ine (ör: Flashbots Protect)
+///   eth_sendRawTransaction ile EIP-1559 TX gönderilir.
 ///
-/// v20.0 Kritik Değişiklik:
-///   PGA (Public Mempool) fallback tamamen kaldırıldı.
-///   L2 ağlarında (Base) public mempool'da revert olan işlemler
-///   gas ödemese dahi L1 Data Fee ödemek zorundadır.
-///   Bu durum cüzdanın sürekli L1 ücretleriyle kanamasına yol açıyordu.
+/// İşlem gönderme stratejisi:
+///   1. Private RPC varsa → eth_sendRawTransaction (gizli endpoint)
+///   2. Private RPC yoksa → İşlem İPTAL (gönderilmez)
 ///
 /// Bribe (validator tip) hesabı:
 ///   - Kârın dinamik yüzdesi (%25 base, margin'e göre uyarlanır)
 ///   - Priority fee olarak TX'e eklenir
 ///   - Base L2 FIFO: priority fee sıralama belirler
 pub struct MevExecutor {
-    /// Private/Flashbots RPC URL (eth_sendBundle için)
-    /// Örn: https://relay.flashbots.net veya özel builder endpoint
+    /// Private RPC URL (eth_sendRawTransaction için)
+    /// Örn: https://rpc.flashbots.net/fast?chainId=8453
     private_rpc_url: Option<String>,
-    /// Standart RPC URL (v23.0: receipt polling private RPC'ye taşındı)
-        standard_rpc_url: String,
+    /// Standart RPC URL (whitelist TX, receipt polling)
+    standard_rpc_url: String,
     /// Dinamik bribe yüzde tabanı (0.25 = %25)
     base_bribe_pct: f64,
 }
@@ -104,7 +81,7 @@ impl MevExecutor {
     /// # Akış
     /// 1. TX oluştur (calldata + dinamik bribe priority fee)
     /// 2. TX'i imzala
-    /// 3. Private RPC varsa → eth_sendBundle
+    /// 3. Private RPC varsa → eth_sendRawTransaction
     /// 4. Private RPC yoksa veya başarısızsa → İşlem İPTAL EDİLİR
     ///
     /// v20.0 KRİTİK DEĞİŞİKLİK: PGA (Public Mempool) fallback TAMAMEN KALDIRILDI.
@@ -122,7 +99,7 @@ impl MevExecutor {
         simulated_gas: u64,
         block_base_fee: u64,
         current_block: u64,
-        nonce_manager: &Arc<NonceManager>,
+        _nonce_manager: &Arc<NonceManager>,
     ) -> Result<String> {
         // 1. Dinamik bribe hesabı
         let bribe_info = self.compute_dynamic_bribe(
@@ -132,7 +109,7 @@ impl MevExecutor {
         );
 
         // 2. TX oluştur
-        let gas_limit = ((simulated_gas as f64) * 1.10) as u128;
+        let gas_limit = ((simulated_gas as f64) * 1.10) as u64;
         let gas_limit = gas_limit.max(100_000);
 
         let max_fee = {
@@ -165,94 +142,59 @@ impl MevExecutor {
             .map_err(|_| eyre::eyre!("Geçersiz private key"))?;
         let wallet = EthereumWallet::from(signer.clone());
 
-        // 4. Gönder — YALNIZCA Private RPC. PGA fallback v20.0'da kaldırıldı.
+        // 4. Gönder — YALNIZCA Private RPC (eth_sendRawTransaction).
         //
-        // v20.0: L2 ağlarında (Base) public mempool'a düşen işlemler:
-        //   - Sandviç saldırısına açıktır
-        //   - Revert olsa bile L1 Data Fee ödemek zorundadır (~0.001-0.01 ETH)
-        //   - Bu durum cüzdanın sürekli L1 ücretleri ile kanamasına yol açar
-        //
-        // Çözüm: Private RPC yoksa veya başarısızsa işlem İPTAL EDİLİR.
+        // v25.0: Base L2'de Flashbots builder yapısı yoktur.
+        // İşlemler Private RPC endpoint'ine eth_sendRawTransaction ile gönderilir.
+        // Private RPC yoksa işlem İPTAL EDİLİR.
         if let Some(ref private_url) = self.private_rpc_url {
-            match self.send_bundle(
+            match self.send_private_tx(
                 private_url,
                 &wallet,
-                &signer,
                 tx.clone(),
                 current_block,
-                nonce_manager,
             ).await {
                 Ok(hash) => Ok(hash),
                 Err(e) => {
-                    // v22.1: rollback kaldırıldı — race condition riski.
-                    // Periyodik nonce sync (50 blokta bir) yeterli.
                     eprintln!(
-                        "     ❌ [v20.0] Private RPC bundle başarısız — işlem İPTAL EDİLDİ: {}",
+                        "     ❌ [v25.0] Private RPC TX başarısız — işlem İPTAL EDİLDİ: {}",
                         e
                     );
-                    eprintln!(
-                        "     ⛔ [v20.0] PGA fallback devre dışı — L1 Data Fee kanaması önlendi"
-                    );
-                    Err(eyre::eyre!("Private RPC bundle başarısız, PGA fallback devre dışı: {}", e))
+                    Err(eyre::eyre!("Private RPC TX başarısız: {}", e))
                 }
             }
         } else {
-            // v22.1: rollback kaldırıldı — race condition riski.
             eprintln!(
-                "     ❌ [v20.0] PRIVATE_RPC_URL tanımlı değil — işlem İPTAL EDİLDİ"
-            );
-            eprintln!(
-                "     ⛔ [v20.0] Public mempool gönderimi devre dışı — L1 Data Fee kanaması önlendi"
+                "     ❌ [v25.0] PRIVATE_RPC_URL tanımlı değil — işlem İPTAL EDİLDİ"
             );
             Err(eyre::eyre!("Private RPC URL tanımlı değil. Güvenlik nedeniyle public mempool'a gönderilmez."))
         }
     }
 
-    // v20.0: send_pga_fallback() KALDIRILDI — public mempool gönderimi
-    // L2 ağlarında L1 Data Fee kanama riski oluşturuyordu.
-    // Tüm işlemler yalnızca Private RPC (eth_sendBundle) üzerinden gönderilir.
-    // Bundle başarısız olursa → işlem iptal edilir.
-    // v22.1: nonce rollback kaldırıldı — race condition riski.
-    // Periyodik nonce sync (50 blokta bir) nonce tutarlılığını sağlar.
-
-    /// eth_sendBundle ile Flashbots/Private builder'a gönder.
+    /// eth_sendRawTransaction ile Private RPC endpoint'ine gönder.
     ///
-    /// v22.1 KRİTİK DÜZELTME:
-    ///   - TX artık public mempool'a GÖNDERİLMEZ
-    ///   - TX, on_http(private_rpc_url) ile YALNIZCA private endpoint'e gider
-    ///   - Ek olarak eth_sendBundle ile aynı private RPC'ye bundle POST edilir
-    ///   - Standard RPC'ye HİÇBİR TX gönderilmez
-    async fn send_bundle(
+    /// v25.0: Base L2 (Coinbase Sequencer) eth_sendBundle desteklemez.
+    /// Bunun yerine, EIP-1559 formatında imzalanmış TX, private endpoint'e
+    /// (ör: https://rpc.flashbots.net/fast?chainId=8453) standart
+    /// eth_sendRawTransaction metodu ile POST edilir.
+    ///
+    /// TX yalnızca private endpoint'e ulaşır, public mempool'a DÜŞMEZ.
+    async fn send_private_tx(
         &self,
         private_rpc_url: &str,
         wallet: &EthereumWallet,
-        signer: &PrivateKeySigner,
         tx: TransactionRequest,
         current_block: u64,
-        _nonce_manager: &Arc<NonceManager>,
     ) -> Result<String> {
-        let target_block = current_block + 1;
-        let target_block_hex = format!("0x{:x}", target_block);
-
-        // v23.0 KRİTİK DÜZELTME (K-1): Bundle txs alanına raw signed TX konulur.
-        // Eski: provider.send_transaction() ile hash alınıp txs'e konuyordu — HATALI.
-        // eth_sendBundle spec'i txs alanında raw signed TX hex'i ister, hash değil.
-        //
-        // Yeni akış:
-        //   1. TX'i private RPC üzerinden gönder (imzala + send)
-        //   2. Aynı TX'i raw hex olarak al
-        //   3. Bundle txs alanına raw hex koy
-        //   4. Bundle'ı private RPC'ye POST et
         let private_url: reqwest::Url = private_rpc_url.parse()
             .map_err(|e| eyre::eyre!("Private RPC URL parse hatası: {}", e))?;
         let provider = ProviderBuilder::new()
-            .with_recommended_fillers()
             .wallet(wallet.clone())
-            .on_http(private_url);
+            .connect_http(private_url);
 
         // TX'i private RPC üzerinden gönder (imzala + eth_sendRawTransaction)
         // TX yalnızca private endpoint'e ulaşır, public mempool'a DÜŞMEZ
-        let pending = provider.send_transaction(tx.clone())
+        let pending = provider.send_transaction(tx)
             .await
             .map_err(|e| eyre::eyre!("Private RPC TX gönderim hatası: {}", e))?;
 
@@ -260,134 +202,17 @@ impl MevExecutor {
         let tx_hash_alloy = *pending.tx_hash();
         drop(pending);
 
-        // v23.0 (K-1): raw signed TX'i oluştur ve RLP encode et.
-        // EIP-1559 TX oluştur, PrivateKeySigner ile imzala, raw bytes al.
-        let raw_tx_hex = {
-            use alloy::consensus::{TxEip1559, SignableTransaction, TxEnvelope};
-            use alloy::signers::Signer;
-
-            let input_data = tx.input.input().cloned().unwrap_or_default();
-            // to alanı — TransactionRequest'teki TxKind'dan Address çıkar
-            let to_addr = match tx.to {
-                Some(alloy::primitives::TxKind::Call(addr)) => alloy::primitives::TxKind::Call(addr),
-                other => other.unwrap_or(alloy::primitives::TxKind::Create),
-            };
-
-            let eip1559_tx = TxEip1559 {
-                chain_id: 8453, // Base chain ID
-                nonce: tx.nonce.unwrap_or(0),
-                gas_limit: tx.gas.unwrap_or(100_000),
-                max_fee_per_gas: tx.max_fee_per_gas.unwrap_or(1_000_000_000),
-                max_priority_fee_per_gas: tx.max_priority_fee_per_gas.unwrap_or(1_000_000),
-                to: to_addr,
-                input: input_data,
-                ..Default::default()
-            };
-
-            match signer.sign_hash(&eip1559_tx.signature_hash()).await {
-                Ok(signature) => {
-                    let signed = eip1559_tx.into_signed(signature);
-                    let envelope = TxEnvelope::Eip1559(signed);
-                    let raw_bytes = alloy::eips::eip2718::Encodable2718::encoded_2718(&envelope);
-                    format!("0x{}", alloy::primitives::hex::encode(&raw_bytes))
-                }
-                Err(e) => {
-                    // İmzalama başarısız olursa TX hash'ini kullan (degraded mode)
-                    eprintln!("     ⚠️  Raw TX oluşturma hatası (bundle degraded mode): {}", e);
-                    tx_hash.clone()
-                }
-            }
-        };
-
-        // v23.0: Bundle txs alanına raw signed TX hex konulur (hash değil!)
-        let bundle = BundleRequest {
-            txs: vec![raw_tx_hex.clone()],
-            block_number: target_block_hex.clone(),
-            min_timestamp: None,
-            max_timestamp: None,
-        };
-
-        let bundle_json = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "eth_sendBundle",
-            "params": [bundle]
-        });
-
-        // HTTP POST ile private RPC'ye gönder
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .map_err(|e| eyre::eyre!("HTTP client oluşturma hatası: {}", e))?;
-
-        match http_client
-            .post(private_rpc_url)
-            .header("Content-Type", "application/json")
-            .json(&bundle_json)
-            .send()
-            .await
-        {
-            Ok(response) => {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                if !status.is_success() {
-                    eprintln!(
-                        "     ⚠️  Private RPC yanıt hatası (HTTP {}): {}",
-                        status, &body[..body.len().min(200)]
-                    );
-                } else if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
-                    if let Some(error) = parsed.get("error") {
-                        eprintln!("     ⚠️  eth_sendBundle RPC hatası: {}", error);
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("     ⚠️  Private RPC HTTP POST hatası: {}", e);
-            }
-        }
-
         eprintln!(
-            "     📦 Bundle gönderildi → blok #{} | private RPC: {}",
-            target_block,
-            &private_rpc_url[..private_rpc_url.len().min(40)]
+            "     📤 TX gönderildi → blok #{} | private RPC: {}",
+            current_block + 1,
+            &private_rpc_url[..private_rpc_url.len().min(50)]
         );
 
-        // Sonraki blok için de gönder (düşme ihtimaline karşı)
-        let next_target_hex = format!("0x{:x}", target_block + 1);
-        let next_bundle = BundleRequest {
-            txs: vec![raw_tx_hex],
-            block_number: next_target_hex,
-            min_timestamp: None,
-            max_timestamp: None,
-        };
-
-        let next_bundle_json = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "eth_sendBundle",
-            "params": [next_bundle]
-        });
-
-        // Yedek bundle'ı da gönder (hata kritik değil)
-        let _ = http_client
-            .post(private_rpc_url)
-            .header("Content-Type", "application/json")
-            .json(&next_bundle_json)
-            .send()
-            .await;
-
-        eprintln!("     📦 Yedek bundle → blok #{}", target_block + 1);
-
         // Fire-and-forget: Receipt bekleme arka plana taşınır
-        // v22.0: Timeout 4s → 10s (5 blok). Nonce rollback kaldırıldı —
-        // periyodik nonce sync (50 blokta bir) yeterli, race condition önlenir.
-        // v23.0 (Y-2): Receipt polling private RPC üzerinden yapılır.
-        // Standard RPC kullanmak TX sızıntısına yol açabilir.
         let rpc_url_clone = private_rpc_url.to_string();
         let hash_clone = tx_hash.clone();
         tokio::spawn(async move {
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-            // v23.0 (Y-2): Receipt polling private RPC HTTP üzerinden yapılır
             let poll_url: reqwest::Url = match rpc_url_clone.parse() {
                 Ok(u) => u,
                 Err(e) => {
@@ -395,16 +220,16 @@ impl MevExecutor {
                     return;
                 }
             };
-            let poll_provider = ProviderBuilder::new().on_http(poll_url);
+            let poll_provider = ProviderBuilder::new().connect_http(poll_url);
             loop {
                 if tokio::time::Instant::now() > deadline {
-                    eprintln!("     ⏰ Bundle timeout (10s) — TX dahil edilmemiş olabilir: {}", &hash_clone);
+                    eprintln!("     ⏰ TX timeout (10s) — dahil edilmemiş olabilir: {}", &hash_clone);
                     break;
                 }
                 match poll_provider.get_transaction_receipt(tx_hash_alloy).await {
                     Ok(Some(receipt)) => {
                         eprintln!(
-                            "     ✅ Bundle dahil edildi: blok #{}",
+                            "     ✅ TX dahil edildi: blok #{}",
                             receipt.block_number.unwrap_or_default()
                         );
                         break;
@@ -413,7 +238,7 @@ impl MevExecutor {
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
                     Err(e) => {
-                        eprintln!("     ⚠️  Bundle receipt hatası: {}", e);
+                        eprintln!("     ⚠️  TX receipt hatası: {}", e);
                         break;
                     }
                 }
@@ -423,17 +248,6 @@ impl MevExecutor {
         Ok(tx_hash)
     }
 
-    // ── PGA Fallback Güvenlik Notu (v20.0) ──────────────────────────────
-    // v20.0: PGA (Public Mempool) fallback TAMAMEN KALDIRILDI.
-    //
-    // L2 ağlarında (Base, OP Stack) public mempool riski:
-    //   - Sandviç saldırısına açık TX'ler
-    //   - Revert olsa bile L1 Data Fee ödenmek zorunda (~0.001-0.01 ETH)
-    //   - Sürekli revert + L1 fee = cüzdan kanaması
-    //
-    // Çözüm: Bot, Private/Flashbots RPC olmadan ASLA işlem göndermez.
-    // send_pga_fallback() fonksiyonu kaldırıldı.
-    // ───────────────────────────────────────────────────────────────────────
     // ── Dinamik Bribe Hesabı ─────────────────────────────────────────────────
 
     /// Bribe hesaplama sonucu

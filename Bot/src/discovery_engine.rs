@@ -535,7 +535,7 @@ async fn factory_listener(
     config: &DiscoveryConfig,
 ) -> Result<()> {
     let ws = WsConnect::new(&config.wss_url);
-    let provider = ProviderBuilder::new().on_ws(ws).await
+    let provider = ProviderBuilder::new().connect_ws(ws).await
         .map_err(|e| eyre::eyre!("Factory listener WSS bağlantı hatası: {}", e))?;
 
     // Dinlenecek factory adresleri
@@ -873,6 +873,21 @@ async fn discover_dexscreener(config: &DiscoveryConfig) -> Result<Vec<PendingPoo
         .await
         .map_err(|e| eyre::eyre!("DexScreener istek hatası: {}", e))?;
 
+    // v25.0: Rate limiting — 429 Too Many Requests durumunda exponential backoff
+    if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after = resp.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60);
+        eprintln!(
+            "  ⚠️ [DexScreener] Rate limit (429) — {}s bekleniyor",
+            retry_after
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
+        return Err(eyre::eyre!("DexScreener rate limit (429) — retry-after: {}s", retry_after));
+    }
+
     if !resp.status().is_success() {
         return Err(eyre::eyre!("DexScreener HTTP {}", resp.status()));
     }
@@ -1029,6 +1044,21 @@ async fn discover_gecko_terminal(config: &DiscoveryConfig) -> Result<Vec<Pending
         .send()
         .await
         .map_err(|e| eyre::eyre!("GeckoTerminal istek hatası: {}", e))?;
+
+    // v25.0: Rate limiting — 429 Too Many Requests durumunda exponential backoff
+    if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after = resp.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60);
+        eprintln!(
+            "  ⚠️ [GeckoTerminal] Rate limit (429) — {}s bekleniyor",
+            retry_after
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
+        return Err(eyre::eyre!("GeckoTerminal rate limit (429) — retry-after: {}s", retry_after));
+    }
 
     if !resp.status().is_success() {
         return Err(eyre::eyre!("GeckoTerminal HTTP {}", resp.status()));

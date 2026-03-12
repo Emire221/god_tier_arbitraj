@@ -17,16 +17,22 @@
 //    4. Sonuç: Success → işlem gönder / Revert → işlemi atla
 // ============================================================================
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, Bytes as RevmBytes, U256};
 use alloy::hex;
 
 use revm::{
-    Evm, InMemoryDB,
-    primitives::{
-        AccountInfo, Bytecode, ExecutionResult, TransactTo, SpecId,
-        Address as RevmAddress, U256 as RevmU256, Bytes as RevmBytes,
-    },
+    database::InMemoryDB,
+    state::AccountInfo,
+    bytecode::Bytecode,
+    context::{Context, Journal},
+    context_interface::result::ExecutionResult,
+    handler::{MainBuilder, ExecuteEvm},
+    primitives::hardfork::SpecId,
 };
+
+// revm v36: Address/U256/Bytes artık alloy primitives — dönüşüm gereksiz
+type RevmAddress = Address;
+type RevmU256 = U256;
 
 use crate::types::{DexType, PoolConfig, SharedPoolState, SimulationResult};
 use crate::math;
@@ -35,15 +41,16 @@ use crate::math;
 // Tip Dönüşüm Yardımcıları
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// alloy Address → revm Address (aynı alloy-primitives, doğrudan dönüşüm)
+/// alloy Address → revm Address (revm v36: aynı tip, dönüşüm gereksiz)
+#[inline]
 fn to_revm_addr(addr: Address) -> RevmAddress {
-    RevmAddress::from_slice(addr.as_slice())
+    addr
 }
 
-/// alloy U256 → revm U256 (alanlar aynı — doğrudan dönüşüm)
+/// alloy U256 → revm U256 (revm v36: aynı tip, dönüşüm gereksiz)
+#[inline]
 fn to_revm_u256(val: U256) -> RevmU256 {
-    let bytes = val.to_be_bytes::<32>();
-    RevmU256::from_be_bytes(bytes)
+    val
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -403,52 +410,58 @@ impl SimulationEngine {
         // v10.0: Timestamp ve base_fee artık zincir verisinden dinamik olarak gelir.
         //        Eski: SystemTime::now() → yanlış zaman damgası, base_fee yok
         //        Yeni: block_header.timestamp ve block_header.base_fee_per_gas
-        let mut evm = Evm::builder()
-            .with_db(db)
-            .with_spec_id(SpecId::CANCUN)
-            .modify_cfg_env(|cfg| {
+        //
+        // revm v36: Context + TxEnv builder pattern
+        use revm::context::TxEnv;
+        use revm::primitives::TxKind;
+
+        let ctx: Context<revm::context::BlockEnv, _, _, InMemoryDB, Journal<InMemoryDB>, ()> = Context::new(db, SpecId::CANCUN)
+            .modify_cfg_chained(|cfg| {
                 cfg.chain_id = self.chain_id; // v22.1: config'den, hardcoded değil
             })
-            .modify_block_env(|block| {
+            .modify_block_chained(|block: &mut revm::context::BlockEnv| {
                 block.number = RevmU256::from(current_block);
                 block.timestamp = RevmU256::from(block_timestamp);
-                block.basefee = RevmU256::from(block_base_fee);
-            })
-            .modify_tx_env(|tx| {
-                tx.caller = to_revm_addr(caller);
-                tx.transact_to = TransactTo::Call(to_revm_addr(contract_address));
-                tx.data = RevmBytes::from(calldata);
-                tx.value = to_revm_u256(value_wei);
-                tx.gas_limit = 1_500_000;
-                tx.nonce = None; // Nonce kontrolünü atla
-            })
-            .build();
+                block.basefee = block_base_fee;
+            });
+
+        let tx = TxEnv::builder()
+            .caller(to_revm_addr(caller))
+            .kind(TxKind::Call(to_revm_addr(contract_address)))
+            .data(RevmBytes::from(calldata))
+            .value(to_revm_u256(value_wei))
+            .gas_limit(1_500_000)
+            .nonce(0)
+            .build()
+            .expect("TxEnv build failed");
+
+        let mut evm = ctx.build_mainnet();
 
         // 3. İşlemi çalıştır
-        match evm.transact() {
+        match evm.transact(tx) {
             Ok(result_and_state) => {
                 match result_and_state.result {
-                    ExecutionResult::Success { gas_used, .. } => {
+                    ExecutionResult::Success { gas, .. } => {
                         SimulationResult {
                             success: true,
-                            gas_used,
+                            gas_used: gas.spent(),
                             error: None,
                         }
                     }
-                    ExecutionResult::Revert { gas_used, output } => {
+                    ExecutionResult::Revert { gas, output, .. } => {
                         SimulationResult {
                             success: false,
-                            gas_used,
+                            gas_used: gas.spent(),
                             error: Some(format!(
                                 "REVERT: 0x{}",
                                 output.iter().map(|b| format!("{:02x}", b)).collect::<String>()
                             )),
                         }
                     }
-                    ExecutionResult::Halt { reason, gas_used } => {
+                    ExecutionResult::Halt { reason, gas, .. } => {
                         SimulationResult {
                             success: false,
-                            gas_used,
+                            gas_used: gas.spent(),
                             error: Some(format!("HALT: {:?}", reason)),
                         }
                     }

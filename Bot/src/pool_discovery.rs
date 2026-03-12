@@ -204,13 +204,29 @@ async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> 
         .build()
         .map_err(|e| eyre::eyre!("HTTP client hatası: {}", e))?;
 
-    let resp: DexScreenerResponse = client
+    let resp = client
         .get(&url)
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| eyre::eyre!("DexScreener API hatası: {}", e))?
-        .json()
+        .map_err(|e| eyre::eyre!("DexScreener API hatası: {}", e))?;
+
+    // v25.0: Rate limiting — 429 Too Many Requests durumunda backoff
+    if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after = resp.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60);
+        eprintln!(
+            "  ⚠️ [DexScreener] Rate limit (429) — {}s bekleniyor",
+            retry_after
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
+        return Err(eyre::eyre!("Rate limit (429)"));
+    }
+
+    let resp: DexScreenerResponse = resp.json()
         .await
         .map_err(|e| eyre::eyre!("JSON parse hatası: {}", e))?;
 

@@ -1,18 +1,15 @@
 // ============================================================================
-//  ARBITRAJ BOTU v6.0 — "Kuantum Beyin II"
+//  ARBITRAJ BOTU v25.0 — "Kuantum Beyin IV"
 //  Base Network Çapraz-DEX Arbitraj Sistemi
 //
-//  v6.0 Devrim Niteliğinde Yenilikler:
+//  v25.0 Yenilikler:
+//  ✓ eth_sendRawTransaction (Private RPC) — Flashbots bundle kaldırıldı
+//  ✓ Multi-hop arbitraj yürütme (3+ havuzlu triangular/quad)
+//  ✓ Gerçek IPC bağlantı desteği (Alloy native IPC)
+//  ✓ Otonom Keşif: Factory WSS + Multi-API + Skorlama + GC
 //  ✓ Off-Chain TickBitmap Derinlik Simülasyonu (Gerçek Multi-Tick)
 //  ✓ Multi-Transport Bağlantı (IPC > WSS > HTTP — Sub-1ms Hedefi)
 //  ✓ Base L2 Sequencer Optimizasyonu (FIFO-Aware)
-//  ✓ Gecikme Ölçümü ve İstatistikleri
-//
-//  v5.0 (korunuyor):
-//  ✓ Yerel Durum Senkronizasyonu (Event/Mempool yerine State Sync)
-//  ✓ REVM ile Yerel Simülasyon (eth_call yerine — 0 gecikme)
-//  ✓ Newton-Raphson Optimal Hacim (Sabit TRADE_SIZE yerine — Dinamik)
-//  ✓ Uniswap V3 + Aerodrome CL çapraz-DEX desteği
 //  ✓ Modüler mimari (types, math, state_sync, simulator, strategy)
 // ============================================================================
 
@@ -376,7 +373,7 @@ PRIVATE_RPC_URL=
 # ─── Maliyet ve Strateji (WETH cinsinden) ───
 GAS_COST_FALLBACK_WETH=0.00005
 FLASH_LOAN_FEE_BPS=0.0
-MIN_NET_PROFIT_WETH=0.0001
+MIN_NET_PROFIT_WETH=0.0005
 MAX_TRADE_SIZE_WETH=5.0
 MAX_STALENESS_MS=3000
 STATS_INTERVAL=10
@@ -713,7 +710,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     ));
     if config.private_rpc_url.is_some() {
         println!(
-            "  {} MEV Koruması: {} (eth_sendBundle aktif)",
+            "  {} MEV Koruması: {} (eth_sendRawTransaction aktif)",
             "🛡️".green(),
             "AKTİF".green().bold()
         );
@@ -919,9 +916,8 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             let calldata = crate::executor::encode_whitelist_calldata(&all_pool_addrs);
             if let (Some(ref pk), Some(contract_addr)) = (&config.private_key, config.contract_address) {
                 let startup_base_fee = provider
-                    .get_block(
-                        alloy::eips::BlockNumberOrTag::Latest.into(),
-                        alloy::rpc::types::BlockTransactionsKind::Hashes,
+                    .get_block_by_number(
+                        alloy::eips::BlockNumberOrTag::Latest,
                     )
                     .await
                     .ok()
@@ -1023,7 +1019,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                 }
                 _result = async {
                     let ws = WsConnect::new(&rpc_url_ev);
-                    match ProviderBuilder::new().on_ws(ws).await {
+                    match ProviderBuilder::default().connect_ws(ws).await {
                         Ok(ws_provider) => {
                             match state_sync::start_swap_event_listener(
                                 &ws_provider,
@@ -1104,11 +1100,11 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         };
 
         let block_start = Instant::now();
-        let block_number = block_header.header.number.unwrap_or(0);
+        let block_number = block_header.number;
 
         // v10.0: Dinamik timestamp ve base_fee — zincir verisinden
-        let block_timestamp = block_header.header.timestamp;
-        let block_base_fee = block_header.header.base_fee_per_gas
+        let block_timestamp = block_header.timestamp;
+        let block_base_fee = block_header.base_fee_per_gas
             .unwrap_or(0) as u64;
 
         // ── 1. DURUM SENKRONİZASYONU + L1 FEE + TİCKBİTMAP (PARALEL) ────
@@ -1440,10 +1436,9 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             );
         }
 
-        // ── 4. MULTI-HOP ROTA TARAMASI (v29.0: Shadow Mode) ──────────────
+        // ── 4. MULTI-HOP ROTA TARAMASI (v25.0: Simülasyon + Yürütme) ─────
         //    LiquidityGraph'ı mevcut havuz verileriyle oluştur,
-        //    3+ hop rotalarını tara ve kârlı olanları logla.
-        //    Henüz yürütme YOKTUR — sadece gözlem ve log.
+        //    3+ hop rotalarını tara ve kârlı olanları yürüt.
         if all_synced && block_number % 3 == 0 {
             let graph = route_engine::LiquidityGraph::build(pools, &states, config.weth_address);
             let routes = graph.find_routes(4, 200);
@@ -1507,6 +1502,25 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                         best.nr_iterations,
                         if best.nr_converged { "converged" } else { "scan" },
                     );
+
+                    // v25.0: Multi-hop fırsatı değerlendir ve yürüt
+                    if let Some(gas) = strategy::evaluate_and_execute_multi_hop(
+                        &provider,
+                        config,
+                        pools,
+                        &states,
+                        best,
+                        &sim_engine,
+                        &mut stats,
+                        &nonce_manager,
+                        block_timestamp,
+                        block_base_fee,
+                        sync_ms as f64,
+                        l1_data_fee_wei,
+                        &mev_executor,
+                    ).await {
+                        last_simulated_gas = Some(gas);
+                    }
                 }
             }
         }
@@ -1571,20 +1585,22 @@ async fn pending_tx_listener(
     use alloy::providers::WsConnect;
 
     let ws = WsConnect::new(rpc_url);
-    let provider = ProviderBuilder::new().on_ws(ws).await
+    let provider = ProviderBuilder::default().connect_ws(ws).await
         .map_err(|e| eyre::eyre!("Pending TX provider bağlantı hatası: {}", e))?;
 
     println!("  {} Pending TX dinleyici başlatıldı (optimistic mode)", "🔮".cyan());
 
     // Pending TX stream — full TX nesneleri ile
-    let sub = provider.subscribe_full_pending_transactions().await
+    let sub: alloy::pubsub::Subscription<alloy::rpc::types::Transaction> = provider.subscribe_full_pending_transactions().await
         .map_err(|e| eyre::eyre!("Pending TX abonelik hatası: {}", e))?;
     let mut stream = sub.into_stream();
 
     while let Some(tx) = stream.next().await {
         // TX'in hedef adresi izlenen havuzlardan biri mi?
-        let tx_to = tx.to;
-        let tx_input = &tx.input;
+        use alloy::consensus::Transaction as TxTrait;
+        let tx_kind = TxTrait::kind(&*tx.inner);
+        let tx_to = tx_kind.to().copied();
+        let tx_input = TxTrait::input(&*tx.inner);
 
         if let Some(pool_idx) = state_sync::check_pending_tx_relevance(
             tx_to,
@@ -1653,7 +1669,7 @@ async fn whitelist_pools_on_chain(
     let ws = alloy::providers::WsConnect::new(mev_executor.standard_rpc_url());
     let provider = ProviderBuilder::new()
         .wallet(wallet)
-        .on_ws(ws).await
+        .connect_ws(ws).await
         .map_err(|e| eyre::eyre!("Whitelist TX: provider hatası: {}", e))?;
 
     let max_fee = block_base_fee as u128 + 1_000_000_000; // base_fee + 1 Gwei tip

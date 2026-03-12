@@ -534,7 +534,7 @@ pub struct BotConfig {
     /// Bu değerin üzerinde gecikme loglanır.
     pub latency_spike_threshold_ms: f64,
     /// v10.0: Private/Flashbots RPC URL (MEV koruması için)
-    /// Tanımlıysa eth_sendBundle kullanılır, değilse public mempool
+    /// Tanımlıysa eth_sendRawTransaction kullanılır, yoksa işlem İPTAL EDİLİR
     pub private_rpc_url: Option<String>,
     /// v10.0: Ek WSS RPC URL'leri (Round-Robin havuz için)
     /// Primary + backup dışında 3. endpoint

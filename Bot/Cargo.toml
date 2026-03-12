@@ -1,6 +1,6 @@
 [package]
 name = "arbitraj_botu"
-version = "23.0.0"
+version = "25.0.0"
 edition = "2021"
 
 [dependencies]
@@ -9,10 +9,17 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 
 # ── Blockchain Etkileşimi (Alloy — En Hızlı Rust EVM Kütüphanesi) ──
-alloy = { version = "0.1", features = ["full"] }
+alloy = { version = "1.7", default-features = false, features = [
+    "std", "reqwest", "reqwest-rustls-tls",
+    "contract", "providers", "provider-http",
+    "provider-ws", "provider-ipc", "pubsub",
+    "rpc-types", "signer-local", "signers",
+    "network", "eips", "sol-types", "json-abi",
+    "json", "dyn-abi", "serde", "rlp",
+] }
 
 # ── Yerel EVM Simülasyonu (REVM — Sıfır Gecikme) ──
-revm = { version = "9", default-features = false, features = ["std"] }
+revm = { version = "36", default-features = false, features = ["std", "c-kzg"] }
 
 # ── Veri İşleme ──
 serde = { version = "1.0", features = ["derive"] }

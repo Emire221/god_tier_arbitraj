@@ -780,6 +780,32 @@ contract ArbitrajBotu {
             amountReceived = amount0Delta < 0 ? uint256(-amount0Delta) : 0;
         }
 
+        // ── v25.0: Fee-on-Transfer Token Koruması (Multi-Hop) ────────────
+        //    Legacy 2-pool callback'teki aynı koruma. Transfer sırasında
+        //    vergi/kesinti uygulayan tokenlar için delta'dan gelen miktar
+        //    ile gerçek bakiye arasında fark olabilir. Gerçek bakiyeyi oku.
+        if (amountReceived > 0) {
+            address receivedTokenAddr;
+            if (amount0Delta > 0) {
+                // token0 borçlu → token1 alındı
+                receivedTokenAddr = IUniswapV3Pool(msg.sender).token1();
+            } else {
+                // token1 borçlu → token0 alındı
+                receivedTokenAddr = IUniswapV3Pool(msg.sender).token0();
+            }
+            uint256 actualBalance;
+            assembly {
+                mstore(0x00, 0x70a0823100000000000000000000000000000000000000000000000000000000)
+                mstore(0x04, address())
+                let ok := staticcall(gas(), receivedTokenAddr, 0x00, 0x24, 0x00, 0x20)
+                if or(iszero(ok), lt(returndatasize(), 0x20)) { revert(0, 0) }
+                actualBalance := mload(0x00)
+            }
+            if (actualBalance < amountReceived) {
+                amountReceived = actualBalance;
+            }
+        }
+
         // Sonraki hop varsa → zincirleme swap yap
         if (currentHop < hopCount) {
             address nextPool;
@@ -851,20 +877,50 @@ contract ArbitrajBotu {
     ///      Güvenlik: Executor zaten sadece whitelistteki havuzlara TX atabilir.
     ///      Executor key çalınsa bile en kötü ihtimal yeni havuz eklenmesidir —
     ///      kontrat fonlarına erişim hâlâ imkansızdır.
+    /// @dev v25.0: Factory doğrulaması — havuzun factory() çağrısı bilinen
+    ///      bir factory adresini döndürmelidir. Aksi halde sahte havuz eklenmesi engellenir.
     /// @param pool Whiteliste eklenecek havuz adresi
     function executorAddPool(address pool) external {
         if (msg.sender != executor) revert Unauthorized();
         if (pool == address(0)) revert ZeroAddress();
+        _verifyPoolFactory(pool);
         poolWhitelist[pool] = true;
     }
 
     /// @notice v25.0: Executor toplu havuz ekleme (otonom keşif batch modu)
+    /// @dev v25.0: Factory doğrulaması her havuz için uygulanır.
     /// @param pools Whiteliste eklenecek havuz adresleri dizisi
     function executorBatchAddPools(address[] calldata pools) external {
         if (msg.sender != executor) revert Unauthorized();
         for (uint256 i; i < pools.length; ++i) {
             if (pools[i] == address(0)) revert ZeroAddress();
+            _verifyPoolFactory(pools[i]);
             poolWhitelist[pools[i]] = true;
+        }
+    }
+
+    /// @dev Havuzun factory() çağrısının bilinen bir factory adresi döndürdüğünü doğrula.
+    ///      Base L2 bilinen factory'ler:
+    ///        - Uniswap V3: 0x33128a8fC17869897dcE68Ed026d694621f6FDfD
+    ///        - Aerodrome Slipstream: 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A
+    ///        - PancakeSwap V3: 0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865
+    ///      Sahte havuz ekleme saldırısını önler.
+    function _verifyPoolFactory(address pool) internal view {
+        address poolFactory;
+        assembly {
+            // factory() selector = 0xc45a0155
+            mstore(0x00, 0xc45a015500000000000000000000000000000000000000000000000000000000)
+            let ok := staticcall(gas(), pool, 0x00, 0x04, 0x00, 0x20)
+            if or(iszero(ok), lt(returndatasize(), 0x20)) { revert(0, 0) }
+            poolFactory := mload(0x00)
+        }
+        // Bilinen factory'lerden biri olmalı
+        if (
+            poolFactory != 0x33128a8fC17869897dcE68Ed026d694621f6FDfD && // Uniswap V3
+            poolFactory != 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A && // Aerodrome Slipstream
+            poolFactory != 0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865    // PancakeSwap V3
+        ) {
+            revert InvalidCaller(); // Bilinmeyen factory — sahte havuz
         }
     }
 

@@ -1,29 +1,27 @@
-﻿// ============================================================================
-//  STRATEGY v18.0 — Arbitraj Strateji Motoru + L1 Data Fee + Fire-and-Forget
+// ============================================================================
+//  STRATEGY v18.0 � Arbitraj Strateji Motoru + L1 Data Fee + Fire-and-Forget
 //
 //  v18.0 Yenilikler:
-//  ✓ L1 Data Fee (OP Stack) entegrasyonu — total_gas = L2 + L1
-//  ✓ GasPriceOracle.getL1Fee() ile doğru maliyet tahmini
-//  ✓ Fire-and-forget TX receipt bekleme (4s timeout, pipeline bloke olmaz)
-//  ✓ PGA fallback uyumlu bribe hesabı
+//  ? L1 Data Fee (OP Stack) entegrasyonu � total_gas = L2 + L1
+//  ? GasPriceOracle.getL1Fee() ile do�ru maliyet tahmini
+//  ? Fire-and-forget TX receipt bekleme (4s timeout, pipeline bloke olmaz)
+//  ? PGA fallback uyumlu bribe hesab�
 //
 //  v9.0 (korunuyor):
-//  ✓ 134-byte kompakt calldata (kontrat v9.0 uyumlu, deadlineBlock dahil)
-//  ✓ Deadline block hesaplama (current_block + config.deadline_blocks)
-//  ✓ Dinamik bribe/priority fee modeli (beklenen kârın %25'i)
-//  ✓ KeyManager entegrasyonu (raw private key yerine şifreli yönetim)
+//  ? 134-byte kompakt calldata (kontrat v9.0 uyumlu, deadlineBlock dahil)
+//  ? Deadline block hesaplama (current_block + config.deadline_blocks)
+//  ? Dinamik bribe/priority fee modeli (beklenen k�r�n %25'i)
+//  ? KeyManager entegrasyonu (raw private key yerine �ifreli y�netim)
 //
 //  v7.0 (korunuyor):
-//  ✓ owedToken / receivedToken / minProfit hesaplama
-//  ✓ Atomik nonce yönetimi entegrasyonu
-//  ✓ TickBitmap-aware Newton-Raphson optimizasyonu
-//  ✓ Raw TX gönderi (sol! interface yerine TransactionRequest)
+//  ? owedToken / receivedToken / minProfit hesaplama
+//  ? Atomik nonce y�netimi entegrasyonu
+//  ? TickBitmap-aware Newton-Raphson optimizasyonu
+//  ? Raw TX g�nderi (sol! interface yerine TransactionRequest)
 // ============================================================================
 
 use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
-use alloy::transports::Transport;
-use alloy::network::Ethereum;
 use alloy::signers::local::PrivateKeySigner;
 use colored::*;
 use chrono::Local;
@@ -36,24 +34,24 @@ use crate::simulator::SimulationEngine;
 
 use zeroize::Zeroize;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Zaman Damgası
-// ─────────────────────────────────────────────────────────────────────────────
+// �����������������������������������������������������������������������������
+// Zaman Damgas�
+// �����������������������������������������������������������������������������
 
 fn timestamp() -> String {
     Local::now().format("%H:%M:%S%.3f").to_string()
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Arbitraj Fırsat Tespiti
-// ─────────────────────────────────────────────────────────────────────────────
+// �����������������������������������������������������������������������������
+// Arbitraj F�rsat Tespiti
+// �����������������������������������������������������������������������������
 
-/// Her iki havuzun fiyatlarını karşılaştır ve fırsat varsa tespit et
+/// Her iki havuzun fiyatlar�n� kar��la�t�r ve f�rsat varsa tespit et
 ///
-/// Fırsat Koşulları:
+/// F�rsat Ko�ullar�:
 ///   1. Her iki havuz aktif ve veriler taze
-///   2. Fiyat farkı (spread) > minimum eşik
-///   3. Newton-Raphson ile hesaplanan kâr > minimum net kâr
+///   2. Fiyat fark� (spread) > minimum e�ik
+///   3. Newton-Raphson ile hesaplanan k�r > minimum net k�r
 pub fn check_arbitrage_opportunity(
     pools: &[PoolConfig],
     states: &[SharedPoolState],
@@ -66,7 +64,7 @@ pub fn check_arbitrage_opportunity(
         return None;
     }
 
-    // Read lock — çok kısa süreli
+    // Read lock � �ok k�sa s�reli
     let state_a = states[0].read().clone();
     let state_b = states[1].read().clone();
 
@@ -75,17 +73,17 @@ pub fn check_arbitrage_opportunity(
         return None;
     }
 
-    // Veri tazeliği kontrolü
+    // Veri tazeli�i kontrol�
     if state_a.staleness_ms() > config.max_staleness_ms
         || state_b.staleness_ms() > config.max_staleness_ms
     {
         return None;
     }
 
-    // ─── v19.0: Havuz Komisyon Güvenlik Tavanı (Sadece Uyarı) ─────
-    // v19.0: Statik fee reddi kaldırıldı. Komisyon filtresi artık
-    // PreFilter'ın dinamik net kârlılık hesabının parçası.
-    // Sadece çok yüksek fee'li havuzlarda (>max_pool_fee_bps) güvenlik reddi.
+    // ��� v19.0: Havuz Komisyon G�venlik Tavan� (Sadece Uyar�) �����
+    // v19.0: Statik fee reddi kald�r�ld�. Komisyon filtresi art�k
+    // PreFilter'�n dinamik net k�rl�l�k hesab�n�n par�as�.
+    // Sadece �ok y�ksek fee'li havuzlarda (>max_pool_fee_bps) g�venlik reddi.
     {
         let fee_a_bps = state_a.live_fee_bps.unwrap_or(pools[0].fee_bps);
         let fee_b_bps = state_b.live_fee_bps.unwrap_or(pools[1].fee_bps);
@@ -96,7 +94,7 @@ pub fn check_arbitrage_opportunity(
             );
             return None;
         }
-        // v19.0: Yüksek ama kabul edilebilir fee'ler loglansın
+        // v19.0: Y�ksek ama kabul edilebilir fee'ler loglans�n
         let total_fee_bps = fee_a_bps + fee_b_bps;
         if total_fee_bps > 30 {
             eprintln!(
@@ -118,30 +116,30 @@ pub fn check_arbitrage_opportunity(
         return None;
     };
 
-    // L1 data fee → WETH (tüm gas hesaplarında kullanılacak)
+    // L1 data fee � WETH (t�m gas hesaplar�nda kullan�lacak)
     let l1_data_fee_weth = l1_data_fee_wei as f64 / 1e18;
 
-    // ─── v27.0: Yön + Likidite → PreFilter sıralama düzeltmesi ───
-    // Önce yön ve havuz derinliğini hesapla, sonra PreFilter'a besle.
-    // Eski hata: PreFilter statik 25 WETH probe ile çalışıyor, havuz sığ
-    // olduğunda sahte kâr tahmini üretiyordu. Şimdi effective_cap
-    // PreFilter'dan ÖNCE hesaplanır ve probe_amount olarak kullanılır.
+    // ��� v27.0: Y�n + Likidite � PreFilter s�ralama d�zeltmesi ���
+    // �nce y�n ve havuz derinli�ini hesapla, sonra PreFilter'a besle.
+    // Eski hata: PreFilter statik 25 WETH probe ile �al���yor, havuz s��
+    // oldu�unda sahte k�r tahmini �retiyordu. �imdi effective_cap
+    // PreFilter'dan �NCE hesaplan�r ve probe_amount olarak kullan�l�r.
 
-    // Yön belirleme: Ucuzdan al, pahalıya sat
+    // Y�n belirleme: Ucuzdan al, pahal�ya sat
     let (buy_idx, sell_idx) = if price_a < price_b {
-        (0, 1) // A ucuz, B pahalı
+        (0, 1) // A ucuz, B pahal�
     } else {
-        (1, 0) // B ucuz, A pahalı
+        (1, 0) // B ucuz, A pahal�
     };
 
     let buy_state = if buy_idx == 0 { &state_a } else { &state_b };
     let sell_state = if sell_idx == 0 { &state_a } else { &state_b };
     let avg_price_in_quote = (price_a + price_b) / 2.0;
 
-    // ─── TickBitmap referansları (varsa + v28.0: tazelik doğrulaması) ─
-    // v28.0: TickBitmap'in yaşı tick_bitmap_max_age_blocks'u aşıyorsa
-    // eski veri kullanmak yerine None döndür → single-tick fallback.
-    // Eski bitmap ile hesaplama hatalı likidite tahmini ve MEV açığı yaratır.
+    // ��� TickBitmap referanslar� (varsa + v28.0: tazelik do�rulamas�) �
+    // v28.0: TickBitmap'in ya�� tick_bitmap_max_age_blocks'u a��yorsa
+    // eski veri kullanmak yerine None d�nd�r � single-tick fallback.
+    // Eski bitmap ile hesaplama hatal� likidite tahmini ve MEV a���� yarat�r.
     let current_block = sell_state.last_block.max(buy_state.last_block);
     let bitmap_max_age = config.tick_bitmap_max_age_blocks;
 
@@ -149,7 +147,7 @@ pub fn check_arbitrage_opportunity(
         let age = current_block.saturating_sub(bm.snapshot_block);
         if age > bitmap_max_age {
             eprintln!(
-                "     \u{26a0}\u{fe0f} [TickBitmap] Sell havuzu bitmap'i eski ({} blok) — tek-tick fallback",
+                "     \u{26a0}\u{fe0f} [TickBitmap] Sell havuzu bitmap'i eski ({} blok) � tek-tick fallback",
                 age,
             );
             false
@@ -161,7 +159,7 @@ pub fn check_arbitrage_opportunity(
         let age = current_block.saturating_sub(bm.snapshot_block);
         if age > bitmap_max_age {
             eprintln!(
-                "     \u{26a0}\u{fe0f} [TickBitmap] Buy havuzu bitmap'i eski ({} blok) — tek-tick fallback",
+                "     \u{26a0}\u{fe0f} [TickBitmap] Buy havuzu bitmap'i eski ({} blok) � tek-tick fallback",
                 age,
             );
             false
@@ -170,10 +168,10 @@ pub fn check_arbitrage_opportunity(
         }
     });
 
-    // ─── v11.0: Hard Liquidity Cap — PreFilter + NR Öncesi Havuz Derinlik Kontrolü ─
-    // Havuzun gerçek mevcut likiditesini hesapla (TickBitmap'ten).
-    // WETH/USDC havuzlarında 18 vs 6 decimal uyumsuzluğu burada yakalanır.
-    // v27.0: effective_cap artık PreFilter'a da beslenir (probe_amount).
+    // ��� v11.0: Hard Liquidity Cap � PreFilter + NR �ncesi Havuz Derinlik Kontrol� �
+    // Havuzun ger�ek mevcut likiditesini hesapla (TickBitmap'ten).
+    // WETH/USDC havuzlar�nda 18 vs 6 decimal uyumsuzlu�u burada yakalan�r.
+    // v27.0: effective_cap art�k PreFilter'a da beslenir (probe_amount).
     let sell_hard_cap = math::exact::hard_liquidity_cap_weth(
         sell_state.sqrt_price_x96,
         sell_state.liquidity,
@@ -192,45 +190,45 @@ pub fn check_arbitrage_opportunity(
     );
     let effective_cap = sell_hard_cap.min(buy_hard_cap);
 
-    // v28.0: Sığ havuz çıkış kapısı — effective_cap ile gas maliyetini karşılaştır.
-    // Havuz derinliği gas maliyetinin 10 katından azsa, kârlı işlem imkânsız.
-    // Bu erken çıkış, NR + PreFilter hesaplamalarını tamamen atlar → CPU tasarrufu.
+    // v28.0: S�� havuz ��k�� kap�s� � effective_cap ile gas maliyetini kar��la�t�r.
+    // Havuz derinli�i gas maliyetinin 10 kat�ndan azsa, k�rl� i�lem imk�ns�z.
+    // Bu erken ��k��, NR + PreFilter hesaplamalar�n� tamamen atlar � CPU tasarrufu.
     if effective_cap <= 0.001 {
         eprintln!(
-            "     \u{23ed}\u{fe0f} [Liquidity] Yetersiz likidite — NR atlanıyor (cap={:.6} WETH)",
+            "     \u{23ed}\u{fe0f} [Liquidity] Yetersiz likidite � NR atlan�yor (cap={:.6} WETH)",
             effective_cap,
         );
         return None;
     }
 
-    // v28.0: Dinamik likidite uyarısı + ekonomik uygulanabilirlik kontrolü
+    // v28.0: Dinamik likidite uyar�s� + ekonomik uygulanabilirlik kontrol�
     if effective_cap < config.max_trade_size_weth * 0.1 {
         eprintln!(
-            "     \u{26a0}\u{fe0f} [Liquidity] Havuz derinliği sığ: sell_cap={:.4} buy_cap={:.4} effective_cap={:.4} WETH (MAX_TRADE={:.1})",
+            "     \u{26a0}\u{fe0f} [Liquidity] Havuz derinli�i s��: sell_cap={:.4} buy_cap={:.4} effective_cap={:.4} WETH (MAX_TRADE={:.1})",
             sell_hard_cap, buy_hard_cap, effective_cap, config.max_trade_size_weth,
         );
-        // v28.0: Sığ havuzda gas maliyetini karşılayacak spread var mı?
-        // Kaba tahmin: effective_cap * spread_pct/100 < min_net_profit → kesinlikle kârsız
+        // v28.0: S�� havuzda gas maliyetini kar��layacak spread var m�?
+        // Kaba tahmin: effective_cap * spread_pct/100 < min_net_profit � kesinlikle k�rs�z
         let max_possible_gross = effective_cap * spread_pct / 100.0;
         if max_possible_gross < config.min_net_profit_weth {
             eprintln!(
-                "     \u{23ed}\u{fe0f} [EconViability] Sığ havuz + düşük spread → kâr imkânsız: max_gross={:.8} < min_profit={:.8} WETH",
+                "     \u{23ed}\u{fe0f} [EconViability] S�� havuz + d���k spread � k�r imk�ns�z: max_gross={:.8} < min_profit={:.8} WETH",
                 max_possible_gross, config.min_net_profit_weth,
             );
             return None;
         }
     }
 
-    // ─── v19.0: O(1) PreFilter — NR'ye girmeden hızlı eleme ───
-    // Spread'in fee + gas + bribe maliyetlerini kurtarıp kurtaramayacağını
-    // mikrosaniyede kontrol eder. v27.0: probe_amount artık havuzun gerçek
-    // likiditesine (effective_cap) göre sınırlandırılır.
+    // ��� v19.0: O(1) PreFilter � NR'ye girmeden h�zl� eleme ���
+    // Spread'in fee + gas + bribe maliyetlerini kurtar�p kurtaramayaca��n�
+    // mikrosaniyede kontrol eder. v27.0: probe_amount art�k havuzun ger�ek
+    // likiditesine (effective_cap) g�re s�n�rland�r�l�r.
     {
-        // Dinamik gas cost (PreFilter için) — L2 + L1 + %20 güvenlik marjı
+        // Dinamik gas cost (PreFilter i�in) � L2 + L1 + %20 g�venlik marj�
         let gas_estimate: u64 = last_simulated_gas.unwrap_or(200_000);
         let prefilter_gas_cost_weth = if block_base_fee > 0 {
             let l2 = (gas_estimate as f64 * block_base_fee as f64) / 1e18;
-            // v19.0: %20 güvenlik marjı (gas tahminindeki belirsizlik)
+            // v19.0: %20 g�venlik marj� (gas tahminindeki belirsizlik)
             ((l2 + l1_data_fee_weth) * 1.20).max(0.00002)
         } else {
             ((config.gas_cost_fallback_weth + l1_data_fee_weth) * 1.20).max(0.00002)
@@ -239,27 +237,27 @@ pub fn check_arbitrage_opportunity(
         let pre_filter = math::PreFilter {
             fee_a: state_a.live_fee_bps.map(|b| b as f64 / 10_000.0).unwrap_or(pools[0].fee_fraction),
             fee_b: state_b.live_fee_bps.map(|b| b as f64 / 10_000.0).unwrap_or(pools[1].fee_fraction),
-            // v19.0: Gas + bribe maliyeti (bribe = kârın %25'i, en kötü senaryo)
+            // v19.0: Gas + bribe maliyeti (bribe = k�r�n %25'i, en k�t� senaryo)
             estimated_gas_cost_weth: prefilter_gas_cost_weth,
             min_profit_weth: config.min_net_profit_weth,
             flash_loan_fee_rate: config.flash_loan_fee_bps / 10_000.0,
-            // v26.0: PreFilter bribe — config değeri + %10 konservatif marj.
-            // Eski v22.0: .max(0.50) → config %25 iken %50 zorluyor, geçerli
-            // tight-spread fırsatlarını haksız yere reddediyordu.
-            // Yeni: config.bribe_pct * 1.10 → %25 config → %27.5 PreFilter.
-            // Gas maliyetinde zaten %20 güvenlik marjı var (üstte).
+            // v26.0: PreFilter bribe � config de�eri + %10 konservatif marj.
+            // Eski v22.0: .max(0.50) � config %25 iken %50 zorluyor, ge�erli
+            // tight-spread f�rsatlar�n� haks�z yere reddediyordu.
+            // Yeni: config.bribe_pct * 1.10 � %25 config � %27.5 PreFilter.
+            // Gas maliyetinde zaten %20 g�venlik marj� var (�stte).
             bribe_pct: config.bribe_pct * 1.10,
         };
 
-        // v27.0: Gerçek havuz derinliğine göre sınırlandırılmış probe miktarı
-        // Eski: config.max_trade_size_weth * 0.5 (statik, havuz derinliğini yok sayıyordu)
-        // Yeni: min(max_trade * 0.5, effective_cap) → sığ havuzlarda sahte kâr tahmini önlenir
+        // v27.0: Ger�ek havuz derinli�ine g�re s�n�rland�r�lm�� probe miktar�
+        // Eski: config.max_trade_size_weth * 0.5 (statik, havuz derinli�ini yok say�yordu)
+        // Yeni: min(max_trade * 0.5, effective_cap) � s�� havuzlarda sahte k�r tahmini �nlenir
         let probe_amount = f64::min(config.max_trade_size_weth * 0.5, effective_cap);
 
         match pre_filter.check(price_a, price_b, probe_amount) {
             math::PreFilterResult::Unprofitable { reason } => {
                 eprintln!(
-                    "     {} [PreFilter] Spread {:.4}% → {:?} | fee_total={:.3}% | gas={:.8} WETH | probe={:.4} WETH",
+                    "     {} [PreFilter] Spread {:.4}% � {:?} | fee_total={:.3}% | gas={:.8} WETH | probe={:.4} WETH",
                     "\u{23ed}\u{fe0f}",
                     spread_pct,
                     reason,
@@ -271,7 +269,7 @@ pub fn check_arbitrage_opportunity(
             }
             math::PreFilterResult::Profitable { estimated_profit_weth, spread_ratio } => {
                 eprintln!(
-                    "     {} [PreFilter] GEÇTI | spread_ratio={:.6} | est_profit={:.8} WETH | probe={:.4} WETH → NR'ye devam",
+                    "     {} [PreFilter] GE�TI | spread_ratio={:.6} | est_profit={:.8} WETH | probe={:.4} WETH � NR'ye devam",
                     "\u{2705}",
                     spread_ratio,
                     estimated_profit_weth,
@@ -281,37 +279,37 @@ pub fn check_arbitrage_opportunity(
         }
     }
 
-    // ─── Dinamik Gas Cost (v19.0) ─────────────────────────────────
-    // Formül: total_gas = L2_execution_fee + L1_data_fee + güvenlik marjı
+    // ��� Dinamik Gas Cost (v19.0) ���������������������������������
+    // Form�l: total_gas = L2_execution_fee + L1_data_fee + g�venlik marj�
     //   L2: gas_cost_weth = (gas_estimate * base_fee) / 1e18
     //   L1: l1_data_fee_wei (GasPriceOracle.getL1Fee() sonucu)
     //
-    // OP Stack ağlarında (Base) asıl maliyet L1 data fee'dir.
-    // L2 execution fee genelde çok düşüktür (~0.001 Gwei base_fee).
-    // L1 data fee'yi hesaba katmamak botun zararına işlem yapmasına yol açar.
-    // v19.0: %20 güvenlik marjı eklendi — gas spike'larında zarara girmemek için.
+    // OP Stack a�lar�nda (Base) as�l maliyet L1 data fee'dir.
+    // L2 execution fee genelde �ok d���kt�r (~0.001 Gwei base_fee).
+    // L1 data fee'yi hesaba katmamak botun zarar�na i�lem yapmas�na yol a�ar.
+    // v19.0: %20 g�venlik marj� eklendi � gas spike'lar�nda zarara girmemek i�in.
     let dynamic_gas_cost_weth = if block_base_fee > 0 {
         let gas_estimate: u64 = last_simulated_gas.unwrap_or(200_000);
         let l2_gas_cost_weth = (gas_estimate as f64 * block_base_fee as f64) / 1e18;
-        // Toplam: (L2 execution + L1 data fee) × 1.20 güvenlik marjı
+        // Toplam: (L2 execution + L1 data fee) � 1.20 g�venlik marj�
         ((l2_gas_cost_weth + l1_data_fee_weth) * 1.20).max(0.00002)
     } else {
         ((config.gas_cost_fallback_weth + l1_data_fee_weth) * 1.20).max(0.00002)
     };
 
-    // Gas cost'u quote cinsine çevir (NR için)
+    // Gas cost'u quote cinsine �evir (NR i�in)
     let dynamic_gas_cost_quote = dynamic_gas_cost_weth * avg_price_in_quote;
 
-    // ─── Newton-Raphson Optimal Miktar Hesaplama ──────────────────
+    // ��� Newton-Raphson Optimal Miktar Hesaplama ������������������
     // v6.0: TickBitmap varsa multi-tick hassasiyetinde, yoksa dampening
-    // v16.0: Canlı on-chain fee kullanımı (live_fee_bps varsa statik fee yerine)
+    // v16.0: Canl� on-chain fee kullan�m� (live_fee_bps varsa statik fee yerine)
     let sell_fee = sell_state.live_fee_bps.map(|b| b as f64 / 10_000.0).unwrap_or(pools[sell_idx].fee_fraction);
     let buy_fee = buy_state.live_fee_bps.map(|b| b as f64 / 10_000.0).unwrap_or(pools[buy_idx].fee_fraction);
-    // v28.0: NR'ye max_trade_size_weth yerine effective_cap gönder.
-    // Eski: config.max_trade_size_weth (50.0) → NR içinde tekrar cap hesaplıyor,
-    //        çift hesaplama + sığ havuzlarda gereksiz tarama aralığı.
-    // Yeni: effective_cap zaten min(sell_cap, buy_cap) olarak hesaplandı,
-    //        NR bunu üst sınır olarak alır → tutarlı ve hızlı.
+    // v28.0: NR'ye max_trade_size_weth yerine effective_cap g�nder.
+    // Eski: config.max_trade_size_weth (50.0) � NR i�inde tekrar cap hesapl�yor,
+    //        �ift hesaplama + s�� havuzlarda gereksiz tarama aral���.
+    // Yeni: effective_cap zaten min(sell_cap, buy_cap) olarak hesapland�,
+    //        NR bunu �st s�n�r olarak al�r � tutarl� ve h�zl�.
     let nr_max = effective_cap.min(config.max_trade_size_weth);
     let nr_result = math::find_optimal_amount_with_bitmap(
         sell_state,
@@ -320,7 +318,7 @@ pub fn check_arbitrage_opportunity(
         buy_fee,
         dynamic_gas_cost_quote,
         config.flash_loan_fee_bps,
-        avg_price_in_quote, // gerçek fiyat → kâr quote cinsinden döner
+        avg_price_in_quote, // ger�ek fiyat � k�r quote cinsinden d�ner
         nr_max,
         pools[sell_idx].token0_is_weth,
         pools[sell_idx].tick_spacing,
@@ -330,15 +328,15 @@ pub fn check_arbitrage_opportunity(
         pools[buy_idx].token0_is_weth,
     );
 
-    // NR kârı quote (cbBTC) cinsinden döndü → WETH’e çevir
+    // NR k�r� quote (cbBTC) cinsinden d�nd� � WETH�e �evir
     let expected_profit_weth = if avg_price_in_quote > 0.0 {
         nr_result.expected_profit / avg_price_in_quote
     } else {
         return None;
     };
 
-    // v15.0 DEBUG: NR sonuç detayları — fırsat filtreleme nedenini göster
-    // (Bu loglar canlıya geçiş onayına kadar kaldırılmamalı)
+    // v15.0 DEBUG: NR sonu� detaylar� � f�rsat filtreleme nedenini g�ster
+    // (Bu loglar canl�ya ge�i� onay�na kadar kald�r�lmamal�)
     eprintln!(
         "     {} [DEBUG NR] spread={:.4}% | nr_profit_weth={:.8} | min_required={:.8} | nr_amount={:.6} | converged={} | gas_cost_weth={:.8} (L1={:.8})",
         "\u{1f52c}",
@@ -351,10 +349,10 @@ pub fn check_arbitrage_opportunity(
         l1_data_fee_weth,
     );
 
-    // Kârlı değilse fırsatı atla
+    // K�rl� de�ilse f�rsat� atla
     if expected_profit_weth < config.min_net_profit_weth || nr_result.optimal_amount <= 0.0 {
         eprintln!(
-            "     {} [DEBUG] Fırsat kârsız — NR profit ({:.8}) < eşik ({:.8}) veya amount<=0 ({:.6})",
+            "     {} [DEBUG] F�rsat k�rs�z � NR profit ({:.8}) < e�ik ({:.8}) veya amount<=0 ({:.6})",
             "\u{23ed}\u{fe0f}",
             expected_profit_weth,
             config.min_net_profit_weth,
@@ -376,18 +374,18 @@ pub fn check_arbitrage_opportunity(
     })
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Fırsat Değerlendirme ve Yürütme
-// ─────────────────────────────────────────────────────────────────────────────
+// �����������������������������������������������������������������������������
+// F�rsat De�erlendirme ve Y�r�tme
+// �����������������������������������������������������������������������������
 
-/// Bulunan arbitraj fırsatını değerlendir, simüle et ve gerekirse yürüt
+/// Bulunan arbitraj f�rsat�n� de�erlendir, sim�le et ve gerekirse y�r�t
 ///
-/// Dönüş: REVM simülasyonundan gelen gerçek gas kullanımı (sonraki bloklarda
-/// `check_arbitrage_opportunity`'e beslenir → dinamik gas maliyet hesaplaması).
+/// D�n��: REVM sim�lasyonundan gelen ger�ek gas kullan�m� (sonraki bloklarda
+/// `check_arbitrage_opportunity`'e beslenir � dinamik gas maliyet hesaplamas�).
 ///
-/// v21.0: `mev_executor` parametresi eklendi — işlemler yalnızca Private RPC
-/// (eth_sendBundle) üzerinden gönderilir, public mempool kullanılmaz.
-pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum> + Sync>(
+/// v21.0: `mev_executor` parametresi eklendi � i�lemler yaln�zca Private RPC
+/// (eth_sendRawTransaction) �zerinden g�nderilir, public mempool kullan�lmaz.
+pub async fn evaluate_and_execute<P: Provider + Sync>(
     _provider: &P,
     config: &BotConfig,
     pools: &[PoolConfig],
@@ -405,10 +403,10 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
     let _buy_pool = &pools[opportunity.buy_pool_idx];
     let _sell_pool = &pools[opportunity.sell_pool_idx];
 
-    // ─── v12.0: Sıfıra Bölünme / NaN / Infinity Koruması ─────────────
-    // RPC kopukluğu veya sıfır sqrtPriceX96 durumunda fiyatlar 0.0 olabilir.
-    // Float bölüm sonucu Infinity → u128'e cast'te Rust panic! verir.
-    // Bu kontrol thread çökmesini önler ve döngüyü sessizce atlar.
+    // ��� v12.0: S�f�ra B�l�nme / NaN / Infinity Korumas� �������������
+    // RPC kopuklu�u veya s�f�r sqrtPriceX96 durumunda fiyatlar 0.0 olabilir.
+    // Float b�l�m sonucu Infinity � u128'e cast'te Rust panic! verir.
+    // Bu kontrol thread ��kmesini �nler ve d�ng�y� sessizce atlar.
     if opportunity.sell_price_quote <= 0.0
         || opportunity.buy_price_quote <= 0.0
         || opportunity.optimal_amount_weth <= 0.0
@@ -417,29 +415,29 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         return None;
     }
 
-    // ─── v28.0: Veri Tazeliği Kapısı (Freshness Gate) ──────────────
-    // Eski veriyle yapılan simülasyon ve işlem, frontrun/sandwich saldırılarına
-    // karşı savunmasızdır. İşlem gönderilmeden önce havuz verilerinin
-    // max_staleness_ms eşiğini aşmadığı doğrulanır.
+    // ��� v28.0: Veri Tazeli�i Kap�s� (Freshness Gate) ��������������
+    // Eski veriyle yap�lan sim�lasyon ve i�lem, frontrun/sandwich sald�r�lar�na
+    // kar�� savunmas�zd�r. ��lem g�nderilmeden �nce havuz verilerinin
+    // max_staleness_ms e�i�ini a�mad��� do�rulan�r.
     {
         let staleness_a = states[0].read().staleness_ms();
         let staleness_b = states[1].read().staleness_ms();
         let max_stale = staleness_a.max(staleness_b);
         if max_stale > config.max_staleness_ms {
             eprintln!(
-                "     \u{1f6d1} [FreshnessGate] Havuz verileri çok eski: {}ms > eşik {}ms — MEV koruması: işlem atlanıyor",
+                "     \u{1f6d1} [FreshnessGate] Havuz verileri �ok eski: {}ms > e�ik {}ms � MEV korumas�: i�lem atlan�yor",
                 max_stale, config.max_staleness_ms,
             );
             return None;
         }
     }
 
-    // ─── İstatistik Güncelle ─────────────────────────────────────
-    // v15.0: total_opportunities ve max_spread_pct artık main.rs'de
-    // her blokta güncelleniyor (fırsat koşulundan bağımsız).
-    // Burada sadece simülasyona özgü istatistikler kalıyor.
+    // ��� �statistik G�ncelle �������������������������������������
+    // v15.0: total_opportunities ve max_spread_pct art�k main.rs'de
+    // her blokta g�ncelleniyor (f�rsat ko�ulundan ba��ms�z).
+    // Burada sadece sim�lasyona �zg� istatistikler kal�yor.
 
-    // ─── REVM Simülasyonu ──────────────────────────────────────
+    // ��� REVM Sim�lasyonu ��������������������������������������
     let sim_result = sim_engine.validate_mathematical(
         pools,
         states,
@@ -448,11 +446,11 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         opportunity.optimal_amount_weth,
     );
 
-    // Kontrat adresi varsa tam REVM simülasyonu da yap
+    // Kontrat adresi varsa tam REVM sim�lasyonu da yap
     let revm_result = if let Some(contract_addr) = config.contract_address {
-        // v11.0 Calldata: Yön ve token hesaplama
-        //   buy_pool_idx=0 (UniV3 ucuz): uni=1(oneForZero→WETH al), aero=0(zeroForOne→WETH sat)
-        //   buy_pool_idx=1 (Slip ucuz):  uni=0(zeroForOne→Quote al), aero=1(oneForZero→Quote sat)
+        // v11.0 Calldata: Y�n ve token hesaplama
+        //   buy_pool_idx=0 (UniV3 ucuz): uni=1(oneForZero�WETH al), aero=0(zeroForOne�WETH sat)
+        //   buy_pool_idx=1 (Slip ucuz):  uni=0(zeroForOne�Quote al), aero=1(oneForZero�Quote sat)
         let (uni_dir, aero_dir, owed_token, received_token) =
             compute_directions_and_tokens(
                 opportunity.buy_pool_idx,
@@ -461,12 +459,12 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
                 &pools[0].quote_token_address,
             );
 
-        // ═══ v11.0: DİNAMİK DECIMAL AMOUNT HESAPLAMA ═══
-        // Kritik düzeltme: Input tokeni WETH mi Quote mi?
-        //   - WETH input → amount * 10^18
-        //   - Quote input → amount * eth_price * 10^quote_decimals
-        // Eski hata: Her zaman 10^18 kullanılıyordu → Quote input'ta
-        //            hatalı hesaplama oluşuyordu.
+        // === v11.0: D�NAM�K DECIMAL AMOUNT HESAPLAMA ===
+        // Kritik d�zeltme: Input tokeni WETH mi Quote mi?
+        //   - WETH input � amount * 10^18
+        //   - Quote input � amount * eth_price * 10^quote_decimals
+        // Eski hata: Her zaman 10^18 kullan�l�yordu � Quote input'ta
+        //            hatal� hesaplama olu�uyordu.
         let weth_input = crate::types::is_weth_input(uni_dir, pools[0].token0_is_weth);
         let amount_wei = crate::types::weth_amount_to_input_wei(
             opportunity.optimal_amount_weth,
@@ -487,7 +485,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
             amount_wei,
             uni_dir,
             aero_dir,
-            0u128, // REVM simulation — minProfit=0
+            0u128, // REVM simulation � minProfit=0
             deadline_block,
         );
 
@@ -511,22 +509,22 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         sim_result.clone()
     };
 
-    // Dinamik gas: REVM simülasyonundan gelen kesin gas değeri
+    // Dinamik gas: REVM sim�lasyonundan gelen kesin gas de�eri
     let simulated_gas_used = revm_result.gas_used;
 
-    // Simülasyon başarısız → işlemi atla
+    // Sim�lasyon ba�ar�s�z � i�lemi atla
     if !sim_result.success {
         stats.failed_simulations += 1;
-        // v10.0: Circuit breaker — ardışık başarısızlık sayacını artır
+        // v10.0: Circuit breaker � ard���k ba�ar�s�zl�k sayac�n� art�r
         stats.consecutive_failures += 1;
         print_simulation_failure(opportunity, &sim_result, pools);
         return None;
     }
 
-    // Simülasyon başarılı → ardışık başarısızlık sayacını sıfırla
+    // Sim�lasyon ba�ar�l� � ard���k ba�ar�s�zl�k sayac�n� s�f�rla
     stats.consecutive_failures = 0;
 
-    // ─── KÂRLI FIRSAT RAPORU ─────────────────────────────────
+    // ��� K�RLI FIRSAT RAPORU ���������������������������������
     stats.profitable_opportunities += 1;
     stats.total_potential_profit += opportunity.expected_profit_weth;
     if opportunity.expected_profit_weth > stats.max_profit_weth {
@@ -535,11 +533,11 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
 
     print_opportunity_report(opportunity, &sim_result, pools, config);
 
-    // ─── KONTRAT TETİKLEME VEYA GÖLGE MOD LOGLAMA ─────────────
+    // ��� KONTRAT TET�KLEME VEYA G�LGE MOD LOGLAMA �������������
     if config.shadow_mode() {
-        // ═══ GÖLGE MODU: İşlem atlanır, detaylar loglanır ═══
+        // === G�LGE MODU: ��lem atlan�r, detaylar loglan�r ===
 
-        // v23.0 (Y-1): Gölge modu ekonomik uygulanabilirlik istatistikleri
+        // v23.0 (Y-1): G�lge modu ekonomik uygulanabilirlik istatistikleri
         if sim_result.success {
             stats.shadow_sim_success += 1;
             stats.shadow_cumulative_profit += opportunity.expected_profit_weth;
@@ -549,26 +547,26 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
 
         println!(
             "  {} {}",
-            "👻".yellow(),
-            "GÖLGE MODU: İşlem atlandı — detaylar shadow_analytics.jsonl'e kaydediliyor".yellow().bold()
+            "??".yellow(),
+            "G�LGE MODU: ��lem atland� � detaylar shadow_analytics.jsonl'e kaydediliyor".yellow().bold()
         );
-        // v23.0 (Y-1): Periyodik ekonomik özet (her 10 fırsatta bir)
+        // v23.0 (Y-1): Periyodik ekonomik �zet (her 10 f�rsatta bir)
         let total_shadow = stats.shadow_sim_success + stats.shadow_sim_fail;
         if total_shadow > 0 && total_shadow % 10 == 0 {
             let success_rate = (stats.shadow_sim_success as f64 / total_shadow as f64) * 100.0;
             println!(
-                "  {} Gölge Özet: {} fırsat | Sim başarı: {:.1}% | Kümülatif kâr: {:.6} WETH",
-                "📊".cyan(),
+                "  {} G�lge �zet: {} f�rsat | Sim ba�ar�: {:.1}% | K�m�latif k�r: {:.6} WETH",
+                "??".cyan(),
                 total_shadow,
                 success_rate,
                 stats.shadow_cumulative_profit,
             );
         }
 
-        // Dinamik bribe hesabı (loglama için)
+        // Dinamik bribe hesab� (loglama i�in)
         let dynamic_bribe_weth = opportunity.expected_profit_weth * config.bribe_pct;
 
-        // Shadow log kaydı (v10.0: yapılandırılmış JSONL)
+        // Shadow log kayd� (v10.0: yap�land�r�lm�� JSONL)
         write_shadow_log(
             opportunity,
             &sim_result,
@@ -586,7 +584,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         let trade_weth = opportunity.optimal_amount_weth;
         let _buy_price = opportunity.buy_price_quote;
 
-        // v30.0: base_token_address kullanılır — cbETH/WETH gibi non-WETH-base çiftleri için kritik
+        // v30.0: base_token_address kullan�l�r � cbETH/WETH gibi non-WETH-base �iftleri i�in kritik
         let (uni_dir, aero_dir, owed_token, received_token) =
             compute_directions_and_tokens(
                 opportunity.buy_pool_idx,
@@ -599,19 +597,19 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         let current_block = states[0].read().last_block;
         let deadline_block = current_block as u32 + config.deadline_blocks.max(3);
 
-        // v21.0: Bribe hesabı MevExecutor::compute_dynamic_bribe'a devredildi.
+        // v21.0: Bribe hesab� MevExecutor::compute_dynamic_bribe'a devredildi.
         // MevExecutor, expected_profit_weth + simulated_gas + block_base_fee
-        // bilgilerini alarak adaptatif bribe yüzdesini kendi içinde hesaplar
+        // bilgilerini alarak adaptatif bribe y�zdesini kendi i�inde hesaplar
         // ve priority fee olarak TX'e ekler.
 
-        // ═══ v11.0: YÖN-BAZLI EXACT minProfit HESAPLAMA ═══
-        // Kritik düzeltme: Eski sistem her zaman WETH cinsinden profit hesaplıyordu.
-        // Ancak kontrat balAfter(owedToken) - balBefore(owedToken) hesabı yapar.
-        // owedToken=Quote ise kâr quote cinsinden ölçülür → minProfit quote_decimals olmalı.
+        // === v11.0: Y�N-BAZLI EXACT minProfit HESAPLAMA ===
+        // Kritik d�zeltme: Eski sistem her zaman WETH cinsinden profit hesapl�yordu.
+        // Ancak kontrat balAfter(owedToken) - balBefore(owedToken) hesab� yapar.
+        // owedToken=Quote ise k�r quote cinsinden �l��l�r � minProfit quote_decimals olmal�.
         //
-        // Yeni sistem: Flash swap akışını birebir modelleyen
-        // compute_exact_directional_profit kullanılır.
-        // Bu fonksiyon doğrudan owedToken cinsinden kâr döndürür.
+        // Yeni sistem: Flash swap ak���n� birebir modelleyen
+        // compute_exact_directional_profit kullan�l�r.
+        // Bu fonksiyon do�rudan owedToken cinsinden k�r d�nd�r�r.
         let exact_min_profit = {
             let pool_a_state = states[0].read();
             let pool_b_state = states[1].read();
@@ -646,7 +644,7 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
             )
         };
 
-        // v24.0: Desimal-duyarlı dinamik slippage
+        // v24.0: Desimal-duyarl� dinamik slippage
         let slippage_bps = {
             let buy_state = states[opportunity.buy_pool_idx].read();
             let sell_state = states[opportunity.sell_pool_idx].read();
@@ -668,14 +666,14 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         let pool_a_addr = pools[0].address;
         let pool_b_addr = pools[1].address;
 
-        // REVM'den gelen kesin gas değerini aktar (sabit 350K yerine)
+        // REVM'den gelen kesin gas de�erini aktar (sabit 350K yerine)
         let sim_gas = simulated_gas_used;
 
-        // v11.0: ETH fiyatı ve token sırası bilgisini execute_on_chain'e aktar
+        // v11.0: ETH fiyat� ve token s�ras� bilgisini execute_on_chain'e aktar
         let eth_price_for_exec = (opportunity.buy_price_quote + opportunity.sell_price_quote) / 2.0;
         let t0_is_weth = pools[0].token0_is_weth;
 
-        // v13.0: block_base_fee'yi execute'a aktar (max_fee_per_gas hesabı için)
+        // v13.0: block_base_fee'yi execute'a aktar (max_fee_per_gas hesab� i�in)
         let base_fee_for_exec = block_base_fee;
         let qt_decimals = if pools[0].token0_is_weth { pools[0].token1_decimals } else { pools[0].token0_decimals };
 
@@ -701,25 +699,25 @@ pub async fn evaluate_and_execute<T: Transport + Clone, P: Provider<T, Ethereum>
         });
     }
 
-    // v14.0: REVM'den gelen gerçek gas değerini döndür
+    // v14.0: REVM'den gelen ger�ek gas de�erini d�nd�r
     // Bir sonraki blokta check_arbitrage_opportunity'ye beslenir
     Some(simulated_gas_used)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Gölge Modu (Shadow Mode) — JSON Loglama
-// ─────────────────────────────────────────────────────────────────────────────
+// �����������������������������������������������������������������������������
+// G�lge Modu (Shadow Mode) � JSON Loglama
+// �����������������������������������������������������������������������������
 
-/// Gölge modunda bulunan fırsatın tüm detaylarını shadow_analytics.jsonl
-/// dosyasına satır satır (JSON Lines / NDJSON formatında) append eder.
+/// G�lge modunda bulunan f�rsat�n t�m detaylar�n� shadow_analytics.jsonl
+/// dosyas�na sat�r sat�r (JSON Lines / NDJSON format�nda) append eder.
 ///
-/// v10.0 Yapılandırılmış Alanlar:
+/// v10.0 Yap�land�r�lm�� Alanlar:
 ///   - timestamp, pool_pair, gas_used, expected_profit
 ///   - simulated_profit, dynamic_bribe, latency_ms
 ///
-/// Bu dosya birkaç gün sonra açılıp:
-///   "Bot 1000 fırsat bulmuş, gerçek TX atsaydık toplam 450$ kazanacaktık"
-/// analizini yapmak için kullanılır.
+/// Bu dosya birka� g�n sonra a��l�p:
+///   "Bot 1000 f�rsat bulmu�, ger�ek TX atsayd�k toplam 450$ kazanacakt�k"
+/// analizini yapmak i�in kullan�l�r.
 fn write_shadow_log(
     opportunity: &ArbitrageOpportunity,
     sim_result: &SimulationResult,
@@ -732,8 +730,8 @@ fn write_shadow_log(
     let buy_pool = &pools[opportunity.buy_pool_idx];
     let sell_pool = &pools[opportunity.sell_pool_idx];
 
-    // pool_pair: "UniV3-WETH/cbBTC ↔ Aero-WETH/cbBTC"
-    let pool_pair = format!("{} ↔ {}", buy_pool.name, sell_pool.name);
+    // pool_pair: "UniV3-WETH/cbBTC - Aero-WETH/cbBTC"
+    let pool_pair = format!("{} - {}", buy_pool.name, sell_pool.name);
 
     // Simulated profit = expected profit if sim succeeded, 0 otherwise
     let simulated_profit_weth = if sim_result.success {
@@ -742,7 +740,7 @@ fn write_shadow_log(
         0.0
     };
 
-    // JSONL yapılandırılmış log satırı
+    // JSONL yap�land�r�lm�� log sat�r�
     let log_entry = serde_json::json!({
         "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
         "pool_pair": pool_pair,
@@ -766,7 +764,7 @@ fn write_shadow_log(
         "mode": "shadow",
     });
 
-    // v22.1: Dosya boyutu kontrolü — 50MB'ı aşarsa rotate et
+    // v22.1: Dosya boyutu kontrol� � 50MB'� a�arsa rotate et
     let log_path = std::path::Path::new("shadow_analytics.jsonl");
     const MAX_LOG_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
     if let Ok(metadata) = std::fs::metadata(log_path) {
@@ -774,11 +772,11 @@ fn write_shadow_log(
             let rotated = format!("shadow_analytics.{}.jsonl",
                 chrono::Local::now().format("%Y%m%d_%H%M%S"));
             let _ = std::fs::rename(log_path, &rotated);
-            eprintln!("  📁 Shadow log rotate edildi → {}", rotated);
+            eprintln!("  ?? Shadow log rotate edildi � {}", rotated);
         }
     }
 
-    // Dosyaya append (satır satır)
+    // Dosyaya append (sat�r sat�r)
     match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -787,31 +785,31 @@ fn write_shadow_log(
         Ok(mut file) => {
             if let Err(e) = writeln!(file, "{}", log_entry) {
                 eprintln!(
-                    "  {} shadow_analytics.jsonl yazma hatası: {}",
-                    "⚠️".yellow(), e
+                    "  {} shadow_analytics.jsonl yazma hatas�: {}",
+                    "??".yellow(), e
                 );
             }
         }
         Err(e) => {
             eprintln!(
-                "  {} shadow_analytics.jsonl açma hatası: {}",
-                "⚠️".yellow(), e
+                "  {} shadow_analytics.jsonl a�ma hatas�: {}",
+                "??".yellow(), e
             );
         }
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Kontrat Tetikleme (Zincir Üzeri) — MevExecutor Üzerinden Private RPC
-// ─────────────────────────────────────────────────────────────────────────────
+// �����������������������������������������������������������������������������
+// Kontrat Tetikleme (Zincir �zeri) � MevExecutor �zerinden Private RPC
+// �����������������������������������������������������������������������������
 
-// v21.0: ProviderBuilder ve TransactionRequest artık MevExecutor'da kullanılır.
-// strategy.rs doğrudan TX oluşturmaz.
+// v21.0: ProviderBuilder ve TransactionRequest art�k MevExecutor'da kullan�l�r.
+// strategy.rs do�rudan TX olu�turmaz.
 
-/// v21.0: Arbitraj kontratını MevExecutor üzerinden Private RPC ile tetikle.
+/// v21.0: Arbitraj kontrat�n� MevExecutor �zerinden Private RPC ile tetikle.
 ///
-/// Public mempool kullanılmaz — tüm işlemler eth_sendBundle ile gönderilir.
-/// Private RPC yoksa veya başarısızsa işlem İPTAL EDİLİR (nonce geri alınır).
+/// Public mempool kullan�lmaz � t�m i�lemler eth_sendRawTransaction ile Private RPC'ye g�nderilir.
+/// Private RPC yoksa veya ba�ar�s�zsa i�lem �PTAL ED�L�R (nonce geri al�n�r).
 async fn execute_on_chain_protected(
     mev_executor: Arc<crate::executor::MevExecutor>,
     private_key: String,
@@ -835,12 +833,12 @@ async fn execute_on_chain_protected(
     expected_profit_weth: f64,
     current_block: u64,
 ) {
-    println!("\n  {} {}", "🚀".yellow(), "KONTRAT TETİKLEME BAŞLATILDI (Private RPC)".yellow().bold());
+    println!("\n  {} {}", "??".yellow(), "KONTRAT TET�KLEME BA�LATILDI (Private RPC)".yellow().bold());
 
-    // v10.0: Private key güvenli bellek yönetimi
+    // v10.0: Private key g�venli bellek y�netimi
     let mut pk_owned = private_key;
 
-    // Calldata oluştur
+    // Calldata olu�tur
     let weth_input = crate::types::is_weth_input(uni_direction, token0_is_weth);
     let amount_in_wei = crate::types::weth_amount_to_input_wei(
         trade_size_weth,
@@ -864,17 +862,17 @@ async fn execute_on_chain_protected(
     let calldata_hex = crate::simulator::format_compact_calldata_hex(&calldata);
     println!(
         "  {} Kompakt calldata (134 byte): {}...{}",
-        "🔧".cyan(),
+        "??".cyan(),
         &calldata_hex[..22],
         &calldata_hex[calldata_hex.len().saturating_sub(10)..],
     );
 
     println!(
-        "  {} TX gönderiliyor (Private RPC)... (miktar: {:.6} WETH, nonce: {}, deadline: blok #{}, payload: 134 byte)",
-        "📤".yellow(), trade_size_weth, nonce, deadline_block
+        "  {} TX g�nderiliyor (Private RPC)... (miktar: {:.6} WETH, nonce: {}, deadline: blok #{}, payload: 134 byte)",
+        "??".yellow(), trade_size_weth, nonce, deadline_block
     );
 
-    // MevExecutor üzerinden gönder — Private RPC yoksa otomatik iptal
+    // MevExecutor �zerinden g�nder � Private RPC yoksa otomatik iptal
     let result = mev_executor.execute_protected(
         &pk_owned,
         contract_address,
@@ -887,35 +885,35 @@ async fn execute_on_chain_protected(
         &nonce_manager,
     ).await;
 
-    // İmza tamamlandı — private key bellekten güvenle silinir
+    // �mza tamamland� � private key bellekten g�venle silinir
     pk_owned.zeroize();
 
     match result {
         Ok(hash) => {
-            println!("  {} TX başarılı (Private RPC): {}", "✅".green(), hash.green().bold());
+            println!("  {} TX ba�ar�l� (Private RPC): {}", "?".green(), hash.green().bold());
         }
         Err(e) => {
-            println!("  {} TX hatası: {}", "❌".red(), format!("{}", e).red());
+            println!("  {} TX hatas�: {}", "?".red(), format!("{}", e).red());
         }
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Yön ve Token Hesaplama Yardımcıları
-// ─────────────────────────────────────────────────────────────────────────────
+// �����������������������������������������������������������������������������
+// Y�n ve Token Hesaplama Yard�mc�lar�
+// �����������������������������������������������������������������������������
 
-/// Arbitraj yönünden UniV3/Slipstream yönlerini ve token adreslerini hesapla
+/// Arbitraj y�n�nden UniV3/Slipstream y�nlerini ve token adreslerini hesapla
 ///
-/// # Dönüş: (uni_direction, aero_direction, owed_token, received_token)
+/// # D�n��: (uni_direction, aero_direction, owed_token, received_token)
 ///
-/// v30.0: base_token_address parametresi — config.weth_address yerine PoolConfig'den gelir.
-/// cbETH/WETH gibi non-WETH-base çiftlerinde base_token=cbETH, quote_token=WETH olur.
-/// Eski: Her zaman config.weth_address kullanılıyordu → cbETH/WETH'te owedToken=receivedToken=WETH. BUG!
+/// v30.0: base_token_address parametresi � config.weth_address yerine PoolConfig'den gelir.
+/// cbETH/WETH gibi non-WETH-base �iftlerinde base_token=cbETH, quote_token=WETH olur.
+/// Eski: Her zaman config.weth_address kullan�l�yordu � cbETH/WETH'te owedToken=receivedToken=WETH. BUG!
 ///
-/// Mantık (token0=base, token1=quote varsayımıyla):
-/// - buy_pool_idx=0: uni=1(oneForZero→base al), aero=0(zeroForOne→base sat)
+/// Mant�k (token0=base, token1=quote varsay�m�yla):
+/// - buy_pool_idx=0: uni=1(oneForZero�base al), aero=0(zeroForOne�base sat)
 ///   owedToken=Quote, receivedToken=Base
-/// - buy_pool_idx=1: uni=0(zeroForOne→quote al), aero=1(oneForZero→quote sat)
+/// - buy_pool_idx=1: uni=0(zeroForOne�quote al), aero=1(oneForZero�quote sat)
 ///   owedToken=Base, receivedToken=Quote
 fn compute_directions_and_tokens(
     buy_pool_idx: usize,
@@ -924,16 +922,16 @@ fn compute_directions_and_tokens(
     quote_token_address: &Address,
 ) -> (u8, u8, Address, Address) {
     if token0_is_base {
-        // token0 = base, token1 = quote (Base normal düzen: WETH < USDC)
+        // token0 = base, token1 = quote (Base normal d�zen: WETH < USDC)
         if buy_pool_idx == 0 {
-            // Pool 0'dan base al → oneForZero(1), Pool 1'e base sat → zeroForOne(0)
+            // Pool 0'dan base al � oneForZero(1), Pool 1'e base sat � zeroForOne(0)
             (1u8, 0u8, *quote_token_address, *base_token_address) // owe Quote, receive Base
         } else {
-            // Pool 0'dan quote al → zeroForOne(0), Pool 1'e quote sat → oneForZero(1)
+            // Pool 0'dan quote al � zeroForOne(0), Pool 1'e quote sat � oneForZero(1)
             (0u8, 1u8, *base_token_address, *quote_token_address) // owe Base, receive Quote
         }
     } else {
-        // token0 = quote, token1 = base (ters düzen: cbETH < WETH)
+        // token0 = quote, token1 = base (ters d�zen: cbETH < WETH)
         if buy_pool_idx == 0 {
             (0u8, 1u8, *base_token_address, *quote_token_address) // owe Base, receive Quote
         } else {
@@ -945,19 +943,19 @@ fn compute_directions_and_tokens(
 /// minProfit hesapla (owedToken cinsinden, uint128 wei)
 ///
 /// math::exact::compute_exact_arbitrage_profit ile hesaplanan
-/// exact_profit_wei değerinin dinamik bir yüzdesini minProfit olarak ayarla.
+/// exact_profit_wei de�erinin dinamik bir y�zdesini minProfit olarak ayarla.
 ///
-/// v10.0: Varlık bazlı dinamik slippage:
+/// v10.0: Varl�k bazl� dinamik slippage:
 ///   - Derin likidite (>1e18): %99.9 (sadece 10 bps tolerans)
 ///   - Orta likidite (>1e16): %99.5 (50 bps tolerans)
-///   - Sığ likidite:          %95   (500 bps tolerans, güvenli)
+///   - S�� likidite:          %95   (500 bps tolerans, g�venli)
 ///
-/// ÖNEMLİ: Float ve quote çevirisi YOKTUR. Tamamen U256 tam sayı matematik.
+/// �NEML�: Float ve quote �evirisi YOKTUR. Tamamen U256 tam say� matematik.
 fn compute_min_profit_exact(exact_profit_wei: U256, slippage_factor_bps: u64) -> u128 {
     // slippage_factor_bps: 9990 = %99.9, 9950 = %99.5, 9500 = %95
     let min_profit_u256 = (exact_profit_wei * U256::from(slippage_factor_bps)) / U256::from(10_000u64);
 
-    // u128'e sığdır (kontrat uint128 bekler). Overflow durumunda u128::MAX kullan.
+    // u128'e s��d�r (kontrat uint128 bekler). Overflow durumunda u128::MAX kullan.
     if min_profit_u256 > U256::from(u128::MAX) {
         u128::MAX
     } else {
@@ -965,18 +963,18 @@ fn compute_min_profit_exact(exact_profit_wei: U256, slippage_factor_bps: u64) ->
     }
 }
 
-/// Havuz likidite derinliğine göre slippage faktörü hesapla (bps cinsinden)
+/// Havuz likidite derinli�ine g�re slippage fakt�r� hesapla (bps cinsinden)
 ///
-/// v24.0: Token desimal-duyarlı normalizasyon.
-/// Raw likidite (u128), havuzdaki token0 ve token1'in desimal farkına göre
+/// v24.0: Token desimal-duyarl� normalizasyon.
+/// Raw likidite (u128), havuzdaki token0 ve token1'in desimal fark�na g�re
 /// 18-desimale normalize edilir. Bu sayede USDC (6 desimal) havuzunda
-/// 1e10 raw likidite, WETH (18 desimal) havuzundaki 1e18 ile eşdeğer olarak
-/// değerlendirilir.
+/// 1e10 raw likidite, WETH (18 desimal) havuzundaki 1e18 ile e�de�er olarak
+/// de�erlendirilir.
 ///
-/// Mantık (normalize likiditeye göre):
-///   - Derin havuz (>= 1e15 normalized) → 9950 bps (%99.5)
-///   - Orta derinlik (>= 1e13 normalized) → 9900 bps (%99)
-///   - Sığ havuz (< 1e13 normalized) → 9500 bps (%95)
+/// Mant�k (normalize likiditeye g�re):
+///   - Derin havuz (>= 1e15 normalized) � 9950 bps (%99.5)
+///   - Orta derinlik (>= 1e13 normalized) � 9900 bps (%99)
+///   - S�� havuz (< 1e13 normalized) � 9500 bps (%95)
 fn determine_slippage_factor_bps(
     buy_liquidity: u128,
     sell_liquidity: u128,
@@ -985,7 +983,7 @@ fn determine_slippage_factor_bps(
 ) -> u64 {
     // Her havuzun likiditesini 18-desimale normalize et.
     // Uniswap V3'te L parametresi sqrt(token0 * token1) biriminde olup
-    // desimal farkı (token0_decimals + token1_decimals) / 2 kadar dengelenmeli.
+    // desimal fark� (token0_decimals + token1_decimals) / 2 kadar dengelenmeli.
     let normalize = |liq: u128, pool: &PoolConfig| -> f64 {
         let avg_decimals = (pool.token0_decimals as f64 + pool.token1_decimals as f64) / 2.0;
         let scale = 10f64.powi(18 - avg_decimals as i32);
@@ -997,34 +995,34 @@ fn determine_slippage_factor_bps(
     let min_normalized = norm_buy.min(norm_sell);
 
     if min_normalized >= 1e15 {
-        9950 // %99.5 — derin havuz
+        9950 // %99.5 � derin havuz
     } else if min_normalized >= 1e13 {
-        9900 // %99.0 — orta derinlik
+        9900 // %99.0 � orta derinlik
     } else {
-        9500 // %95.0 — sığ havuz, konservatif
+        9500 // %95.0 � s�� havuz, konservatif
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Terminal Çıktıları
-// ─────────────────────────────────────────────────────────────────────────────
+// �����������������������������������������������������������������������������
+// Terminal ��kt�lar�
+// �����������������������������������������������������������������������������
 
-/// Simülasyon hatası raporu
+/// Sim�lasyon hatas� raporu
 fn print_simulation_failure(
     opp: &ArbitrageOpportunity,
     sim: &SimulationResult,
     _pools: &[PoolConfig],
 ) {
     println!(
-        "     {} [{}] REVM Simülasyon BAŞARISIZ | Spread: {:.4}% | Sebep: {}",
-        "⚠️".yellow(),
+        "     {} [{}] REVM Sim�lasyon BA�ARISIZ | Spread: {:.4}% | Sebep: {}",
+        "??".yellow(),
         timestamp().dimmed(),
         opp.spread_pct,
         sim.error.as_deref().unwrap_or("Bilinmiyor").red(),
     );
 }
 
-/// Kârlı fırsat raporu
+/// K�rl� f�rsat raporu
 fn print_opportunity_report(
     opp: &ArbitrageOpportunity,
     sim: &SimulationResult,
@@ -1035,96 +1033,96 @@ fn print_opportunity_report(
     let sell = &pools[opp.sell_pool_idx];
 
     println!();
-    println!("{}", "  ╔═══════════════════════════════════════════════════════════╗".red().bold());
-    println!("{}", "  ║     🚨🚨🚨  KÂRLI ARBİTRAJ FIRSATI  🚨🚨🚨              ║".red().bold());
-    println!("{}", "  ╠═══════════════════════════════════════════════════════════╣".red().bold());
-    println!("  {}  Zaman            : {}", "║".red(), timestamp().white().bold());
+    println!("{}", "  -===========================================================�".red().bold());
+    println!("{}", "  �     ??????  K�RLI ARB�TRAJ FIRSATI  ??????              �".red().bold());
+    println!("{}", "  �===========================================================�".red().bold());
+    println!("  {}  Zaman            : {}", "�".red(), timestamp().white().bold());
     println!(
-        "  {}  Yön              : {} → {}",
-        "║".red(),
+        "  {}  Y�n              : {} � {}",
+        "�".red(),
         format!("{}'dan AL ({:.6} Q)", buy.name, opp.buy_price_quote).green().bold(),
         format!("{}'e SAT ({:.6} Q)", sell.name, opp.sell_price_quote).red().bold(),
     );
-    println!("  {}  Spread           : {:.4}%", "║".red(), opp.spread_pct);
-    println!("  {}  ──────────────────────────────────────────────────────", "║".red());
+    println!("  {}  Spread           : {:.4}%", "�".red(), opp.spread_pct);
+    println!("  {}  ������������������������������������������������������", "�".red());
     println!(
         "  {}  Optimal Miktar   : {} WETH (Newton-Raphson: {}i, {})",
-        "║".red(),
+        "�".red(),
         format!("{:.6}", opp.optimal_amount_weth).white().bold(),
         opp.nr_iterations,
-        if opp.nr_converged { "yakınsadı".green() } else { "yakınsamadı".yellow() },
+        if opp.nr_converged { "yak�nsad�".green() } else { "yak�nsamad�".yellow() },
     );
     println!(
-        "  {}  {} NET KÂR       : {:.6} WETH",
-        "║".red(),
-        "💰",
+        "  {}  {} NET K�R       : {:.6} WETH",
+        "�".red(),
+        "??",
         format!("{:.6}", opp.expected_profit_weth).green().bold(),
     );
     println!(
-        "  {}  REVM Simülasyon  : {} (Gas: {})",
-        "║".red(),
-        if sim.success { "BAŞARILI".green().bold() } else { "BAŞARISIZ".red().bold() },
+        "  {}  REVM Sim�lasyon  : {} (Gas: {})",
+        "�".red(),
+        if sim.success { "BA�ARILI".green().bold() } else { "BA�ARISIZ".red().bold() },
         sim.gas_used,
     );
 
     if config.execution_enabled() {
         println!(
             "  {}  Durum            : {}",
-            "║".red(),
-            "🚀 KONTRAT TETİKLENİYOR...".yellow().bold()
+            "�".red(),
+            "?? KONTRAT TET�KLEN�YOR...".yellow().bold()
         );
     } else if config.shadow_mode() {
         println!(
             "  {}  Durum            : {}",
-            "║".red(),
-            "👻 GÖLGE MODU — shadow_analytics.jsonl'e kaydedildi".yellow().bold()
+            "�".red(),
+            "?? G�LGE MODU � shadow_analytics.jsonl'e kaydedildi".yellow().bold()
         );
     } else {
         println!(
             "  {}  Durum            : {}",
-            "║".red(),
-            "👁 Gözlem Modu (tetikleme devre dışı)".dimmed()
+            "�".red(),
+            "?? G�zlem Modu (tetikleme devre d���)".dimmed()
         );
     }
-    println!("{}", "  ╚═══════════════════════════════════════════════════════════╝".red().bold());
+    println!("{}", "  L===========================================================-".red().bold());
     println!();
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// �����������������������������������������������������������������������������
 // Exponential Gas Base Fee Spike Testleri
-// ─────────────────────────────────────────────────────────────────────────────
+// �����������������������������������������������������������������������������
 //
-// EIP-1559 gereği Base ağında base fee ardışık dolu bloklarda logaritmik
-// olarak artabilir. strategy.rs içindeki risk filtresi kâr/zarar hesabı
-// yaparken ağın o anki gas'ını kullanır.
+// EIP-1559 gere�i Base a��nda base fee ard���k dolu bloklarda logaritmik
+// olarak artabilir. strategy.rs i�indeki risk filtresi k�r/zarar hesab�
+// yaparken a��n o anki gas'�n� kullan�r.
 //
-// Bu test modülü, base fee ani 5x artışında:
-//   1. check_arbitrage_opportunity'nin gas maliyetini doğru hesaplaması
-//   2. Kâr < gas_cost olduğunda fırsatı reddetmesi (None dönmesi)
-//   3. Normal gas'ta kârlı fırsatın kabul edilmesi (Some dönmesi)
-// davranışlarını doğrular.
-// ─────────────────────────────────────────────────────────────────────────────
+// Bu test mod�l�, base fee ani 5x art���nda:
+//   1. check_arbitrage_opportunity'nin gas maliyetini do�ru hesaplamas�
+//   2. K�r < gas_cost oldu�unda f�rsat� reddetmesi (None d�nmesi)
+//   3. Normal gas'ta k�rl� f�rsat�n kabul edilmesi (Some d�nmesi)
+// davran��lar�n� do�rular.
+// �����������������������������������������������������������������������������
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Multi-Hop Arbitraj Fırsat Tespiti (v29.0: Route Engine)
-// ─────────────────────────────────────────────────────────────────────────────
+// �����������������������������������������������������������������������������
+// Multi-Hop Arbitraj F�rsat Tespiti (v29.0: Route Engine)
+// �����������������������������������������������������������������������������
 
-/// Multi-hop rotalar üzerinde arbitraj fırsatı tara.
+/// Multi-hop rotalar �zerinde arbitraj f�rsat� tara.
 ///
-/// Mevcut check_arbitrage_opportunity 2-pool'a odaklanır. Bu fonksiyon
-/// route_engine tarafından üretilen 3+ hop rotaları üzerinde NR optimizasyonu
-/// yaparak multi-hop fırsatları tespit eder.
+/// Mevcut check_arbitrage_opportunity 2-pool'a odaklan�r. Bu fonksiyon
+/// route_engine taraf�ndan �retilen 3+ hop rotalar� �zerinde NR optimizasyonu
+/// yaparak multi-hop f�rsatlar� tespit eder.
 ///
 /// # Parametreler
-/// - `routes`: route_engine::find_routes() çıktısı
-/// - `pools`: Tüm havuz yapılandırmaları
-/// - `states`: Tüm havuz durumları
-/// - `config`: Bot yapılandırması
-/// - `block_base_fee`: Mevcut blok taban ücreti
-/// - `l1_data_fee_wei`: L1 veri ücreti (OP Stack)
+/// - `routes`: route_engine::find_routes() ��kt�s�
+/// - `pools`: T�m havuz yap�land�rmalar�
+/// - `states`: T�m havuz durumlar�
+/// - `config`: Bot yap�land�rmas�
+/// - `block_base_fee`: Mevcut blok taban �creti
+/// - `l1_data_fee_wei`: L1 veri �creti (OP Stack)
 ///
-/// # Dönüş
-/// Kârlı rotalar (MultiHopOpportunity listesi, kâra göre sıralı)
+/// # D�n��
+/// K�rl� rotalar (MultiHopOpportunity listesi, k�ra g�re s�ral�)
 pub fn check_multi_hop_opportunities(
     routes: &[crate::route_engine::Route],
     pools: &[PoolConfig],
@@ -1137,12 +1135,12 @@ pub fn check_multi_hop_opportunities(
     let l1_data_fee_weth = l1_data_fee_wei as f64 / 1e18;
 
     for (route_idx, route) in routes.iter().enumerate() {
-        // Sadece 3+ hop rotalarını işle (2-hop'lar mevcut sistem tarafından kapsanıyor)
+        // Sadece 3+ hop rotalar�n� i�le (2-hop'lar mevcut sistem taraf�ndan kapsan�yor)
         if route.hop_count() < 3 {
             continue;
         }
 
-        // Rotadaki tüm havuzlar aktif mi?
+        // Rotadaki t�m havuzlar aktif mi?
         let all_active = route.hops.iter().all(|hop| {
             if hop.pool_idx < states.len() {
                 let state = states[hop.pool_idx].read();
@@ -1155,7 +1153,7 @@ pub fn check_multi_hop_opportunities(
             continue;
         }
 
-        // Havuz durumlarını ve yapılandırmalarını topla
+        // Havuz durumlar�n� ve yap�land�rmalar�n� topla
         let pool_states: Vec<crate::types::PoolState> = route.hops.iter().map(|hop| {
             states[hop.pool_idx].read().clone()
         }).collect();
@@ -1166,7 +1164,7 @@ pub fn check_multi_hop_opportunities(
 
         let state_refs: Vec<&crate::types::PoolState> = pool_states.iter().collect();
 
-        // Multi-hop gas tahmini: base 310K + hop başına 130K ek
+        // Multi-hop gas tahmini: base 310K + hop ba��na 130K ek
         let multi_hop_gas: u64 = 310_000 + (route.hop_count() as u64 - 2) * 130_000;
         let dynamic_gas_cost_weth = if block_base_fee > 0 {
             let l2 = (multi_hop_gas as f64 * block_base_fee as f64) / 1e18;
@@ -1175,7 +1173,7 @@ pub fn check_multi_hop_opportunities(
             ((config.gas_cost_fallback_weth + l1_data_fee_weth) * 1.20).max(0.00002)
         };
 
-        // Ortalama ETH fiyatı (ilk havuzdan)
+        // Ortalama ETH fiyat� (ilk havuzdan)
         let avg_price = pool_states[0].eth_price_usd.max(1.0);
         let gas_cost_usd = dynamic_gas_cost_weth * avg_price;
 
@@ -1190,27 +1188,27 @@ pub fn check_multi_hop_opportunities(
             config.max_trade_size_weth,
         );
 
-        // Kârı WETH'e çevir
+        // K�r� WETH'e �evir
         let expected_profit_weth = if avg_price > 0.0 {
             nr_result.expected_profit / avg_price
         } else {
             continue;
         };
 
-        // Minimum kâr eşiği kontrolü
+        // Minimum k�r e�i�i kontrol�
         if expected_profit_weth < config.min_net_profit_weth || nr_result.optimal_amount <= 0.0 {
             continue;
         }
 
         let pool_indices: Vec<usize> = route.hops.iter().map(|h| h.pool_idx).collect();
 
-        // Token path doğrulaması: rota WETH ile başlayıp WETH ile bitmeli
+        // Token path do�rulamas�: rota WETH ile ba�lay�p WETH ile bitmeli
         let token_path_valid = route.tokens.first() == route.tokens.last();
         if !token_path_valid {
             continue;
         }
 
-        // Hop token_in/token_out tutarlılık kontrolü
+        // Hop token_in/token_out tutarl�l�k kontrol�
         let hops_consistent = route.hops.windows(2).all(|w| {
             w[0].token_out == w[1].token_in
         });
@@ -1240,7 +1238,7 @@ pub fn check_multi_hop_opportunities(
         });
     }
 
-    // Kâra göre azalan sıra
+    // K�ra g�re azalan s�ra
     opportunities.sort_by(|a, b| {
         b.expected_profit_weth
             .partial_cmp(&a.expected_profit_weth)
@@ -1248,6 +1246,216 @@ pub fn check_multi_hop_opportunities(
     });
 
     opportunities
+}
+
+// �����������������������������������������������������������������������������
+// Multi-Hop F�rsat De�erlendirme ve Y�r�tme (v25.0)
+// �����������������������������������������������������������������������������
+
+/// Multi-hop arbitraj f�rsat�n� de�erlendir, sim�le et ve y�r�t.
+///
+/// check_multi_hop_opportunities ile bulunan en iyi f�rsat� al�r,
+/// REVM sim�lasyonu yapar ve MevExecutor ile Private RPC'ye g�nderir.
+///
+/// v25.0: G�lge modundan ��k�p ger�ek y�r�tme deste�i.
+pub async fn evaluate_and_execute_multi_hop<P: Provider + Sync>(
+    _provider: &P,
+    config: &BotConfig,
+    pools: &[PoolConfig],
+    states: &[SharedPoolState],
+    opportunity: &crate::types::MultiHopOpportunity,
+    sim_engine: &SimulationEngine,
+    stats: &mut ArbitrageStats,
+    nonce_manager: &Arc<NonceManager>,
+    block_timestamp: u64,
+    block_base_fee: u64,
+    _block_latency_ms: f64,
+    _l1_data_fee_wei: u128,
+    mev_executor: &Arc<crate::executor::MevExecutor>,
+) -> Option<u64> {
+    // Sıfır/NaN koruması
+    if opportunity.optimal_amount_weth <= 0.0
+        || !opportunity.expected_profit_weth.is_finite()
+    {
+        return None;
+    }
+
+    // Veri tazeli�i kontrol� � t�m hop havuzlar�
+    for &pool_idx in &opportunity.pool_indices {
+        if pool_idx >= states.len() { return None; }
+        let staleness = states[pool_idx].read().staleness_ms();
+        if staleness > config.max_staleness_ms {
+            eprintln!(
+                "     ?? [Multi-Hop FreshnessGate] Havuz #{} verisi �ok eski: {}ms > e�ik {}ms",
+                pool_idx, staleness, config.max_staleness_ms,
+            );
+            return None;
+        }
+    }
+
+    // Hop adresleri ve y�nleri
+    let pool_addrs: Vec<Address> = opportunity.pool_indices.iter()
+        .map(|&i| pools[i].address).collect();
+    let dirs_u8: Vec<u8> = opportunity.directions.iter()
+        .map(|&d| if d { 0u8 } else { 1u8 }).collect();
+
+    // Amount ve profit hesapla
+    let amount_wei = crate::math::exact::f64_to_u256_wei(opportunity.optimal_amount_weth);
+
+    // Exact profit do�rulamas�
+    let pool_states_ex: Vec<crate::types::PoolState> = opportunity.pool_indices.iter()
+        .map(|&i| states[i].read().clone()).collect();
+    let pool_configs_ex: Vec<&PoolConfig> = opportunity.pool_indices.iter()
+        .map(|&i| &pools[i]).collect();
+    let state_refs_ex: Vec<&crate::types::PoolState> = pool_states_ex.iter().collect();
+    let exact_profit = crate::math::compute_exact_profit_multi_hop(
+        &state_refs_ex, &pool_configs_ex, &opportunity.directions, amount_wei,
+    );
+
+    if exact_profit.is_zero() {
+        eprintln!("     ?? [Multi-Hop] Exact profit s�f�r � atlan�yor");
+        return None;
+    }
+
+    // Deadline block
+    let current_block = states[opportunity.pool_indices[0]].read().last_block;
+    let deadline_block = current_block as u32 + config.deadline_blocks.max(3);
+
+    // Dinamik slippage-adjusted minProfit
+    let min_liq = opportunity.pool_indices.iter()
+        .map(|&i| states[i].read().liquidity)
+        .min().unwrap_or(0);
+    let slippage_bps = if min_liq >= 10u128.pow(15) {
+        9950u64
+    } else if min_liq >= 10u128.pow(13) {
+        9900
+    } else {
+        9500
+    };
+    let min_profit = compute_min_profit_exact(exact_profit, slippage_bps);
+
+    // Multi-hop calldata olu�tur
+    let calldata = crate::simulator::encode_multi_hop_calldata(
+        &pool_addrs, &dirs_u8, amount_wei, min_profit, deadline_block,
+    );
+
+    // REVM sim�lasyonu (kontrat adresi varsa)
+    let revm_result = if let Some(contract_addr) = config.contract_address {
+        let caller = config.private_key.as_ref()
+            .and_then(|pk| pk.parse::<PrivateKeySigner>().ok())
+            .map(|signer| signer.address())
+            .unwrap_or_default();
+
+        sim_engine.simulate(
+            pools,
+            states,
+            caller,
+            contract_addr,
+            calldata.clone(),
+            U256::ZERO,
+            current_block as u64,
+            block_timestamp,
+            block_base_fee,
+        )
+    } else {
+        // Kontrat adresi yoksa matematiksel validasyon
+        sim_engine.validate_mathematical(
+            pools,
+            states,
+            opportunity.pool_indices[0],
+            *opportunity.pool_indices.last().unwrap_or(&0),
+            opportunity.optimal_amount_weth,
+        )
+    };
+
+    let simulated_gas_used = revm_result.gas_used;
+
+    if !revm_result.success {
+        stats.failed_simulations += 1;
+        stats.consecutive_failures += 1;
+        eprintln!(
+            "     ?? [Multi-Hop] REVM Sim�lasyon BA�ARISIZ: {}",
+            revm_result.error.as_deref().unwrap_or("Bilinmiyor"),
+        );
+        return None;
+    }
+
+    stats.consecutive_failures = 0;
+    stats.profitable_opportunities += 1;
+    stats.total_potential_profit += opportunity.expected_profit_weth;
+    if opportunity.expected_profit_weth > stats.max_profit_weth {
+        stats.max_profit_weth = opportunity.expected_profit_weth;
+    }
+
+    println!();
+    println!("{}", "  -===========================================================�".red().bold());
+    println!("{}", "  �  ????  MULTI-HOP K�RLI ARB�TRAJ FIRSATI  ????           �".red().bold());
+    println!("{}", "  �===========================================================�".red().bold());
+    println!("  {}  Rota             : {} ({})", "�".red(), opportunity.label, opportunity.hop_count);
+    println!("  {}  Optimal Miktar   : {:.6} WETH", "�".red(), opportunity.optimal_amount_weth);
+    println!("  {}  ?? NET K�R       : {:.6} WETH", "�".red(), opportunity.expected_profit_weth);
+    println!("  {}  Exact Profit     : {} wei", "�".red(), exact_profit);
+    println!("  {}  Calldata         : {} byte ({}-hop)", "�".red(), calldata.len(), opportunity.hop_count);
+    println!("  {}  REVM Sim�lasyon  : BA�ARILI (Gas: {})", "�".red(), simulated_gas_used);
+    println!("{}", "  L===========================================================-".red().bold());
+    println!();
+
+    // G�lge modu veya ger�ek y�r�tme
+    if config.shadow_mode() {
+        if revm_result.success {
+            stats.shadow_sim_success += 1;
+            stats.shadow_cumulative_profit += opportunity.expected_profit_weth;
+        } else {
+            stats.shadow_sim_fail += 1;
+        }
+        println!(
+            "  {} {}",
+            "??".yellow(),
+            "G�LGE MODU: Multi-hop i�lem atland� � shadow log'a kaydedildi".yellow().bold()
+        );
+    } else if config.execution_enabled() {
+        let pk = config.private_key.clone()
+            .expect("BUG: execution_enabled() true ama private_key None");
+        let contract_addr = config.contract_address
+            .expect("BUG: execution_enabled() true ama contract_address None");
+
+        let nonce = nonce_manager.get_and_increment();
+        let nm_clone = Arc::clone(nonce_manager);
+
+        stats.executed_trades += 1;
+
+        let sim_gas = simulated_gas_used;
+        let expected_profit = opportunity.expected_profit_weth;
+        let mev_exec = Arc::clone(mev_executor);
+        let calldata_owned = calldata;
+
+        tokio::spawn(async move {
+            println!("\n  {} {}", "????".yellow(), "MULTI-HOP KONTRAT TET�KLEME BA�LATILDI (Private RPC)".yellow().bold());
+
+            let result = mev_exec.execute_protected(
+                &pk,
+                contract_addr,
+                &calldata_owned,
+                nonce,
+                expected_profit,
+                sim_gas,
+                block_base_fee,
+                current_block as u64,
+                &nm_clone,
+            ).await;
+
+            match result {
+                Ok(hash) => {
+                    println!("  {} Multi-hop TX ba�ar�l� (Private RPC): {}", "?".green(), hash.green().bold());
+                }
+                Err(e) => {
+                    println!("  {} Multi-hop TX hatas�: {}", "?".red(), format!("{}", e).red());
+                }
+            }
+        });
+    }
+
+    Some(simulated_gas_used)
 }
 
 #[cfg(test)]
@@ -1294,7 +1502,7 @@ mod gas_spike_tests {
             latency_spike_threshold_ms: 200.0,
             private_rpc_url: None,
             rpc_wss_url_extra: Vec::new(),
-            max_pool_fee_bps: 200, // Test: yüksek tavan — gas spike testleri fee filtresinden etkilenmesin
+            max_pool_fee_bps: 200, // Test: y�ksek tavan � gas spike testleri fee filtresinden etkilenmesin
         }
     }
 
@@ -1330,13 +1538,13 @@ mod gas_spike_tests {
     }
 
     fn make_pool_state(eth_price: f64, liq: u128, block: u64) -> SharedPoolState {
-        // sqrtPriceX96 hesapla — math.rs::make_test_pool ile tutarlı formül
-        let price_ratio = eth_price * 1e-12; // token1/token0 raw fiyat oranı
+        // sqrtPriceX96 hesapla � math.rs::make_test_pool ile tutarl� form�l
+        let price_ratio = eth_price * 1e-12; // token1/token0 raw fiyat oran�
         let sqrt_price = price_ratio.sqrt();
         let sqrt_price_f64 = sqrt_price * (1u128 << 96) as f64;
-        // Tick'i sqrtPriceX96'dan doğru hesapla (dampening tutarlılığı için)
+        // Tick'i sqrtPriceX96'dan do�ru hesapla (dampening tutarl�l��� i�in)
         let tick = (price_ratio.ln() / 0.000_099_995_000_33_f64).floor() as i32;
-        // v7.0: U256 sqrtPriceX96 artık exact tick-bazlı hesaplanır
+        // v7.0: U256 sqrtPriceX96 art�k exact tick-bazl� hesaplan�r
         let sqrt_price_x96_u256 = math::exact::get_sqrt_ratio_at_tick(tick);
         Arc::new(RwLock::new(PoolState {
             sqrt_price_x96: sqrt_price_x96_u256,
@@ -1354,28 +1562,28 @@ mod gas_spike_tests {
         }))
     }
 
-    /// Gas spike testi: Base fee 5x artığında, önceki REVM simülasyonundan
-    /// gelen gas değeri ile hesaplanan maliyet kârı aşıyorsa, fırsat
-    /// reddedilmeli (check_arbitrage_opportunity → None).
+    /// Gas spike testi: Base fee 5x art���nda, �nceki REVM sim�lasyonundan
+    /// gelen gas de�eri ile hesaplanan maliyet k�r� a��yorsa, f�rsat
+    /// reddedilmeli (check_arbitrage_opportunity � None).
     ///
     /// Senaryo:
-    ///   - Beklenen kâr: ~0.002 WETH (küçük spread)
-    ///   - Normal base fee: 100 Gwei → gas cost ~0.000015 WETH
-    ///   - 5x spike: 500 Gwei → gas cost ~0.000075 WETH (hâlâ kârlı)
-    ///   - 50x spike: 5000 Gwei → gas cost ~0.00075 WETH
+    ///   - Beklenen k�r: ~0.002 WETH (k���k spread)
+    ///   - Normal base fee: 100 Gwei � gas cost ~0.000015 WETH
+    ///   - 5x spike: 500 Gwei � gas cost ~0.000075 WETH (h�l� k�rl�)
+    ///   - 50x spike: 5000 Gwei � gas cost ~0.00075 WETH
     ///
-    /// Asıl test: Dinamik gas değeri (last_simulated_gas) ile hesaplanan
-    /// maliyet, fırsatın kârlılık eşiğini doğru filtreliyor mu?
+    /// As�l test: Dinamik gas de�eri (last_simulated_gas) ile hesaplanan
+    /// maliyet, f�rsat�n k�rl�l�k e�i�ini do�ru filtreliyor mu?
     #[test]
     fn test_circuit_breaker_on_gas_spike() {
         let pools = make_pool_configs();
-        // min_net_profit = 0.0002 WETH → küçük kârlı fırsatları yakala
+        // min_net_profit = 0.0002 WETH � k���k k�rl� f�rsatlar� yakala
         let config = make_test_config(0.0002, 0.00005);
 
-        // Havuz fiyatları: %0.01 spread (çok dar)
-        // Bu spread ancak düşük gas'ta kârlı
+        // Havuz fiyatlar�: %0.01 spread (�ok dar)
+        // Bu spread ancak d���k gas'ta k�rl�
         let price_a = 2500.0;
-        let price_b = 2500.25; // $0.25 spread → ~$0.25 brüt kâr (düşük)
+        let price_b = 2500.25; // $0.25 spread � ~$0.25 br�t k�r (d���k)
 
         let liq = 50_000_000_000_000_000_000u128; // 50e18 likidite
 
@@ -1384,58 +1592,58 @@ mod gas_spike_tests {
             make_pool_state(price_b, liq, 100),
         ];
 
-        // ─── NORMAL GAS: base_fee = 100 Gwei ─────────────────────
+        // ��� NORMAL GAS: base_fee = 100 Gwei ���������������������
         let normal_base_fee: u64 = 100_000_000_000; // 100 Gwei
 
-        // Önceki REVM: 150K gas simüle edilmiş
+        // �nceki REVM: 150K gas sim�le edilmi�
         let last_sim_gas = Some(150_000u64);
 
         // Gas cost = 150K * 100 Gwei / 1e18 = 0.000015 WETH
-        // Küçük spread → Newton-Raphson çok düşük optimal miktar hesaplar
-        // → kârın gas'ı karşılayıp karşılamayacağı NR'a bağlı
+        // K���k spread � Newton-Raphson �ok d���k optimal miktar hesaplar
+        // � k�r�n gas'� kar��lay�p kar��lamayaca�� NR'a ba�l�
         let result_normal = check_arbitrage_opportunity(
             &pools, &states, &config, normal_base_fee, last_sim_gas, 0,
         );
-        // Not: NR sonucu spread'e ve likiditeye bağlı — bu test gas etkisini ölçer
+        // Not: NR sonucu spread'e ve likiditeye ba�l� � bu test gas etkisini �l�er
 
-        // ─── GAS SPİKE: base_fee 5000x → 500.000 Gwei ───────────
-        // Gerçekçi olmayan ama stres testi: base_fee = 500K Gwei
+        // ��� GAS SP�KE: base_fee 5000x � 500.000 Gwei �����������
+        // Ger�ek�i olmayan ama stres testi: base_fee = 500K Gwei
         // Gas cost = 150K * 500K Gwei / 1e18 = 0.075 WETH
-        // Hiçbir küçük spread bunu karşılayamaz
-        let spike_base_fee: u64 = 500_000_000_000_000; // 500K Gwei (aşırı spike)
+        // Hi�bir k���k spread bunu kar��layamaz
+        let spike_base_fee: u64 = 500_000_000_000_000; // 500K Gwei (a��r� spike)
 
         let result_spike = check_arbitrage_opportunity(
             &pools, &states, &config, spike_base_fee, last_sim_gas, 0,
         );
 
-        // Gas spike durumunda fırsat kesinlikle reddedilmeli
+        // Gas spike durumunda f�rsat kesinlikle reddedilmeli
         assert!(
             result_spike.is_none(),
-            "Aşırı gas spike (0.075+ WETH maliyet) ile fırsat reddedilmeli (None dönmeli)"
+            "A��r� gas spike (0.075+ WETH maliyet) ile f�rsat reddedilmeli (None d�nmeli)"
         );
 
-        // ─── DİNAMİK GAS ETKİSİ TESTİ ──────────────────────────
-        // Aynı base_fee, farklı REVM gas tahmini
-        // 150K gas → 0.000015 WETH, 1.5M gas → 0.00015 WETH
+        // ��� D�NAM�K GAS ETK�S� TEST� ��������������������������
+        // Ayn� base_fee, farkl� REVM gas tahmini
+        // 150K gas � 0.000015 WETH, 1.5M gas � 0.00015 WETH
         let high_gas = Some(1_500_000u64); // 10x daha fazla gas
         let result_high_gas = check_arbitrage_opportunity(
             &pools, &states, &config, normal_base_fee, high_gas, 0,
         );
 
-        // Yüksek gas tahminiyle maliyet artar → bazı fırsatlar reddedilir
-        // Bu testin amacı: last_simulated_gas'ın gerçekten kullanıldığını kanıtlamak
-        // Eğer hâlâ hardcoded 150K kullanılsaydı, high_gas parametresi etkisiz olurdu
+        // Y�ksek gas tahminiyle maliyet artar � baz� f�rsatlar reddedilir
+        // Bu testin amac�: last_simulated_gas'�n ger�ekten kullan�ld���n� kan�tlamak
+        // E�er h�l� hardcoded 150K kullan�lsayd�, high_gas parametresi etkisiz olurdu
         let result_low_gas = check_arbitrage_opportunity(
-            &pools, &states, &config, normal_base_fee, Some(10_000u64), 0, // Çok düşük gas
+            &pools, &states, &config, normal_base_fee, Some(10_000u64), 0, // �ok d���k gas
         );
 
-        // Düşük gas → düşük maliyet → fırsat bulma olasılığı ARTAR
-        // Yüksek gas → yüksek maliyet → fırsat bulma olasılığı AZALIR
-        // En azından biri farklı sonuç vermeli (dinamik gas etkisi kanıtı)
-        // Not: Her ikisi de None olabilir (spread çok dar) ama bu bile kabul
-        // edilir — önemli olan spike'ın None döndürmesi.
+        // D���k gas � d���k maliyet � f�rsat bulma olas�l��� ARTAR
+        // Y�ksek gas � y�ksek maliyet � f�rsat bulma olas�l��� AZALIR
+        // En az�ndan biri farkl� sonu� vermeli (dinamik gas etkisi kan�t�)
+        // Not: Her ikisi de None olabilir (spread �ok dar) ama bu bile kabul
+        // edilir � �nemli olan spike'�n None d�nd�rmesi.
         eprintln!(
-            "Gas spike test sonuçları: normal={:?}, spike={:?}, high_gas={:?}, low_gas={:?}",
+            "Gas spike test sonu�lar�: normal={:?}, spike={:?}, high_gas={:?}, low_gas={:?}",
             result_normal.as_ref().map(|r| r.expected_profit_weth),
             result_spike.as_ref().map(|r| r.expected_profit_weth),
             result_high_gas.as_ref().map(|r| r.expected_profit_weth),
@@ -1443,17 +1651,17 @@ mod gas_spike_tests {
         );
     }
 
-    /// Gas spike ile kârlı fırsat: Büyük spread yüksek gas'ı karşılar.
+    /// Gas spike ile k�rl� f�rsat: B�y�k spread y�ksek gas'� kar��lar.
     ///
-    /// Senaryo: %2 spread (büyük kâr potansiyeli), 5x gas spike
+    /// Senaryo: %2 spread (b�y�k k�r potansiyeli), 5x gas spike
     /// Gas cost: 150K * 500 Gwei / 1e18 = 0.000075 WETH
-    /// Kâr >> gas cost → fırsat hâlâ kârlı olmalı
+    /// K�r >> gas cost � f�rsat h�l� k�rl� olmal�
     #[test]
     fn test_gas_spike_large_spread_still_profitable() {
         let pools = make_pool_configs();
         let config = make_test_config(0.0002, 0.00005);
 
-        // Büyük spread: %2 → kârlı olmalı (yüksek gas'a rağmen)
+        // B�y�k spread: %2 � k�rl� olmal� (y�ksek gas'a ra�men)
         let price_a = 2450.0;
         let price_b = 2500.0; // ~%2 spread
         let liq = 50_000_000_000_000_000_000u128;
@@ -1471,21 +1679,21 @@ mod gas_spike_tests {
             &pools, &states, &config, spike_base_fee, last_sim_gas, 0,
         );
 
-        // Büyük spread gas spike'ını karşılamalı
+        // B�y�k spread gas spike'�n� kar��lamal�
         assert!(
             result.is_some(),
-            "Büyük spread (%2) ile gas spike'a rağmen fırsat bulunmalı"
+            "B�y�k spread (%2) ile gas spike'a ra�men f�rsat bulunmal�"
         );
         let opp = result.unwrap();
         assert!(
             opp.expected_profit_weth > 0.0002,
-            "Kâr minimum eşikten ({}) yüksek olmalı: {:.6}",
+            "K�r minimum e�ikten ({}) y�ksek olmal�: {:.6}",
             0.0002,
             opp.expected_profit_weth
         );
     }
 
-    /// Base fee = 0 fallback testi: EIP-1559 öncesi veya hata durumu.
+    /// Base fee = 0 fallback testi: EIP-1559 �ncesi veya hata durumu.
     #[test]
     fn test_zero_base_fee_uses_config_fallback() {
         let pools = make_pool_configs();
@@ -1500,14 +1708,14 @@ mod gas_spike_tests {
             make_pool_state(price_b, liq, 100),
         ];
 
-        // base_fee = 0 → config.gas_cost_fallback_weth (0.00005 WETH)
+        // base_fee = 0 � config.gas_cost_fallback_weth (0.00005 WETH)
         let result = check_arbitrage_opportunity(
             &pools, &states, &config, 0, Some(150_000), 0,
         );
 
         assert!(
             result.is_some(),
-            "base_fee=0 durumunda config fallback ile fırsat bulunmalı"
+            "base_fee=0 durumunda config fallback ile f�rsat bulunmal�"
         );
     }
 }

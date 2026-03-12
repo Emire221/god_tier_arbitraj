@@ -39,6 +39,8 @@ struct DexPair {
     chain_id: String,
     dex_id: String,
     pair_address: String,
+    /// DexScreener etiketleri — havuz tipini belirler (ör: ["v3"], ["v2"], ["CLAMM"])
+    labels: Option<Vec<String>>,
     base_token: DexToken,
     quote_token: DexToken,
     liquidity: Option<DexLiquidity>,
@@ -67,6 +69,8 @@ struct DexVolume {
 struct DiscoveredPool {
     address: String,
     dex: String,
+    /// DexScreener etiketleri (debug/log amaçlı taşınır)
+    labels: Option<Vec<String>>,
     base_token_address: String,
     base_symbol: String,
     quote_token_address: String,
@@ -132,6 +136,41 @@ fn normalize_pair_key(addr_a: &str, addr_b: &str) -> (String, String) {
 
 fn fee_tier_to_bps(fee_tier: Option<f64>) -> u32 {
     fee_tier.map(|f| (f * 100.0).round() as u32).unwrap_or(0)
+}
+
+/// V3/Konsantre Likidite (CL) doğrulaması.
+///
+/// Üç katmanlı karar ağacı:
+///   1. Labels beyaz liste: v3, v4, cl, clamm, clpool, slipstream → V3 kesin
+///   2. Labels kara liste: v1, v2, stable, vamm → V2 kesin, REDDET
+///   3. Fee-tier fallback: Aerodrome/PancakeSwap labels döndürmez,
+///      fee_tier varlığı V3 (CL) göstergesidir.
+///
+/// Hiçbir koşul sağlanmazsa V2 varsayılır ve havuz reddedilir.
+fn is_v3_pool(labels: &Option<Vec<String>>, dex_id: &str, fee_tier: &Option<f64>) -> bool {
+    const V3_WHITELIST: &[&str] = &["v3", "v4", "cl", "clamm", "clpool", "slipstream"];
+    const V2_BLACKLIST: &[&str] = &["v1", "v2", "stable", "vamm"];
+
+    if let Some(tags) = labels {
+        for tag in tags {
+            let lower = tag.to_lowercase();
+            if V3_WHITELIST.iter().any(|w| lower == *w) { return true; }
+            if V2_BLACKLIST.iter().any(|b| lower == *b) { return false; }
+        }
+    }
+
+    // Aerodrome: labels yok, fee_tier varsa Slipstream (CL)
+    let dex_lower = dex_id.to_lowercase();
+    if dex_lower.contains("aerodrome") || dex_lower.contains("slipstream") {
+        return fee_tier.is_some();
+    }
+
+    // PancakeSwap/SushiSwap: labels yok, fee_tier varsa V3
+    if dex_lower.contains("pancake") || dex_lower.contains("sushi") {
+        return fee_tier.is_some();
+    }
+
+    false // Bilinmeyen → V2 varsay → REDDET
 }
 
 fn infer_tick_spacing(dex_id: &str, fee_bps: u32) -> i32 {
@@ -249,6 +288,20 @@ async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> 
                 || dex.contains("sushiswap")
                 || dex.contains("aerodrome")
         })
+        // ── V3 Zırhı — V2 Zombi Bariyeri ──────────────────────
+        // Sadece V3/CL havuzları geçer. V2 vAMM havuzları slot0()
+        // ABI'sine sahip değildir → REVM execution reverted hatasına
+        // ve gereksiz RPC israfına yol açar.
+        .filter(|p| {
+            let pass = is_v3_pool(&p.labels, &p.dex_id, &p.fee_tier);
+            if !pass {
+                eprintln!(
+                    "  {} V2 havuz reddedildi: {} ({}) [labels: {:?}]",
+                    "🛡️", p.pair_address, p.dex_id, p.labels
+                );
+            }
+            pass
+        })
         .filter(|p| {
             // v22.0: Minimum likidite eşiği $25K → $50K
             // Düşük likiditeli havuzlarda slippage yüksek, kâr marjı dar.
@@ -277,6 +330,7 @@ async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> 
         .map(|p| DiscoveredPool {
             address: p.pair_address,
             dex: p.dex_id,
+            labels: p.labels,
             base_token_address: p.base_token.address,
             base_symbol: p.base_token.symbol,
             quote_token_address: p.quote_token.address,

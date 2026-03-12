@@ -503,25 +503,14 @@ async fn main() -> Result<()> {
         }
     }
 
-    // ═══ GÖREV 2: Auto-Bootstrap — matched_pools.json yoksa veya boşsa otomatik keşif ═══
+    // ═══ GÖREV 2: Auto-Bootstrap — Her başlangıçta havuz keşfi (v32.0) ═══
     // ═══ v29.0: CORE POOLS — Statik beyaz liste öncelikli ═══
     let matched_cfg = if let Some(core_cfg) = pool_discovery::load_core_pools() {
+        eprintln!("  {} core_pools.json bulundu — otomatik keşif atlanıyor.", "⚙️".cyan());
         core_cfg
     } else {
-        let needs_discovery = match std::fs::metadata("matched_pools.json") {
-            Ok(meta) => meta.len() == 0,
-            Err(_) => true,
-        };
-
-        if needs_discovery {
-            eprintln!(
-                "  {} matched_pools.json {} — otomatik havuz keşfi başlatılıyor...",
-                "🔍".cyan(),
-                if std::path::Path::new("matched_pools.json").exists() { "boş" } else { "bulunamadı" }
-            );
-            pool_discovery::cli_discover_pools().await?;
-        }
-
+        eprintln!("  {} Otomatik havuz keşfi (Kutsal Üçlü) başlatılıyor...", "🔍".cyan());
+        pool_discovery::cli_discover_pools().await?;
         pool_discovery::load_matched_pools()?
     };
     let (pools_initial, pair_combos_initial) = pool_discovery::build_runtime(&matched_cfg)?;

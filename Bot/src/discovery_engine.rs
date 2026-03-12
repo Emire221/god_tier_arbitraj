@@ -805,46 +805,86 @@ async fn api_aggregator_loop(
         // Kaynak 1: DexScreener (birincil)
         match discover_dexscreener(config).await {
             Ok(pools) => {
-                let count = pools.len();
-                let mut reg = registry.write();
-                for pool in pools {
-                    reg.enqueue_pending(pool);
-                }
-                if count > 0 {
-                    reg.stats.api_discoveries += count as u64;
-                    eprintln!(
-                        "  {} [DexScreener] {} yeni havuz keşfedildi",
-                        "🌐".cyan(), count
-                    );
+                if !pools.is_empty() {
+                    let mut pool_map: HashMap<String, PendingPool> = HashMap::new();
+                    let candidates: Vec<crate::pool_discovery::DiscoveredPool> = pools.into_iter().map(|p| {
+                        let pool_addr_str = format!("{:?}", p.config.address).to_lowercase();
+                        pool_map.insert(pool_addr_str, p.clone());
+                        crate::pool_discovery::DiscoveredPool {
+                            address: format!("{:?}", p.config.address),
+                            base_token_address: format!("{:?}", p.config.base_token_address),
+                            base_symbol: String::new(), // Not needed for slot0 call
+                            quote_token_address: format!("{:?}", p.config.quote_token_address),
+                            quote_symbol: String::new(), // Not needed for slot0 call
+                            dex: format!("{:?}", p.config.dex),
+                            liquidity_usd: p.score * 1000.0,
+                            volume_24h: p.score * 1000.0,
+                            fee_tier: Some(p.config.fee_fraction),
+                            labels: None,
+                            gecko_name: None,
+                            source: "dexscreener".to_string(),
+                        }
+                    }).collect();
+
+                    let validated = crate::pool_discovery::on_chain_validate(candidates).await;
+                    let count = validated.len();
+
+                    let mut reg = registry.write();
+                    for pool in validated {
+                        if let Some(original_pending) = pool_map.get(&pool.address.to_lowercase()) {
+                            reg.enqueue_pending(original_pending.clone());
+                        }
+                    }
+                    if count > 0 {
+                        reg.stats.api_discoveries += count as u64;
+                        eprintln!("  {} [DexScreener] {} yeni havuz doğrulandı ve eklendi", "🌐".cyan(), count);
+                    }
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "  {} [DexScreener] API hatası — GeckoTerminal'e geçiliyor: {}",
-                    "⚠️".yellow(), e
-                );
+                eprintln!("  {} [DexScreener] API hatası — GeckoTerminal'e geçiliyor: {}", "⚠️".yellow(), e);
 
                 // Kaynak 2: GeckoTerminal (fallback)
                 match discover_gecko_terminal(config).await {
                     Ok(pools) => {
-                        let count = pools.len();
-                        let mut reg = registry.write();
-                        for pool in pools {
-                            reg.enqueue_pending(pool);
-                        }
-                        if count > 0 {
-                            reg.stats.api_discoveries += count as u64;
-                            eprintln!(
-                                "  {} [GeckoTerminal] {} yeni havuz keşfedildi (fallback)",
-                                "🦎".green(), count
-                            );
+                        if !pools.is_empty() {
+                            let mut pool_map: HashMap<String, PendingPool> = HashMap::new();
+                            let candidates: Vec<crate::pool_discovery::DiscoveredPool> = pools.into_iter().map(|p| {
+                                let pool_addr_str = format!("{:?}", p.config.address).to_lowercase();
+                                pool_map.insert(pool_addr_str, p.clone());
+                                crate::pool_discovery::DiscoveredPool {
+                                    address: format!("{:?}", p.config.address),
+                                    base_token_address: format!("{:?}", p.config.base_token_address),
+                                    base_symbol: String::new(),
+                                    quote_token_address: format!("{:?}", p.config.quote_token_address),
+                                    quote_symbol: String::new(),
+                                    dex: format!("{:?}", p.config.dex),
+                                    liquidity_usd: p.score * 1000.0,
+                                    volume_24h: p.score * 1000.0,
+                                    fee_tier: Some(p.config.fee_fraction),
+                                    labels: None,
+                                    gecko_name: None,
+                                    source: "geckoterminal".to_string(),
+                                }
+                            }).collect();
+
+                            let validated = crate::pool_discovery::on_chain_validate(candidates).await;
+                            let count = validated.len();
+
+                            let mut reg = registry.write();
+                            for pool in validated {
+                                if let Some(original_pending) = pool_map.get(&pool.address.to_lowercase()) {
+                                    reg.enqueue_pending(original_pending.clone());
+                                }
+                            }
+                            if count > 0 {
+                                reg.stats.api_discoveries += count as u64;
+                                eprintln!("  {} [GeckoTerminal] {} yeni havuz doğrulandı ve eklendi (fallback)", "🦎".green(), count);
+                            }
                         }
                     }
                     Err(e2) => {
-                        eprintln!(
-                            "  {} [GeckoTerminal] Fallback da başarısız: {}",
-                            "❌".red(), e2
-                        );
+                        eprintln!("  {} [GeckoTerminal] Fallback da başarısız: {}", "❌".red(), e2);
                     }
                 }
             }

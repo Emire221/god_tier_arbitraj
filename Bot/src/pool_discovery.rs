@@ -1,14 +1,32 @@
 // ============================================================================
-//  POOL DISCOVERY v11.0 — DexScreener API + Otonom Çift Eşleştirme Motoru
+//  POOL DISCOVERY v26.0 — Kutsal Üçlü Keşif Motoru (Holy Trinity)
 //
-//  v11.0 Yenilikler:
-//  ✓ Token bazlı gruplayma (HashMap<(token0, token1), Vec<Pool>>)
-//  ✓ Çapraz-DEX arbitraj çift eşleştirme (aynı token çifti, farklı DEX)
-//  ✓ matched_pools.json yapılandırılmış çıktı (serde_json)
-//  ✓ build_runtime: JSON → PoolConfig + PairCombo dönüşümü
+//  3 Aşamalı Konsensüs & Doğrulama Mimarisi:
 //
-//  v10.0 (korunuyor):
-//  ✓ DexScreener API, komisyon filtresi (≤ %0.01), likidite filtresi ($50K+)
+//  Aşama 1: Veri Toplama
+//    ✓ DexScreener API — Yüksek hacimli havuzları getirir
+//    ✓ GeckoTerminal API — V3 etiketlerini (labels) çapraz doğrular
+//
+//  Aşama 2: Off-Chain Filtre
+//    ✓ HashMap dedup + veri zenginleştirme (merge)
+//    ✓ V3/CL label + isim analizi (whitelist/blacklist)
+//    ✓ Hacim ($10K+), likidite ($50K+), fee (≤%0.05) filtreleri
+//
+//  Aşama 3: On-Chain RPC Doğrulama (Nihai Yargıç)
+//    ✓ slot0() eth_call ile gerçek V3 kanıtı
+//    ✓ Paralel sorgulama (futures::join_all)
+//    ✓ 2s timeout per call
+//    ✓ execution reverted → havuz reddedilir
+//
+//  Pipeline:
+//    DexScreener ──┐
+//                  ├─► merge ─► off_chain_filter ─► on_chain_validate
+//    GeckoTerminal ┘                                        │
+//                                                           ▼
+//                                              match_arbitrage_pairs
+//                                                           │
+//                                                           ▼
+//                                                  matched_pools.json
 // ============================================================================
 
 use eyre::Result;
@@ -16,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use colored::*;
 use std::collections::HashMap;
 use alloy::primitives::Address;
+use futures_util::future::join_all;
 
 use crate::types::{DexType, PoolConfig};
 
@@ -23,6 +42,12 @@ use crate::types::{DexType, PoolConfig};
 const BASE_WETH_LOWER: &str = "0x4200000000000000000000000000000000000006";
 const MATCHED_POOLS_PATH: &str = "matched_pools.json";
 const CORE_POOLS_PATH: &str = "core_pools.json";
+
+/// slot0() fonksiyon seçicisi (4 byte): keccak256("slot0()")[0..4]
+const SLOT0_SELECTOR: [u8; 4] = [0x38, 0x50, 0xc7, 0xbd];
+
+/// On-Chain doğrulama için eth_call timeout (saniye)
+const ONCHAIN_CALL_TIMEOUT_SECS: u64 = 2;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DexScreener API Yanıt Yapıları
@@ -33,7 +58,7 @@ struct DexScreenerResponse {
     pairs: Option<Vec<DexPair>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct DexPair {
     chain_id: String,
@@ -48,36 +73,87 @@ struct DexPair {
     fee_tier: Option<f64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct DexToken {
     address: String,
     symbol: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct DexLiquidity {
     usd: Option<f64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct DexVolume {
     h24: Option<f64>,
 }
 
-/// Keşfedilen havuz bilgisi (internal — sadece keşif aşamasında kullanılır)
+// ─────────────────────────────────────────────────────────────────────────────
+// GeckoTerminal API Yanıt Yapıları
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct GeckoResponse {
+    data: Option<Vec<GeckoPoolData>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct GeckoPoolData {
+    /// Format: "base_0xADDRESS"
+    id: Option<String>,
+    attributes: Option<GeckoPoolAttributes>,
+    relationships: Option<GeckoRelationships>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct GeckoPoolAttributes {
+    address: Option<String>,
+    name: Option<String>,
+    /// GeckoTerminal'in pool_created_at alanı (debug için)
+    pool_created_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeckoRelationships {
+    dex: Option<GeckoDexRelation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeckoDexRelation {
+    data: Option<GeckoDexData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeckoDexData {
+    /// GeckoTerminal DEX ID — ör: "uniswap_v3_base", "aerodrome-slipstream"
+    id: Option<String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Birleştirilmiş Havuz Verisi (Internal)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Keşfedilen havuz bilgisi — tüm veri kaynaklarından birleştirilmiş
 #[derive(Debug, Clone)]
-struct DiscoveredPool {
-    address: String,
-    dex: String,
-    /// DexScreener etiketleri (debug/log amaçlı taşınır)
-    labels: Option<Vec<String>>,
-    base_token_address: String,
-    base_symbol: String,
-    quote_token_address: String,
-    quote_symbol: String,
-    liquidity_usd: f64,
-    volume_24h: f64,
-    fee_tier: Option<f64>,
+pub struct DiscoveredPool {
+    pub address: String,
+    pub dex: String,
+    /// Birleşik etiketler (DexScreener + GeckoTerminal)
+    pub labels: Option<Vec<String>>,
+    /// GeckoTerminal havuz adı (V3 ipuçları için)
+    pub gecko_name: Option<String>,
+    pub base_token_address: String,
+    pub base_symbol: String,
+    pub quote_token_address: String,
+    pub quote_symbol: String,
+    pub liquidity_usd: f64,
+    pub volume_24h: f64,
+    pub fee_tier: Option<f64>,
+    /// Veri kaynakları: "dexscreener", "geckoterminal", "both"
+    pub source: String,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -138,19 +214,21 @@ fn fee_tier_to_bps(fee_tier: Option<f64>) -> u32 {
     fee_tier.map(|f| (f * 100.0).round() as u32).unwrap_or(0)
 }
 
-/// V3/Konsantre Likidite (CL) doğrulaması.
+/// V3/Konsantre Likidite (CL) doğrulaması — Off-Chain Aşama.
 ///
 /// Üç katmanlı karar ağacı:
 ///   1. Labels beyaz liste: v3, v4, cl, clamm, clpool, slipstream → V3 kesin
 ///   2. Labels kara liste: v1, v2, stable, vamm → V2 kesin, REDDET
 ///   3. Fee-tier fallback: Aerodrome/PancakeSwap labels döndürmez,
 ///      fee_tier varlığı V3 (CL) göstergesidir.
+///   4. İsim analizi: GeckoTerminal havuz adında "v3", "cl", "slipstream" geçer mi?
 ///
 /// Hiçbir koşul sağlanmazsa V2 varsayılır ve havuz reddedilir.
-fn is_v3_pool(labels: &Option<Vec<String>>, dex_id: &str, fee_tier: &Option<f64>) -> bool {
+fn is_v3_pool(labels: &Option<Vec<String>>, dex_id: &str, fee_tier: &Option<f64>, gecko_name: &Option<String>) -> bool {
     const V3_WHITELIST: &[&str] = &["v3", "v4", "cl", "clamm", "clpool", "slipstream"];
     const V2_BLACKLIST: &[&str] = &["v1", "v2", "stable", "vamm"];
 
+    // 1. Label tabanlı karar
     if let Some(tags) = labels {
         for tag in tags {
             let lower = tag.to_lowercase();
@@ -159,13 +237,24 @@ fn is_v3_pool(labels: &Option<Vec<String>>, dex_id: &str, fee_tier: &Option<f64>
         }
     }
 
-    // Aerodrome: labels yok, fee_tier varsa Slipstream (CL)
+    // 2. GeckoTerminal havuz ismi analizi
+    if let Some(name) = gecko_name {
+        let name_lower = name.to_lowercase();
+        if V3_WHITELIST.iter().any(|w| name_lower.contains(w)) {
+            return true;
+        }
+        if V2_BLACKLIST.iter().any(|b| name_lower.contains(b)) {
+            return false;
+        }
+    }
+
+    // 3. Aerodrome: labels yok, fee_tier varsa Slipstream (CL)
     let dex_lower = dex_id.to_lowercase();
     if dex_lower.contains("aerodrome") || dex_lower.contains("slipstream") {
         return fee_tier.is_some();
     }
 
-    // PancakeSwap/SushiSwap: labels yok, fee_tier varsa V3
+    // 4. PancakeSwap/SushiSwap: labels yok, fee_tier varsa V3
     if dex_lower.contains("pancake") || dex_lower.contains("sushi") {
         return fee_tier.is_some();
     }
@@ -224,19 +313,16 @@ fn infer_dex_type(dex_id: &str) -> Option<DexType> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DexScreener Keşif
+// AŞAMA 1a: DexScreener Veri Toplama
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> {
-    // v22.0: Tek veri kaynağı uyarısı — DexScreener API'si çökerse keşif durur.
-    // Gelecek sürümde on-chain factory event taraması (ek kaynak) eklenecektir.
-    // Mevcut sistem DexScreener başarısız olursa matched_pools.json cache'ini kullanır.
+async fn fetch_dexscreener_pools() -> Result<Vec<DexPair>> {
     let url = format!(
         "https://api.dexscreener.com/latest/dex/tokens/{}",
         BASE_WETH_LOWER
     );
 
-    eprintln!("  {} DexScreener API sorgulanıyor...", "🔍".cyan());
+    eprintln!("  {} [Aşama 1a] DexScreener API sorgulanıyor...", "🔍".cyan());
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -250,7 +336,7 @@ async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> 
         .await
         .map_err(|e| eyre::eyre!("DexScreener API hatası: {}", e))?;
 
-    // v25.0: Rate limiting — 429 Too Many Requests durumunda backoff
+    // Rate limiting — 429 Too Many Requests durumunda backoff
     if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
         let retry_after = resp.headers()
             .get("retry-after")
@@ -267,20 +353,12 @@ async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> 
 
     let resp: DexScreenerResponse = resp.json()
         .await
-        .map_err(|e| eyre::eyre!("JSON parse hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("DexScreener JSON parse hatası: {}", e))?;
 
-    let pairs = resp.pairs.unwrap_or_default();
-
-    // Base ağı + minimum likidite filtresi
-    let mut discovered: Vec<DiscoveredPool> = pairs
+    let pairs: Vec<DexPair> = resp.pairs.unwrap_or_default()
         .into_iter()
         .filter(|p| p.chain_id == "base")
-        // ── DEX Beyaz Listesi (V3 ABI uyumlu) ───────────────
-        // Uniswap V3 swap() / slot0() ABI’si ile uyumlu DEX’ler.
-        // Her DEX'in slot0 struct farkları state_sync.rs ve
-        // simulator.rs'de DEX-özel olarak ele alınır.
-        // v17.0: Aerodrome Slipstream (CLPool) eklendi —
-        //        slot0 6 alan, callback=uniswapV3SwapCallback
+        // DEX Beyaz Listesi (V3 ABI uyumlu)
         .filter(|p| {
             let dex = p.dex_id.to_lowercase();
             dex.contains("uniswap")
@@ -288,49 +366,124 @@ async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> 
                 || dex.contains("sushiswap")
                 || dex.contains("aerodrome")
         })
-        // ── V3 Zırhı — V2 Zombi Bariyeri ──────────────────────
-        // Sadece V3/CL havuzları geçer. V2 vAMM havuzları slot0()
-        // ABI'sine sahip değildir → REVM execution reverted hatasına
-        // ve gereksiz RPC israfına yol açar.
-        .filter(|p| {
-            let pass = is_v3_pool(&p.labels, &p.dex_id, &p.fee_tier);
-            if !pass {
-                eprintln!(
-                    "  {} V2 havuz reddedildi: {} ({}) [labels: {:?}]",
-                    "🛡️", p.pair_address, p.dex_id, p.labels
-                );
+        .collect();
+
+    eprintln!(
+        "  {} [DexScreener] {} havuz alındı (Base, beyaz liste DEX'ler)",
+        "✅".green(), pairs.len()
+    );
+
+    Ok(pairs)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AŞAMA 1b: GeckoTerminal Veri Toplama
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn fetch_geckoterminal_pools() -> Vec<GeckoPoolData> {
+    // Birden fazla sayfa çekerek daha fazla veri topla
+    let pages = [1, 2, 3];
+    let mut all_pools: Vec<GeckoPoolData> = Vec::new();
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("  ⚠️ [GeckoTerminal] HTTP client oluşturulamadı: {} — atlanıyor", e);
+            return Vec::new();
+        }
+    };
+
+    for page in pages {
+        let url = format!(
+            "https://api.geckoterminal.com/api/v2/networks/base/pools?page={}&sort=h24_tx_count_desc",
+            page
+        );
+
+        let resp = match client
+            .get(&url)
+            .header("Accept", "application/json")
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("  ⚠️ [GeckoTerminal] Sayfa {} API hatası: {} — devam ediliyor", page, e);
+                continue;
             }
-            pass
-        })
-        .filter(|p| {
-            // v22.0: Minimum likidite eşiği $25K → $50K
-            // Düşük likiditeli havuzlarda slippage yüksek, kâr marjı dar.
-            // $50K altındaki havuzlar arbitraj için yeterli derinlik sunmaz.
-            p.liquidity
-                .as_ref()
-                .and_then(|l| l.usd)
-                .unwrap_or(0.0)
-                >= 50_000.0
-        })
-        // v19.0: Minimum 24h hacim filtresi — düşük hacimli havuzlar
-        // yeterli volatilite sunmaz, arbitraj fırsatı nadir olur.
-        .filter(|p| {
-            p.volume
-                .as_ref()
-                .and_then(|v| v.h24)
-                .unwrap_or(0.0)
-                >= 10_000.0
-        })
-        // v24.0: Keşif komisyon filtresi: 0.30 → 0.05 daraltıldı.
-        // %0.30+ komisyonlu havuzlarda toplam fee (%0.30 + %0.30 = %0.60)
-        // spread'in fee'leri tolere edemediğini gösterdi. Yalnızca düşük
-        // komisyonlu havuzlara (%0.01, %0.05) odaklanmak kârlılığı artırır.
-        // 100 bps (%0.01) ve 500 bps (%0.05) fee tier'ları hedeflenir.
-        .filter(|p| p.fee_tier.map_or(true, |fee| fee <= 0.05))
-        .map(|p| DiscoveredPool {
+        };
+
+        // Rate limit handling
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            eprintln!("  ⚠️ [GeckoTerminal] Rate limit (429) — sayfa {} atlanıyor", page);
+            // Kısa bekleme ve devam
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            continue;
+        }
+
+        if !resp.status().is_success() {
+            eprintln!(
+                "  ⚠️ [GeckoTerminal] Sayfa {} HTTP {} — atlanıyor",
+                page, resp.status()
+            );
+            continue;
+        }
+
+        match resp.json::<GeckoResponse>().await {
+            Ok(gecko_resp) => {
+                let pools = gecko_resp.data.unwrap_or_default();
+                all_pools.extend(pools);
+            }
+            Err(e) => {
+                eprintln!("  ⚠️ [GeckoTerminal] Sayfa {} JSON parse hatası: {} — atlanıyor", page, e);
+                continue;
+            }
+        }
+
+        // Sayfalar arası kısa bekleme (rate limit koruması)
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    eprintln!(
+        "  {} [GeckoTerminal] {} havuz alındı (Base, {} sayfa)",
+        if all_pools.is_empty() { "⚠️" } else { "✅" },
+        all_pools.len(),
+        pages.len()
+    );
+
+    all_pools
+}
+
+/// GeckoTerminal DEX ID'sinden V3 etiketi çıkar
+/// Ör: "uniswap_v3_base" → Some("v3"), "aerodrome-slipstream" → Some("slipstream")
+fn extract_gecko_v3_label(dex_id: &str) -> Option<String> {
+    let lower = dex_id.to_lowercase();
+    if lower.contains("v3") { return Some("v3".to_string()); }
+    if lower.contains("slipstream") { return Some("slipstream".to_string()); }
+    if lower.contains("clpool") || lower.contains("cl_pool") { return Some("clpool".to_string()); }
+    if lower.contains("clamm") { return Some("clamm".to_string()); }
+    // V2 tespiti
+    if lower.contains("v2") { return Some("v2".to_string()); }
+    None
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AŞAMA 2: Veri Birleştirme (Data Merging & Deduplication)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn merge_pool_sources(dex_pairs: Vec<DexPair>, gecko_pools: Vec<GeckoPoolData>) -> Vec<DiscoveredPool> {
+    let mut pool_map: HashMap<String, DiscoveredPool> = HashMap::new();
+
+    // ── DexScreener verilerini ekle (primary kaynak) ──
+    for p in dex_pairs {
+        let addr_lower = p.pair_address.to_lowercase();
+        pool_map.insert(addr_lower.clone(), DiscoveredPool {
             address: p.pair_address,
             dex: p.dex_id,
             labels: p.labels,
+            gecko_name: None,
             base_token_address: p.base_token.address,
             base_symbol: p.base_token.symbol,
             quote_token_address: p.quote_token.address,
@@ -338,13 +491,89 @@ async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> 
             liquidity_usd: p.liquidity.as_ref().and_then(|l| l.usd).unwrap_or(0.0),
             volume_24h: p.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0),
             fee_tier: p.fee_tier,
+            source: "dexscreener".to_string(),
+        });
+    }
+
+    // ── GeckoTerminal verilerini birleştir (zenginleştirme) ──
+    let mut gecko_enriched = 0usize;
+    for gecko in gecko_pools {
+        let addr = match &gecko.attributes {
+            Some(attrs) => match &attrs.address {
+                Some(a) => a.to_lowercase(),
+                None => continue,
+            },
+            None => continue,
+        };
+
+        // GeckoTerminal DEX ID'sinden V3 etiketi çıkar
+        let gecko_label = gecko.relationships
+            .as_ref()
+            .and_then(|r| r.dex.as_ref())
+            .and_then(|d| d.data.as_ref())
+            .and_then(|d| d.id.as_ref())
+            .and_then(|id| extract_gecko_v3_label(id));
+
+        let gecko_name = gecko.attributes
+            .as_ref()
+            .and_then(|a| a.name.clone());
+
+        if let Some(existing) = pool_map.get_mut(&addr) {
+            // Mevcut DexScreener kaydını zenginleştir
+            existing.gecko_name = gecko_name;
+            existing.source = "both".to_string();
+
+            // GeckoTerminal'den gelen etiketi ekle
+            if let Some(label) = gecko_label {
+                let labels = existing.labels.get_or_insert_with(Vec::new);
+                if !labels.iter().any(|l| l.to_lowercase() == label.to_lowercase()) {
+                    labels.push(label);
+                }
+            }
+            gecko_enriched += 1;
+        }
+        // Not: GeckoTerminal'de olup DexScreener'da olmayan havuzlar eklenmez
+        // çünkü DexScreener token bilgisi (base/quote) olmadan işe yaramaz.
+    }
+
+    eprintln!(
+        "  {} [Birleştirme] {} havuz birleştirildi, {} tanesi GeckoTerminal ile zenginleştirildi",
+        "🔗".cyan(), pool_map.len(), gecko_enriched
+    );
+
+    pool_map.into_values().collect()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AŞAMA 3: Off-Chain Filtre (Zırh)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn off_chain_filter(pools: Vec<DiscoveredPool>) -> Vec<DiscoveredPool> {
+    let before = pools.len();
+
+    let mut filtered: Vec<DiscoveredPool> = pools
+        .into_iter()
+        // V3 Zırhı — V2 Zombi Bariyeri
+        .filter(|p| {
+            let pass = is_v3_pool(&p.labels, &p.dex, &p.fee_tier, &p.gecko_name);
+            if !pass {
+                eprintln!(
+                    "  {} V2 havuz reddedildi: {} ({}) [labels: {:?}]",
+                    "🛡️", p.address, p.dex, p.labels
+                );
+            }
+            pass
         })
+        // Minimum likidite: $50K
+        .filter(|p| p.liquidity_usd >= 50_000.0)
+        // Minimum 24h hacim: $10K
+        .filter(|p| p.volume_24h >= 10_000.0)
+        // Maksimum fee: %0.05
+        .filter(|p| p.fee_tier.map_or(true, |fee| fee <= 0.05))
         .collect();
 
-    // v21.0: Düşük fee'li havuzlara → yüksek öncelik.
-    // Fee'ye göre artan sırala, eşit fee'de en yüksek hacmi tercih et.
-    // %0.01 ve %0.05 havuzlar listenin başına gelir.
-    discovered.sort_by(|a, b| {
+    // Fee'ye göre artan sırala, eşit fee'de en yüksek hacmi tercih et
+    filtered.sort_by(|a, b| {
         let fee_a = a.fee_tier.unwrap_or(f64::MAX);
         let fee_b = b.fee_tier.unwrap_or(f64::MAX);
         fee_a.partial_cmp(&fee_b)
@@ -356,13 +585,169 @@ async fn discover_base_pools(max_results: usize) -> Result<Vec<DiscoveredPool>> 
             })
     });
 
-    discovered.truncate(max_results);
+    // Makul üst sınır
+    filtered.truncate(100);
 
-    Ok(discovered)
+    eprintln!(
+        "  {} [Off-Chain Filtre] {} → {} aday havuz (V3 + likidite + hacim + fee)",
+        "🛡️".yellow(), before, filtered.len()
+    );
+
+    filtered
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Otonom Çift Eşleştirme
+// AŞAMA 4: On-Chain RPC Doğrulama (Nihai Yargıç)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// slot0() eth_call ile havuzun gerçekten V3/CL olduğunu doğrula.
+///
+/// Her aday havuza `slot0()` selector'ünü gönderir:
+/// - Geçerli yanıt (≥ 64 byte) → %100 onaylanmış V3
+/// - execution reverted / 0x / timeout → sahte V3, REDDET
+///
+/// Tüm sorgular `join_all` ile paralel çalışır.
+pub async fn on_chain_validate(candidates: Vec<DiscoveredPool>) -> Vec<DiscoveredPool> {
+    if candidates.is_empty() {
+        return candidates;
+    }
+
+    // RPC_HTTP_URL env var'ından provider oluştur
+    let rpc_url = match std::env::var("RPC_HTTP_URL") {
+        Ok(url) if !url.is_empty() && !url.starts_with("https://your-") => url,
+        _ => {
+            eprintln!(
+                "  ⚠️ [On-Chain] RPC_HTTP_URL tanımlı değil — On-Chain doğrulama atlanıyor (tüm adaylar geçiyor)"
+            );
+            return candidates;
+        }
+    };
+
+    eprintln!(
+        "  {} [Aşama 3] On-Chain slot0() doğrulaması başlıyor ({} aday)...",
+        "⛓️".cyan(), candidates.len()
+    );
+
+    // slot0() calldata: sadece 4-byte selector
+    let calldata: alloy::primitives::Bytes = alloy::primitives::Bytes::from(SLOT0_SELECTOR.to_vec());
+
+    // Her aday için asenkron doğrulama future'ı oluştur
+    let futures: Vec<_> = candidates.iter().enumerate().map(|(i, pool)| {
+        let rpc_url = rpc_url.clone();
+        let pool_address_str = pool.address.clone();
+        let pool_dex = pool.dex.clone();
+        let calldata = calldata.clone();
+
+        async move {
+            // Her future kendi HTTP client'ını oluşturur (bağımsız timeout)
+            let client = match reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(ONCHAIN_CALL_TIMEOUT_SECS))
+                .build()
+            {
+                Ok(c) => c,
+                Err(_) => return (i, false),
+            };
+
+            // Pool adresini parse et
+            let pool_address = match pool_address_str.parse::<Address>() {
+                Ok(addr) => addr,
+                Err(_) => return (i, false),
+            };
+
+            // eth_call JSON-RPC isteği oluştur
+            let call_obj = serde_json::json!({
+                "to": format!("{:?}", pool_address),
+                "data": format!("0x{}", hex::encode(&calldata))
+            });
+
+            let rpc_request = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "eth_call",
+                "params": [call_obj, "latest"],
+                "id": i + 1
+            });
+
+            match client
+                .post(&rpc_url)
+                .header("Content-Type", "application/json")
+                .json(&rpc_request)
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(json) => {
+                            // Hata varsa → V2 veya sahte havuz
+                            if json.get("error").is_some() {
+                                eprintln!(
+                                    "  {} [On-Chain] REDDEDILDI: {} ({}) — execution reverted",
+                                    "❌", pool_address_str, pool_dex
+                                );
+                                return (i, false);
+                            }
+
+                            // result alanını kontrol et
+                            if let Some(result) = json.get("result").and_then(|r| r.as_str()) {
+                                // "0x" veya çok kısa yanıt → geçersiz
+                                let hex_data = result.strip_prefix("0x").unwrap_or(result);
+                                if hex_data.is_empty() || hex_data.len() < 128 {
+                                    // 128 hex karakter = 64 byte minimum (sqrtPriceX96 + tick)
+                                    eprintln!(
+                                        "  {} [On-Chain] REDDEDILDI: {} ({}) — slot0 yanıtı çok kısa ({}B)",
+                                        "❌", pool_address_str, pool_dex, hex_data.len() / 2
+                                    );
+                                    return (i, false);
+                                }
+
+                                // Geçerli V3 havuzu!
+                                (i, true)
+                            } else {
+                                (i, false)
+                            }
+                        }
+                        Err(_) => (i, false),
+                    }
+                }
+                Err(e) => {
+                    // Timeout veya ağ hatası — güvenli tarafta kal, reddet
+                    eprintln!(
+                        "  {} [On-Chain] TIMEOUT/HATA: {} ({}) — {}",
+                        "⏱️", pool_address_str, pool_dex, e
+                    );
+                    (i, false)
+                }
+            }
+        }
+    }).collect();
+
+    // Tüm doğrulamaları paralel çalıştır
+    let results = join_all(futures).await;
+
+    // Geçen havuzları filtrele
+    let mut passed_indices: Vec<usize> = results
+        .into_iter()
+        .filter_map(|(i, passed)| if passed { Some(i) } else { None })
+        .collect();
+    passed_indices.sort();
+
+    let passed_count = passed_indices.len();
+    let rejected_count = candidates.len() - passed_count;
+
+    let validated: Vec<DiscoveredPool> = passed_indices
+        .into_iter()
+        .map(|i| candidates[i].clone())
+        .collect();
+
+    eprintln!(
+        "  {} [On-Chain] {} havuz ONAYLANDI ✅ | {} havuz REDDEDİLDİ ❌",
+        "⛓️".green(), passed_count, rejected_count
+    );
+
+    validated
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AŞAMA 5: Otonom Çift Eşleştirme
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Keşfedilen havuzları token çiftlerine göre grupla ve arbitraj eşleştirmesi yap
@@ -376,10 +761,7 @@ fn match_arbitrage_pairs(pools: &[DiscoveredPool]) -> Vec<MatchedPair> {
     let mut matched = Vec::new();
 
     for ((token0_addr, token1_addr), group) in &groups {
-        // Her DEX'ten en yüksek likiditeli havuzu seç (O(N) tek geçiş)
-        // v29.0: Fee Tier Isolation — Her DEX+Fee çifti ayrı bir slot olarak ele alınır.
-        // Aynı DEX'in farklı fee tier'larındaki havuzlar (ör. Uniswap 0.01% vs 0.05%)
-        // artık ayrı ayrı arbitraj adayı olabilir; birbirini ezmez.
+        // Her DEX+Fee çifti ayrı bir slot — Fee Tier Isolation
         let mut dex_best: HashMap<String, &DiscoveredPool> = HashMap::new();
         for pool in group {
             let fee_bps = fee_tier_to_bps(pool.fee_tier);
@@ -396,7 +778,7 @@ fn match_arbitrage_pairs(pools: &[DiscoveredPool]) -> Vec<MatchedPair> {
         }
 
         let mut selected: Vec<&DiscoveredPool> = dex_best.into_values().collect();
-        // v17.0: En düşük fee'li havuzu öne al, eşit fee'de en yüksek likiditeyi tercih et
+        // En düşük fee'li havuzu öne al
         selected.sort_by(|a, b| {
             let fee_a = a.fee_tier.unwrap_or(f64::MAX);
             let fee_b = b.fee_tier.unwrap_or(f64::MAX);
@@ -462,13 +844,27 @@ fn match_arbitrage_pairs(pools: &[DiscoveredPool]) -> Vec<MatchedPair> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CLI Keşif + JSON Çıktı
+// CLI Keşif + JSON Çıktı (Ana Giriş Noktası)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Havuzları keşfet, eşleştir ve matched_pools.json olarak yaz
+/// Havuzları keşfet, doğrula, eşleştir ve matched_pools.json olarak yaz
 pub async fn cli_discover_pools() -> Result<()> {
-    // v23.0 (O-2): DexScreener API başarısız olursa mevcut matched_pools.json cache'ini kullan
-    let pools = match discover_base_pools(50).await {
+    println!();
+    println!("{}", "  ╔═══════════════════════════════════════════════════════════════════╗".cyan().bold());
+    println!("{}", "  ║   Kutsal Üçlü Keşif Motoru v26.0 — Base Ağı                      ║".cyan().bold());
+    println!("{}", "  ║   DexScreener + GeckoTerminal + On-Chain RPC Validation           ║".cyan().bold());
+    println!("{}", "  ╠═══════════════════════════════════════════════════════════════════╣".cyan().bold());
+    println!();
+
+    // ── AŞAMA 1: Paralel Veri Toplama ──
+    // DexScreener ve GeckoTerminal'i aynı anda sorgula
+    let (dex_result, gecko_pools) = tokio::join!(
+        fetch_dexscreener_pools(),
+        fetch_geckoterminal_pools()
+    );
+
+    // DexScreener başarısız olursa cache'e düş
+    let dex_pairs = match dex_result {
         Ok(p) => p,
         Err(e) => {
             eprintln!("  ⚠️  DexScreener API hatası: {} — mevcut cache kontrol ediliyor...", e);
@@ -480,14 +876,37 @@ pub async fn cli_discover_pools() -> Result<()> {
         }
     };
 
-    if pools.is_empty() {
+    if dex_pairs.is_empty() {
         eprintln!("  {} Hiç havuz bulunamadı.", "⚠️".yellow());
         return Ok(());
     }
 
-    eprintln!("  {} {} havuz keşfedildi, eşleştirme yapılıyor...", "✅".green(), pools.len());
+    // ── AŞAMA 2: Veri Birleştirme ──
+    let merged = merge_pool_sources(dex_pairs, gecko_pools);
 
-    let matched_pairs = match_arbitrage_pairs(&pools);
+    // ── AŞAMA 3: Off-Chain Filtre ──
+    let candidates = off_chain_filter(merged);
+
+    if candidates.is_empty() {
+        eprintln!("  {} Off-Chain filtreden geçen aday yok.", "⚠️".yellow());
+        return Ok(());
+    }
+
+    // ── AŞAMA 4: On-Chain RPC Doğrulama (Nihai Yargıç) ──
+    let validated = on_chain_validate(candidates).await;
+
+    if validated.is_empty() {
+        eprintln!("  {} On-Chain doğrulamayı geçen havuz yok.", "⚠️".yellow());
+        return Ok(());
+    }
+
+    eprintln!(
+        "  {} {} havuz %100 onaylandı, eşleştirme yapılıyor...",
+        "✅".green(), validated.len()
+    );
+
+    // ── AŞAMA 5: Çift Eşleştirme ──
+    let matched_pairs = match_arbitrage_pairs(&validated);
 
     if matched_pairs.is_empty() {
         eprintln!("  {} Arbitraj çifti bulunamadı (en az 2 DEX'te aynı çift gerekli).", "⚠️".yellow());
@@ -495,9 +914,8 @@ pub async fn cli_discover_pools() -> Result<()> {
     }
 
     // Terminal çıktısı
-    println!();
-    println!("{}", "  ╔═══════════════════════════════════════════════════════════════════╗".cyan().bold());
-    println!("{}", "  ║   Otonom Çift Eşleştirme — Base Ağı Arbitraj Havuzları            ║".cyan().bold());
+    println!("{}", "  ╠═══════════════════════════════════════════════════════════════════╣".cyan().bold());
+    println!("{}", "  ║   Onaylanmış Arbitraj Çiftleri (On-Chain Doğrulanmış)             ║".cyan().bold());
     println!("{}", "  ╠═══════════════════════════════════════════════════════════════════╣".cyan().bold());
 
     for (i, pair) in matched_pairs.iter().enumerate() {
@@ -523,7 +941,7 @@ pub async fn cli_discover_pools() -> Result<()> {
     println!("{}", "  ╚═══════════════════════════════════════════════════════════════════╝".cyan().bold());
 
     let config = MatchedPoolsConfig {
-        version: "11.0".into(),
+        version: "26.0".into(),
         chain_id: 8453,
         updated_at: chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
         matched_pairs,

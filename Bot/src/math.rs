@@ -626,6 +626,7 @@ mod tests {
             bytecode: None,
             tick_bitmap: None,
             live_fee_bps: None,
+            is_stale: false,
         }
     }
 

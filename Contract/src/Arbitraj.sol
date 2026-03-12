@@ -904,6 +904,7 @@ contract ArbitrajBotu {
     ///        - Uniswap V3: 0x33128a8fC17869897dcE68Ed026d694621f6FDfD
     ///        - Aerodrome Slipstream: 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A
     ///        - PancakeSwap V3: 0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865
+    ///        - SushiSwap V3: 0xc35DADB65012eC5796536bD9864eD8773aBc74C4
     ///      Sahte havuz ekleme saldırısını önler.
     function _verifyPoolFactory(address pool) internal view {
         address poolFactory;
@@ -918,7 +919,8 @@ contract ArbitrajBotu {
         if (
             poolFactory != 0x33128a8fC17869897dcE68Ed026d694621f6FDfD && // Uniswap V3
             poolFactory != 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A && // Aerodrome Slipstream
-            poolFactory != 0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865    // PancakeSwap V3
+            poolFactory != 0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865 && // PancakeSwap V3
+            poolFactory != 0xc35DADB65012eC5796536bD9864eD8773aBc74C4    // SushiSwap V3
         ) {
             revert InvalidCaller(); // Bilinmeyen factory — sahte havuz
         }

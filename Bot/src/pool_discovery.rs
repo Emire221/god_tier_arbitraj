@@ -615,3 +615,44 @@ pub fn build_runtime(config: &MatchedPoolsConfig) -> Result<(Vec<PoolConfig>, Ve
 
     Ok((all_pools, pair_combos))
 }
+
+/// v10.0: Havuz listesi değiştikten sonra PairCombo'ları yeniden oluştur.
+///
+/// Pool validation/GC sonrası havuz indeksleri değiştiğinde çağrılır.
+/// Aynı quote_token_address + base_token_address'e sahip havuzları gruplar
+/// ve tüm 2-havuz kombinasyonlarını üretir.
+pub fn rebuild_pair_combos(pools: &[PoolConfig]) -> Vec<PairCombo> {
+    let mut pair_groups: HashMap<(Address, Address), Vec<usize>> = HashMap::new();
+
+    for (idx, pool) in pools.iter().enumerate() {
+        let key = if pool.base_token_address < pool.quote_token_address {
+            (pool.base_token_address, pool.quote_token_address)
+        } else {
+            (pool.quote_token_address, pool.base_token_address)
+        };
+        pair_groups.entry(key).or_default().push(idx);
+    }
+
+    let mut combos = Vec::new();
+    for (_, indices) in &pair_groups {
+        for i in 0..indices.len() {
+            for j in (i + 1)..indices.len() {
+                debug_assert!(indices[i] < pools.len());
+                debug_assert!(indices[j] < pools.len());
+                // Çift adını havuz adından çıkar (ilk kısmı at, pair kısmını al)
+                let pair_name = pools[indices[i]].name
+                    .split('-')
+                    .skip(1)
+                    .collect::<Vec<_>>()
+                    .join("-");
+                combos.push(PairCombo {
+                    pair_name,
+                    pool_a_idx: indices[i],
+                    pool_b_idx: indices[j],
+                });
+            }
+        }
+    }
+
+    combos
+}

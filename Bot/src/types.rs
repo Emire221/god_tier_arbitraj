@@ -300,6 +300,10 @@ pub struct PoolState {
     /// Zincirden okunan canlı fee (basis points, ör: 500 = %0.05)
     /// None ise config'teki statik fee_bps kullanılır
     pub live_fee_bps: Option<u32>,
+    /// v10.0: Stale Data Guard — sync başarısız olduğunda true olarak
+    /// işaretlenir. is_stale=true olan havuzlarla arbitraj YAPILMAZ.
+    /// Başarılı sync sonrası otomatik olarak false'a döner.
+    pub is_stale: bool,
 }
 
 impl Default for PoolState {
@@ -317,19 +321,27 @@ impl Default for PoolState {
             bytecode: None,
             tick_bitmap: None,
             live_fee_bps: None,
+            is_stale: false,
         }
     }
 }
 
 impl PoolState {
     /// Havuz aktif mi? (veriler geçerli mi?)
+    /// v10.0: is_stale=true olan havuzlar artık aktif sayılmaz.
     pub fn is_active(&self) -> bool {
-        self.is_initialized && self.eth_price_usd > 0.0 && self.liquidity > 0
+        self.is_initialized && !self.is_stale && self.eth_price_usd > 0.0 && self.liquidity > 0
     }
 
     /// Verinin yaşı (milisaniye)
     pub fn staleness_ms(&self) -> u128 {
         self.last_update.elapsed().as_millis()
+    }
+
+    /// v10.0: Veri taze mi? (aktif + staleness eşiğinin altında)
+    /// Hard-abort kontrolü için kullanılır.
+    pub fn is_fresh(&self, max_staleness_ms: u128) -> bool {
+        self.is_active() && self.staleness_ms() <= max_staleness_ms
     }
 }
 

@@ -64,20 +64,28 @@ pub fn check_arbitrage_opportunity(
         return None;
     }
 
-    // Read lock � �ok k�sa s�reli
+    // Read lock — çok kısa süreli
     let state_a = states[0].read().clone();
     let state_b = states[1].read().clone();
 
-    // Her iki havuz aktif mi?
-    if !state_a.is_active() || !state_b.is_active() {
-        return None;
-    }
-
-    // Veri tazeli�i kontrol�
-    if state_a.staleness_ms() > config.max_staleness_ms
-        || state_b.staleness_ms() > config.max_staleness_ms
+    // v10.0: Hard-Abort — Stale Data Guard (is_fresh = is_active + staleness eşiği)
+    // is_active(): is_initialized && !is_stale && eth_price>0 && liquidity>0
+    // is_fresh(): is_active() + staleness_ms() <= max_staleness_ms
+    // Havuz verisinin yaşı max_staleness_ms eşiğini aştığında HARD-ABORT.
+    // Eski/bayat veri ile arbitraj hesaplamak hayalet kâr üretir ve kesin fon kaybına yol açar.
     {
-        return None;
+        let fresh_a = state_a.is_fresh(config.max_staleness_ms);
+        let fresh_b = state_b.is_fresh(config.max_staleness_ms);
+        if !fresh_a || !fresh_b {
+            if state_a.is_active() && state_b.is_active() {
+                // Havuzlar aktif ama veri yaşlı — HARD-ABORT loglama
+                eprintln!(
+                    "     \u{1f6a8} [HARD-ABORT] Stale data tespit edildi! A={}ms B={}ms (eşik={}ms) — fırsat İPTAL",
+                    state_a.staleness_ms(), state_b.staleness_ms(), config.max_staleness_ms,
+                );
+            }
+            return None;
+        }
     }
 
     // ��� v19.0: Havuz Komisyon G�venlik Tavan� (Sadece Uyar�) �����
@@ -420,13 +428,16 @@ pub async fn evaluate_and_execute<P: Provider + Sync>(
     // kar�� savunmas�zd�r. ��lem g�nderilmeden �nce havuz verilerinin
     // max_staleness_ms e�i�ini a�mad��� do�rulan�r.
     {
-        let staleness_a = states[0].read().staleness_ms();
-        let staleness_b = states[1].read().staleness_ms();
-        let max_stale = staleness_a.max(staleness_b);
-        if max_stale > config.max_staleness_ms {
+        let state_a_guard = states[0].read();
+        let state_b_guard = states[1].read();
+        if !state_a_guard.is_fresh(config.max_staleness_ms) || !state_b_guard.is_fresh(config.max_staleness_ms) {
+            let staleness_a = state_a_guard.staleness_ms();
+            let staleness_b = state_b_guard.staleness_ms();
+            drop(state_a_guard);
+            drop(state_b_guard);
             eprintln!(
-                "     \u{1f6d1} [FreshnessGate] Havuz verileri �ok eski: {}ms > e�ik {}ms � MEV korumas�: i�lem atlan�yor",
-                max_stale, config.max_staleness_ms,
+                "     \u{1f6d1} [FreshnessGate] Havuz verileri çok eski veya stale: A={}ms B={}ms (eşik={}ms) — MEV koruması: işlem atlanıyor",
+                staleness_a, staleness_b, config.max_staleness_ms,
             );
             return None;
         }
@@ -893,6 +904,8 @@ async fn execute_on_chain_protected(
             println!("  {} TX ba�ar�l� (Private RPC): {}", "?".green(), hash.green().bold());
         }
         Err(e) => {
+            // TX zincire gitmediyse local nonce geri alınır.
+            nonce_manager.force_set(nonce);
             println!("  {} TX hatas�: {}", "?".red(), format!("{}", e).red());
         }
     }
@@ -1141,6 +1154,7 @@ pub fn check_multi_hop_opportunities(
         }
 
         // Rotadaki t�m havuzlar aktif mi?
+        // v10.0: Hard-abort — stale veya is_stale=true olan havuz varsa rota atlanır
         let all_active = route.hops.iter().all(|hop| {
             if hop.pool_idx < states.len() {
                 let state = states[hop.pool_idx].read();
@@ -1280,14 +1294,14 @@ pub async fn evaluate_and_execute_multi_hop<P: Provider + Sync>(
         return None;
     }
 
-    // Veri tazeli�i kontrol� � t�m hop havuzlar�
+    // Veri tazeliği kontrolü — tüm hop havuzları is_fresh() ile
     for &pool_idx in &opportunity.pool_indices {
         if pool_idx >= states.len() { return None; }
-        let staleness = states[pool_idx].read().staleness_ms();
-        if staleness > config.max_staleness_ms {
+        let state = states[pool_idx].read();
+        if !state.is_fresh(config.max_staleness_ms) {
             eprintln!(
-                "     ?? [Multi-Hop FreshnessGate] Havuz #{} verisi �ok eski: {}ms > e�ik {}ms",
-                pool_idx, staleness, config.max_staleness_ms,
+                "     \u{1f6d1} [Multi-Hop FreshnessGate] Havuz #{} stale/eski: {}ms (eşik={}ms)",
+                pool_idx, state.staleness_ms(), config.max_staleness_ms,
             );
             return None;
         }
@@ -1559,6 +1573,7 @@ mod gas_spike_tests {
             bytecode: None,
             tick_bitmap: None,
             live_fee_bps: None,
+            is_stale: false,
         }))
     }
 

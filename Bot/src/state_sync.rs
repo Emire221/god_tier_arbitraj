@@ -231,8 +231,13 @@ sol! {
 /// RPC durum sorgulama zaman aşımı (milisaniye).
 /// v28.0: 2000ms → 3000ms. Yoğun dönemlerde RPC gecikmeleri 2s'ı aşabilir.
 /// 3000ms yeterli süre tanır, Base L2 ~2s blok süresi içinde yanıt beklenir.
-/// Timeout durumunda bot eski veriyle çalışmaya devam eder (graceful degradation).
+/// v10.0: Timeout durumunda havuz STALE olarak işaretlenir — eski veri KULLANILMAZ.
 const SYNC_TIMEOUT_MS: u64 = 3000;
+
+/// Multicall3 toplu senkronizasyon chunk boyutu.
+/// RPC payload limitleri nedeniyle havuzlar bu boyutta yığınlara bölünür.
+/// Her havuz için 3 çağrı (slot0+liquidity+fee) → chunk=50 → 150 call/batch.
+const MULTICALL_CHUNK_SIZE: usize = 50;
 
 /// Maksimum yeniden deneme sayısı (timeout sonrası)
 const SYNC_MAX_RETRIES: u32 = 2;
@@ -390,10 +395,389 @@ async fn sync_pool_state_inner<P: Provider + Sync>(
         state.last_block = block_number;
         state.last_update = Instant::now();
         state.is_initialized = true;
+        state.is_stale = false;
         state.live_fee_bps = live_fee_bps;
     }
 
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Multicall3 ABI Encoding Yardımcıları (slot0 / liquidity / fee)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// slot0() fonksiyon selektörü — tüm DEX'lerde aynı (selector: 0x3850c7bd)
+fn encode_slot0_call() -> Vec<u8> {
+    // slot0() — parametresiz, sadece 4-byte selector
+    let call = IUniswapV3Pool::slot0Call {};
+    IUniswapV3Pool::slot0Call::abi_encode(&call)
+}
+
+/// liquidity() fonksiyon selektörü — tüm DEX'lerde aynı (selector: 0x1a686502)
+fn encode_liquidity_call() -> Vec<u8> {
+    let call = IUniswapV3Pool::liquidityCall {};
+    IUniswapV3Pool::liquidityCall::abi_encode(&call)
+}
+
+/// fee() fonksiyon selektörü — tüm DEX'lerde aynı (selector: 0xddca3f43)
+fn encode_fee_call() -> Vec<u8> {
+    let call = IUniswapV3Pool::feeCall {};
+    IUniswapV3Pool::feeCall::abi_encode(&call)
+}
+
+/// Multicall3 sonucundan slot0 verisini decode et (DEX tipine göre)
+///
+/// # Dönüş
+/// (sqrtPriceX96 as U256, tick) — başarısızsa None
+fn decode_slot0_result(data: &[u8], dex: DexType) -> Option<(U256, i32)> {
+    // Minimum ABI boyutu: 6 alan × 32 = 192 byte (Aerodrome), 7 alan × 32 = 224 byte (V3)
+    let min_len = match dex {
+        DexType::Aerodrome => 192,
+        _ => 224,
+    };
+    if data.len() < min_len {
+        return None;
+    }
+
+    // sqrtPriceX96: uint160 — ilk 32 byte (sağ hizalı ABI encoding)
+    let sqrt_price_x96_bytes = &data[0..32];
+    let sqrt_price_x96 = U256::from_be_slice(sqrt_price_x96_bytes);
+
+    // uint160 aralık kontrolü — sqrtPriceX96 sıfır veya uint160 üstü olamaz
+    let uint160_max = U256::from(1u64) << 160;
+    if sqrt_price_x96.is_zero() || sqrt_price_x96 >= uint160_max {
+        return None;
+    }
+
+    // tick: int24 — 2. word (offset 32..64), sign-extended
+    let tick_word = &data[32..64];
+    // Son 3 byte = int24, ama ABI'de int256 olarak sign-extended
+    // Son 4 byte'ı int32 olarak oku
+    let tick = i32::from_be_bytes(tick_word[28..32].try_into().ok()?);
+
+    Some((sqrt_price_x96, tick))
+}
+
+/// Multicall3 sonucundan liquidity verisini decode et
+/// # Dönüş: u128 liquidity değeri
+fn decode_liquidity_result(data: &[u8]) -> Option<u128> {
+    if data.len() < 32 {
+        return None;
+    }
+    // uint128 — son 16 byte
+    Some(u128::from_be_bytes(data[16..32].try_into().ok()?))
+}
+
+/// Multicall3 sonucundan fee verisini decode et
+/// # Dönüş: fee (basis points cinsinden)
+fn decode_fee_result(data: &[u8]) -> Option<u32> {
+    if data.len() < 32 {
+        return None;
+    }
+    // uint24 — son 4 byte'ın son 3 byte'ı
+    let fee_raw = u32::from_be_bytes(data[28..32].try_into().ok()?);
+    // fee() Uniswap V3'te "pips" döner (500 = %0.05), bps'e çevir
+    Some(fee_raw / 100)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Toplu Multicall3 State Sync — Tüm Havuzları TEK eth_call ile Oku
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Tüm havuzların slot0+liquidity+fee verilerini Multicall3 ile toplu oku.
+///
+/// Eski mimari: `sync_all_pools` → `join_all` → N ayrı `sync_pool_state`
+///   → Her biri 3 RPC çağrısı (slot0, liquidity, fee) = 3N RPC çağrısı
+///   → 33 havuz = 99 RPC çağrısı → rate limit + yüksek gecikme
+///
+/// Yeni mimari: TEK Multicall3.aggregate3 çağrısı ile tüm veriler okunur
+///   → 33 havuz × 3 fonksiyon = 99 Call3 → TEK eth_call
+///   → 1 RTT (~3-5ms), rate-limit riski SIFIR
+///
+/// v10.0: Chunk desteği — 50 havuzdan fazlaysa otomatik bölünür (150 call/chunk).
+///
+/// # Stale Data Politikası (v10.0)
+/// Multicall3 sonucunda `success=false` dönen havuzlar ARTIKeski veriyle devam
+/// ETMEZ — `is_stale=true` olarak işaretlenir ve arbitraj pipeline'ından çıkarılır.
+pub async fn sync_all_pools_multicall<P: Provider + Sync>(
+    provider: &P,
+    pools: &[PoolConfig],
+    states: &[SharedPoolState],
+    block_number: u64,
+) -> Vec<Result<()>> {
+    let pool_count = pools.len();
+    if pool_count == 0 {
+        return vec![];
+    }
+
+    let mut results: Vec<Result<()>> = (0..pool_count).map(|_| Ok(())).collect();
+
+    // Havuzları chunk'lara böl (her chunk max MULTICALL_CHUNK_SIZE havuz)
+    for chunk_start in (0..pool_count).step_by(MULTICALL_CHUNK_SIZE) {
+        let chunk_end = (chunk_start + MULTICALL_CHUNK_SIZE).min(pool_count);
+        let chunk_size = chunk_end - chunk_start;
+
+        // Her havuz için 3 çağrı: slot0, liquidity, fee
+        let slot0_calldata = encode_slot0_call();
+        let liquidity_calldata = encode_liquidity_call();
+        let fee_calldata = encode_fee_call();
+
+        let mut calls: Vec<IMulticall3::Call3> = Vec::with_capacity(chunk_size * 3);
+
+        for i in chunk_start..chunk_end {
+            // slot0
+            calls.push(IMulticall3::Call3 {
+                target: pools[i].address,
+                allowFailure: true,
+                callData: Bytes::from(slot0_calldata.clone()),
+            });
+            // liquidity
+            calls.push(IMulticall3::Call3 {
+                target: pools[i].address,
+                allowFailure: true,
+                callData: Bytes::from(liquidity_calldata.clone()),
+            });
+            // fee
+            calls.push(IMulticall3::Call3 {
+                target: pools[i].address,
+                allowFailure: true,
+                callData: Bytes::from(fee_calldata.clone()),
+            });
+        }
+
+        // Multicall3 ile TEK eth_call
+        let multicall = IMulticall3::new(MULTICALL3_ADDRESS, provider);
+        let mc_result = match tokio::time::timeout(
+            std::time::Duration::from_millis(SYNC_TIMEOUT_MS),
+            multicall.aggregate3(calls).call(),
+        ).await {
+            Ok(Ok(res)) => res,
+            Ok(Err(e)) => {
+                // Multicall3 çağrısı başarısız — tüm chunk'ı stale işaretle
+                for i in chunk_start..chunk_end {
+                    states[i].write().is_stale = true;
+                    results[i] = Err(eyre::eyre!(
+                        "[{}] Multicall3 toplu sync hatası: {}",
+                        pools[i].name, e
+                    ));
+                }
+                continue;
+            }
+            Err(_elapsed) => {
+                // Timeout — tüm chunk'ı stale işaretle
+                for i in chunk_start..chunk_end {
+                    states[i].write().is_stale = true;
+                    results[i] = Err(eyre::eyre!(
+                        "[{}] Multicall3 sync timeout ({}ms)",
+                        pools[i].name, SYNC_TIMEOUT_MS
+                    ));
+                }
+                eprintln!(
+                    "  \u{26a0}\u{fe0f} [Multicall3] Chunk {}-{} timeout ({}ms) — {} havuz STALE olarak işaretlendi",
+                    chunk_start, chunk_end, SYNC_TIMEOUT_MS, chunk_size,
+                );
+                continue;
+            }
+        };
+
+        let expected_results = chunk_size * 3;
+        if mc_result.len() != expected_results {
+            eprintln!(
+                "  ⚠️ [Multicall3] Beklenmeyen sonuç uzunluğu: expected={} got={} (chunk {}-{})",
+                expected_results,
+                mc_result.len(),
+                chunk_start,
+                chunk_end,
+            );
+        }
+
+        // Sonuçları decode et — her havuz için 3 sonuç (slot0, liquidity, fee)
+        for (idx_in_chunk, pool_idx) in (chunk_start..chunk_end).enumerate() {
+            let base = idx_in_chunk * 3;
+
+            // Sonuçları al
+            let slot0_res = mc_result.get(base);
+            let liq_res = mc_result.get(base + 1);
+            let fee_res = mc_result.get(base + 2);
+
+            // slot0 decode
+            let slot0_data = match slot0_res {
+                Some(r) if r.success && !r.returnData.is_empty() => {
+                    decode_slot0_result(&r.returnData, pools[pool_idx].dex)
+                }
+                _ => None,
+            };
+
+            // liquidity decode
+            let liquidity_data = match liq_res {
+                Some(r) if r.success && !r.returnData.is_empty() => {
+                    decode_liquidity_result(&r.returnData)
+                }
+                _ => None,
+            };
+
+            // fee decode
+            let fee_bps: Option<u32> = match fee_res {
+                Some(r) if r.success && !r.returnData.is_empty() => {
+                    decode_fee_result(&r.returnData)
+                }
+                _ => None,
+            };
+
+            // slot0 veya liquidity başarısız → havuz STALE
+            match (slot0_data, liquidity_data) {
+                (Some((sqrt_price_x96, tick)), Some(liquidity)) => {
+                    // Başarılı — state güncelle
+                    let sqrt_price_f64: f64 = u256_to_f64(sqrt_price_x96);
+                    let liquidity_f64: f64 = u256_to_f64(U256::from(liquidity));
+
+                    let eth_price = compute_eth_price(
+                        sqrt_price_f64,
+                        tick,
+                        pools[pool_idx].token0_decimals,
+                        pools[pool_idx].token1_decimals,
+                        pools[pool_idx].token0_is_weth,
+                    );
+
+                    {
+                        let mut state = states[pool_idx].write();
+                        state.sqrt_price_x96 = sqrt_price_x96;
+                        state.sqrt_price_f64 = sqrt_price_f64;
+                        state.tick = tick;
+                        state.liquidity = liquidity;
+                        state.liquidity_f64 = liquidity_f64;
+                        state.eth_price_usd = eth_price;
+                        state.last_block = block_number;
+                        state.last_update = Instant::now();
+                        state.is_initialized = true;
+                        state.is_stale = false;
+                        state.live_fee_bps = fee_bps;
+                    }
+                    results[pool_idx] = Ok(());
+                }
+                _ => {
+                    // Decode başarısız — havuzu STALE olarak işaretle
+                    states[pool_idx].write().is_stale = true;
+                    results[pool_idx] = Err(eyre::eyre!(
+                        "[{}] Multicall3 slot0/liquidity decode başarısız (execution reverted?)",
+                        pools[pool_idx].name
+                    ));
+                }
+            }
+        }
+    }
+
+    results
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Havuz Sağlamlık Kontrolü (Pool Sanity Check) — Başlangıç Doğrulama
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Başlangıçta tüm havuzları Multicall3 ile on-chain doğrula.
+///
+/// Her havuz için slot0() ve liquidity() çağrılarını tek bir Multicall3
+/// batch'inde gönderir. `execution reverted` veya decode hatası veren
+/// havuzlar GEÇERSİZ olarak işaretlenir ve indeksleri döndürülür.
+///
+/// # Dönüş
+/// Geçersiz havuz indeksleri (silinmesi gereken havuzlar)
+pub async fn validate_pools<P: Provider + Sync>(
+    provider: &P,
+    pools: &[PoolConfig],
+) -> Vec<usize> {
+    let pool_count = pools.len();
+    if pool_count == 0 {
+        return vec![];
+    }
+
+    let mut invalid_indices: Vec<usize> = Vec::new();
+
+    // slot0 + liquidity çağrıları — her havuz için 2 çağrı
+    let slot0_cd = encode_slot0_call();
+    let liq_cd = encode_liquidity_call();
+
+    let mut calls: Vec<IMulticall3::Call3> = Vec::with_capacity(pool_count * 2);
+    for pool in pools.iter() {
+        calls.push(IMulticall3::Call3 {
+            target: pool.address,
+            allowFailure: true,
+            callData: Bytes::from(slot0_cd.clone()),
+        });
+        calls.push(IMulticall3::Call3 {
+            target: pool.address,
+            allowFailure: true,
+            callData: Bytes::from(liq_cd.clone()),
+        });
+    }
+
+    let multicall = IMulticall3::new(MULTICALL3_ADDRESS, provider);
+    let mc_results = match tokio::time::timeout(
+        std::time::Duration::from_millis(10_000), // Başlangıç — daha uzun timeout
+        multicall.aggregate3(calls).call(),
+    ).await {
+        Ok(Ok(res)) => res,
+        Ok(Err(e)) => {
+            eprintln!(
+                "  \u{274c} [PoolValidation] Multicall3 doğrulama hatası: {} — doğrulama atlanıyor",
+                e
+            );
+            return vec![];
+        }
+        Err(_) => {
+            eprintln!(
+                "  \u{274c} [PoolValidation] Multicall3 doğrulama timeout (10s) — doğrulama atlanıyor"
+            );
+            return vec![];
+        }
+    };
+
+    let expected_results = pool_count * 2;
+    if mc_results.len() != expected_results {
+        eprintln!(
+            "  ⚠️ [PoolValidation] Beklenmeyen Multicall3 sonuç uzunluğu: expected={} got={}",
+            expected_results,
+            mc_results.len(),
+        );
+    }
+
+    for i in 0..pool_count {
+        let slot0_res = mc_results.get(i * 2);
+        let liq_res = mc_results.get(i * 2 + 1);
+
+        let slot0_ok = slot0_res
+            .map(|r| r.success && !r.returnData.is_empty())
+            .unwrap_or(false);
+        let liq_ok = liq_res
+            .map(|r| r.success && !r.returnData.is_empty())
+            .unwrap_or(false);
+
+        // slot0 veya liquidity decode doğrulaması
+        let slot0_valid = if slot0_ok {
+            decode_slot0_result(&slot0_res.unwrap().returnData, pools[i].dex).is_some()
+        } else {
+            false
+        };
+
+        let liq_valid = if liq_ok {
+            decode_liquidity_result(&liq_res.unwrap().returnData).is_some()
+        } else {
+            false
+        };
+
+        if !slot0_valid || !liq_valid {
+            invalid_indices.push(i);
+            eprintln!(
+                "  \u{274c} [PoolValidation] {} ({}) — GEÇERSİZ (slot0={}, liquidity={}) → listeden çıkarılacak",
+                pools[i].name,
+                pools[i].address,
+                if slot0_valid { "OK" } else { "HATA" },
+                if liq_valid { "OK" } else { "HATA" },
+            );
+        }
+    }
+
+    invalid_indices
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -599,69 +983,76 @@ pub async fn sync_all_pools<P: Provider + Sync>(
     states: &[SharedPoolState],
     block_number: u64,
 ) -> Vec<Result<()>> {
-    // v22.0: sync_all_pools timeout 500ms → 2000ms (modül sabiti ile aynı).
-    // Yüksek ağ yoğunluğunda 500ms'lik timeout gereksiz hata üretiyordu.
-    const SYNC_TIMEOUT_MS: u64 = 2000;
-    const MAX_RETRIES: u32 = 1;
+    // v10.0: sync_all_pools artık sync_all_pools_multicall'a delege eder.
+    // Multicall3 başarısız olursa (ağ hatası, kontrat sorunu) tekil fallback'e düşer.
+    //
+    // Stale Data Politikası (v10.0):
+    // Sync başarısız olan havuzlar is_stale=true olarak işaretlenir.
+    // Eski veri KESİNLİKLE KULLANILMAZ — hayalet kâr hesaplamasını önler.
 
-    let futures: Vec<_> = pools.iter().zip(states.iter())
-        .map(|(config, state)| {
-            let config = config.clone();
-            let state = state.clone();
-            async move {
-                for attempt in 0..=MAX_RETRIES {
-                    match tokio::time::timeout(
-                        std::time::Duration::from_millis(SYNC_TIMEOUT_MS),
-                        sync_pool_state(provider, &config, &state, block_number),
-                    ).await {
-                        Ok(Ok(())) => return Ok(()),
-                        Ok(Err(e)) => {
-                            if attempt < MAX_RETRIES {
-                                eprintln!(
-                                    "     \u{26a1} [{}] Sync hatası, yeniden deneniyor ({}/{}): {}",
-                                    config.name, attempt + 1, MAX_RETRIES, e,
-                                );
-                                continue;
-                            }
-                            // v28.0: Graceful degradation — eski veri varsa kullan
-                            if state.read().is_initialized {
-                                eprintln!(
-                                    "     \u{26a0}\u{fe0f} [{}] Sync başarısız ({} deneme) — eski veri korunuyor (yaş: {}ms)",
-                                    config.name, MAX_RETRIES + 1, state.read().staleness_ms(),
-                                );
-                                return Ok(());
-                            }
-                            return Err(e);
+    // Önce Multicall3 ile toplu sync dene
+    let multicall_results = sync_all_pools_multicall(provider, pools, states, block_number).await;
+
+    // Multicall3'te başarısız olan havuzlar için tekil fallback
+    const FALLBACK_TIMEOUT_MS: u64 = 2000;
+    const FALLBACK_MAX_RETRIES: u32 = 1;
+
+    let mut final_results = multicall_results;
+
+    // Multicall3'te başarısız olan havuzların indekslerini topla
+    let failed_indices: Vec<usize> = final_results.iter().enumerate()
+        .filter(|(_, r)| r.is_err())
+        .map(|(i, _)| i)
+        .collect();
+
+    for i in failed_indices {
+            // Tekil fallback dene
+            let config = pools[i].clone();
+            let state = states[i].clone();
+
+            let mut fallback_ok = false;
+            for attempt in 0..=FALLBACK_MAX_RETRIES {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(FALLBACK_TIMEOUT_MS),
+                    sync_pool_state(provider, &config, &state, block_number),
+                ).await {
+                    Ok(Ok(())) => {
+                        fallback_ok = true;
+                        break;
+                    }
+                    Ok(Err(e)) => {
+                        if attempt < FALLBACK_MAX_RETRIES {
+                            eprintln!(
+                                "     \u{26a1} [{}] Fallback sync hatası ({}/{}): {}",
+                                config.name, attempt + 1, FALLBACK_MAX_RETRIES + 1, e,
+                            );
                         }
-                        Err(_elapsed) => {
-                            if attempt < MAX_RETRIES {
-                                eprintln!(
-                                    "     \u{26a1} [{}] Sync timeout ({}ms), yeniden deneniyor ({}/{})",
-                                    config.name, SYNC_TIMEOUT_MS, attempt + 1, MAX_RETRIES,
-                                );
-                                continue;
-                            }
-                            // v28.0: Graceful degradation — timeout sonrası eski veri kullan
-                            if state.read().is_initialized {
-                                eprintln!(
-                                    "     \u{26a0}\u{fe0f} [{}] Sync timeout ({}ms, {} deneme) — eski veri korunuyor (yaş: {}ms)",
-                                    config.name, SYNC_TIMEOUT_MS, MAX_RETRIES + 1,
-                                    state.read().staleness_ms(),
-                                );
-                                return Ok(());
-                            }
-                            return Err(eyre::eyre!(
-                                "[{}] Sync timeout: {}ms i\u{00e7}inde yan\u{0131}t al\u{0131}namad\u{0131} ({} deneme)",
-                                config.name, SYNC_TIMEOUT_MS, MAX_RETRIES + 1,
-                            ));
+                    }
+                    Err(_) => {
+                        if attempt < FALLBACK_MAX_RETRIES {
+                            eprintln!(
+                                "     \u{26a1} [{}] Fallback sync timeout ({}/{})",
+                                config.name, attempt + 1, FALLBACK_MAX_RETRIES + 1,
+                            );
                         }
                     }
                 }
-                unreachable!()
             }
-        })
-        .collect();
-    join_all(futures).await
+
+            if fallback_ok {
+                final_results[i] = Ok(());
+            } else {
+                // v10.0: Eski veri KULLANILMAZ — havuzu STALE olarak işaretle
+                let staleness = state.read().staleness_ms();
+                state.write().is_stale = true;
+                eprintln!(
+                    "     \u{1f6a8} [{}] Sync tamamen başarısız — STALE olarak işaretlendi (veri yaşı: {}ms)",
+                    config.name, staleness,
+                );
+            }
+    }
+
+    final_results
 }
 
 /// Tüm havuzların TickBitmap'lerini senkronize et
@@ -1033,6 +1424,7 @@ pub async fn optimistic_refresh_pool<P: Provider + Sync>(
         state.eth_price_usd = eth_price;
         state.last_block = current_block;
         state.last_update = Instant::now();
+        state.is_stale = false; // Optimistic refresh — veri taze
         Ok(true)
     } else {
         Ok(false)
@@ -1145,6 +1537,7 @@ pub fn process_swap_event_log(
         state.last_block = log_block_number;
         state.last_update = Instant::now();
         state.is_initialized = true;
+        state.is_stale = false; // Event-driven güncelleme — veri taze
     }
 
     Ok(true)
@@ -1272,6 +1665,7 @@ mod rpc_failover_tests {
             bytecode: None,
             tick_bitmap: None,
             live_fee_bps: None,
+            is_stale: false,
         }))
     }
 

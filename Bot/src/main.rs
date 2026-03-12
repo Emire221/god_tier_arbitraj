@@ -749,6 +749,52 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         }
     }
 
+    // ══════════════ HAVUZ SAĞLAMLIK KONTROLÜ (Pool Sanity Check) ══════════════
+    // v10.0: Başlangıçta tüm havuzları on-chain doğrula. Geçersiz havuzlar
+    // (execution reverted, slot0/liquidity okunamayan) listeden çıkarılır.
+    // Bu, runtime'da "error code 3: execution reverted" hatalarını önler.
+    println!("\n  {} Havuz sağlamlık kontrolü yapılıyor ({} havuz)...", "🔍".yellow(), pools.len());
+    let invalid_pool_indices = validate_pools(&provider, pools).await;
+    if !invalid_pool_indices.is_empty() {
+        println!(
+            "  {} {} geçersiz havuz tespit edildi — listeden çıkarılıyor",
+            "⚠️".yellow(), invalid_pool_indices.len(),
+        );
+        // Büyükten küçüğe sırala — indeks kayması olmasın
+        let mut sorted_invalid = invalid_pool_indices;
+        sorted_invalid.sort_unstable_by(|a, b| b.cmp(a));
+        for &idx in &sorted_invalid {
+            println!(
+                "  {}   Silinen: {} ({})",
+                "🗑️".red(), pools[idx].name, pools[idx].address,
+            );
+            pools.remove(idx);
+            states.remove(idx);
+        }
+        // pair_combos'u geçerli indekslerle yeniden oluştur
+        *pair_combos = pool_discovery::rebuild_pair_combos(pools);
+        for combo in pair_combos.iter() {
+            if combo.pool_a_idx >= pools.len() || combo.pool_b_idx >= pools.len() {
+                return Err(eyre::eyre!(
+                    "Pool validation sonrası geçersiz pair combo indeksi üretildi: {} -> ({}, {}) / pool_count={} ",
+                    combo.pair_name,
+                    combo.pool_a_idx,
+                    combo.pool_b_idx,
+                    pools.len()
+                ));
+            }
+        }
+        println!(
+            "  {} Havuz listesi güncellendi: {} geçerli havuz kaldı",
+            "✅".green(), pools.len(),
+        );
+    } else {
+        println!(
+            "  {} Tüm havuzlar doğrulandı — {} havuz geçerli",
+            "✅".green(), pools.len(),
+        );
+    }
+
     // İlk state sync
     let sync_results = sync_all_pools(&provider, pools, &states, block).await;
     for (i, result) in sync_results.iter().enumerate() {

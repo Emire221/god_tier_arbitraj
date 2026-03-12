@@ -237,7 +237,7 @@ const SYNC_TIMEOUT_MS: u64 = 3000;
 /// Multicall3 toplu senkronizasyon chunk boyutu.
 /// RPC payload limitleri nedeniyle havuzlar bu boyutta yığınlara bölünür.
 /// Her havuz için 3 çağrı (slot0+liquidity+fee) → chunk=50 → 150 call/batch.
-const MULTICALL_CHUNK_SIZE: usize = 50;
+const MULTICALL_CHUNK_SIZE: usize = 30;
 
 /// Maksimum yeniden deneme sayısı (timeout sonrası)
 const SYNC_MAX_RETRIES: u32 = 2;

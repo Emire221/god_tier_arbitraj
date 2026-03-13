@@ -358,7 +358,7 @@ impl LivePoolRegistry {
         let active_count = self.active_flags.iter().filter(|&&a| a).count();
         if active_count > max_active {
             eprintln!(
-                "  {} [Registry] Aktif havuz sayısı ({}) maksimum limitin ({}) üstünde",
+                "  {} [Registry] Active pool count ({}) exceeds max limit ({})",
                 "⚠️".yellow(), active_count, max_active,
             );
         }
@@ -484,15 +484,14 @@ impl DiscoveryEngine {
             tokio::spawn(async move {
                 tokio::select! {
                     _ = token.cancelled() => {
-                        eprintln!("  {} Factory listener graceful shutdown", "🔌");
+                        eprintln!("  🔌 Factory listener graceful shutdown");
                     }
                     result = factory_listener(registry, &config) => {
                         match result {
                             Ok(_) => {}
                             Err(e) => {
                                 eprintln!(
-                                    "  {} Factory listener hatası (API keşfi devam ediyor): {}",
-                                    "⚠️", e
+                                    "  ⚠️ Factory listener error (API discovery continues): {}", e
                                 );
                             }
                         }
@@ -510,7 +509,7 @@ impl DiscoveryEngine {
             tokio::spawn(async move {
                 tokio::select! {
                     _ = token.cancelled() => {
-                        eprintln!("  {} API aggregator graceful shutdown", "🔌");
+                        eprintln!("  🔌 API aggregator graceful shutdown");
                     }
                     _ = api_aggregator_loop(registry, &config) => {}
                 }
@@ -518,7 +517,7 @@ impl DiscoveryEngine {
         }
 
         println!(
-            "  {} Keşif Motoru v1.0 başlatıldı: Factory WSS + Multi-API + Skorlama + GC",
+            "  {} Discovery Engine v1.0 started: Factory WSS + Multi-API + Scoring + GC",
             "🔍".cyan()
         );
     }
@@ -536,7 +535,7 @@ async fn factory_listener(
 ) -> Result<()> {
     let ws = WsConnect::new(&config.wss_url);
     let provider = ProviderBuilder::new().connect_ws(ws).await
-        .map_err(|e| eyre::eyre!("Factory listener WSS bağlantı hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("Factory listener WSS connection error: {}", e))?;
 
     // Dinlenecek factory adresleri
     let factories = vec![
@@ -555,11 +554,11 @@ async fn factory_listener(
         .event_signature(vec![topic_uni, topic_aero]);
 
     let sub = provider.subscribe_logs(&filter).await
-        .map_err(|e| eyre::eyre!("Factory event abonelik hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("Factory event subscription error: {}", e))?;
     let mut stream = sub.into_stream();
 
     println!(
-        "  {} On-Chain Factory Listener aktif — 4 DEX factory dinleniyor",
+        "  {} On-Chain Factory Listener active — listening to 4 DEX factories",
         "🏭".green()
     );
 
@@ -573,6 +572,16 @@ async fn factory_listener(
 
         let factory_address = log.inner.address;
         let topic0 = topics[0];
+
+        // v26.0: Explicit V3 factory whitelist guard — reject events from unknown factories
+        // RPC filter already limits to known factories, but this is defense-in-depth
+        let is_known_factory = factory_address == FACTORY_UNISWAP_V3
+            || factory_address == FACTORY_AERODROME_CL
+            || factory_address == FACTORY_PANCAKESWAP_V3
+            || factory_address == FACTORY_SUSHISWAP_V3;
+        if !is_known_factory {
+            continue;
+        }
 
         // Event tipine göre parsing
         let parsed = if topic0 == topic_uni {
@@ -616,13 +625,13 @@ async fn factory_listener(
         let base_addr_resolved = if token0_is_weth { parsed.token0 } else { parsed.token1 };
         let pool_config = PoolConfig {
             address: parsed.pool_address,
-            name: format!("{}-WETH/{}",
+            name: format!("{}-WETH/{:.6}...",
                 match parsed.dex_type {
                     DexType::UniswapV3 => "UniV3",
                     DexType::PancakeSwapV3 => "PCS",
                     DexType::Aerodrome => "Aero",
                 },
-                format!("{:.6}...", format!("{}", quote_addr))
+                quote_addr
             ),
             fee_bps,
             fee_fraction: fee_bps as f64 / 10_000.0,
@@ -653,7 +662,7 @@ async fn factory_listener(
         reg.stats.factory_events_received += 1;
     }
 
-    Err(eyre::eyre!("Factory event stream kapandı"))
+    Err(eyre::eyre!("Factory event stream closed"))
 }
 
 /// Uniswap V3 PoolCreated event parsing
@@ -776,6 +785,7 @@ fn factory_to_dex_type(factory: Address) -> DexType {
 }
 
 /// Token adresi → decimal tahmin
+#[allow(clippy::if_same_then_else)]
 fn infer_decimals(token: &Address) -> u8 {
     let lower = format!("{}", token).to_lowercase();
     if lower.ends_with("0000000000000000000006") { 18 }
@@ -837,12 +847,12 @@ async fn api_aggregator_loop(
                     }
                     if count > 0 {
                         reg.stats.api_discoveries += count as u64;
-                        eprintln!("  {} [DexScreener] {} yeni havuz doğrulandı ve eklendi", "🌐".cyan(), count);
+                        eprintln!("  {} [DexScreener] {} new pools validated and added", "🌐".cyan(), count);
                     }
                 }
             }
             Err(e) => {
-                eprintln!("  {} [DexScreener] API hatası — GeckoTerminal'e geçiliyor: {}", "⚠️".yellow(), e);
+                eprintln!("  {} [DexScreener] API error — falling back to GeckoTerminal: {}", "⚠️".yellow(), e);
 
                 // Kaynak 2: GeckoTerminal (fallback)
                 match discover_gecko_terminal(config).await {
@@ -879,12 +889,12 @@ async fn api_aggregator_loop(
                             }
                             if count > 0 {
                                 reg.stats.api_discoveries += count as u64;
-                                eprintln!("  {} [GeckoTerminal] {} yeni havuz doğrulandı ve eklendi (fallback)", "🦎".green(), count);
+                                eprintln!("  {} [GeckoTerminal] {} new pools validated and added (fallback)", "🦎".green(), count);
                             }
                         }
                     }
                     Err(e2) => {
-                        eprintln!("  {} [GeckoTerminal] Fallback da başarısız: {}", "❌".red(), e2);
+                        eprintln!("  {} [GeckoTerminal] Fallback also failed: {}", "❌".red(), e2);
                     }
                 }
             }
@@ -904,14 +914,14 @@ async fn discover_dexscreener(config: &DiscoveryConfig) -> Result<Vec<PendingPoo
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .map_err(|e| eyre::eyre!("HTTP istemci hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("HTTP client error: {}", e))?;
 
     let resp = client
         .get(&url)
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| eyre::eyre!("DexScreener istek hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("DexScreener request error: {}", e))?;
 
     // v25.0: Rate limiting — 429 Too Many Requests durumunda exponential backoff
     if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -921,7 +931,7 @@ async fn discover_dexscreener(config: &DiscoveryConfig) -> Result<Vec<PendingPoo
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(60);
         eprintln!(
-            "  ⚠️ [DexScreener] Rate limit (429) — {}s bekleniyor",
+            "  ⚠️ [DexScreener] Rate limit (429) — waiting {}s",
             retry_after
         );
         tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
@@ -933,7 +943,7 @@ async fn discover_dexscreener(config: &DiscoveryConfig) -> Result<Vec<PendingPoo
     }
 
     let json: serde_json::Value = resp.json().await
-        .map_err(|e| eyre::eyre!("DexScreener JSON hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("DexScreener JSON error: {}", e))?;
 
     parse_dexscreener_pools(&json, config)
 }
@@ -944,7 +954,7 @@ fn parse_dexscreener_pools(json: &serde_json::Value, config: &DiscoveryConfig) -
 
     let pairs = json.get("pairs")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| eyre::eyre!("DexScreener yanıtında 'pairs' bulunamadı"))?;
+        .ok_or_else(|| eyre::eyre!("'pairs' not found in DexScreener response"))?;
 
     for pair in pairs {
         let chain_id = pair.get("chainId").and_then(|v| v.as_str()).unwrap_or("");
@@ -960,6 +970,19 @@ fn parse_dexscreener_pools(json: &serde_json::Value, config: &DiscoveryConfig) -
             || dex_lower.contains("aerodrome");
         if !is_v3 {
             continue;
+        }
+
+        // v26.0: V2 label blacklist — reject pools with V2/stable/vAMM labels
+        // DexScreener returns labels like ["v2"], ["v3"], ["stable"]
+        let labels = pair.get("labels").and_then(|v| v.as_array());
+        if let Some(label_arr) = labels {
+            let has_v2_label = label_arr.iter().any(|l| {
+                let s = l.as_str().unwrap_or("").to_lowercase();
+                s == "v1" || s == "v2" || s == "stable" || s == "vamm"
+            });
+            if has_v2_label {
+                continue;
+            }
         }
 
         let pair_address = pair.get("pairAddress").and_then(|v| v.as_str()).unwrap_or("");
@@ -1076,14 +1099,14 @@ async fn discover_gecko_terminal(config: &DiscoveryConfig) -> Result<Vec<Pending
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .map_err(|e| eyre::eyre!("HTTP istemci hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("HTTP client error: {}", e))?;
 
     let resp = client
         .get(&url)
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| eyre::eyre!("GeckoTerminal istek hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("GeckoTerminal request error: {}", e))?;
 
     // v25.0: Rate limiting — 429 Too Many Requests durumunda exponential backoff
     if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -1093,7 +1116,7 @@ async fn discover_gecko_terminal(config: &DiscoveryConfig) -> Result<Vec<Pending
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(60);
         eprintln!(
-            "  ⚠️ [GeckoTerminal] Rate limit (429) — {}s bekleniyor",
+            "  ⚠️ [GeckoTerminal] Rate limit (429) — waiting {}s",
             retry_after
         );
         tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
@@ -1105,7 +1128,7 @@ async fn discover_gecko_terminal(config: &DiscoveryConfig) -> Result<Vec<Pending
     }
 
     let json: serde_json::Value = resp.json().await
-        .map_err(|e| eyre::eyre!("GeckoTerminal JSON hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("GeckoTerminal JSON error: {}", e))?;
 
     parse_gecko_terminal_pools(&json, config)
 }
@@ -1119,7 +1142,7 @@ fn parse_gecko_terminal_pools(
 
     let data = json.get("data")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| eyre::eyre!("GeckoTerminal yanıtında 'data' bulunamadı"))?;
+        .ok_or_else(|| eyre::eyre!("'data' not found in GeckoTerminal response"))?;
 
     for pool_data in data {
         let attributes = match pool_data.get("attributes") {
@@ -1208,7 +1231,7 @@ fn parse_gecko_terminal_pools(
         let btoken = if token0_is_weth { base_addr } else { quote_addr };
         let pool_config = PoolConfig {
             address: pool_addr,
-            name: format!("Gecko-WETH"),
+            name: "Gecko-WETH".to_string(),
             fee_bps: 5, // GeckoTerminal genelde fee bilgisi vermez, 0.05% varsay
             fee_fraction: 0.0005,
             token0_decimals: t0_dec,
@@ -1296,7 +1319,7 @@ pub fn apply_pending_updates(
 
     if added > 0 {
         eprintln!(
-            "  {} [Hot-Reload] {} yeni havuz aktif izlemeye eklendi (toplam: {})",
+            "  {} [Hot-Reload] {} new pools added to active monitoring (total: {})",
             "🔥".green(), added, pools.len(),
         );
     }
@@ -1334,7 +1357,7 @@ pub fn run_garbage_collector(
 
     if !deactivated.is_empty() {
         eprintln!(
-            "  {} [GC] {} havuz uyku moduna alındı (blok #{}): {:?}",
+            "  {} [GC] {} pools moved to sleep mode (block #{}): {:?}",
             "🧹".yellow(),
             deactivated.len(),
             current_block,
@@ -1386,7 +1409,7 @@ pub fn update_scores(
             })
             .collect();
         eprintln!(
-            "  {} [Scorer] Skor güncellendi — Top 5: {}",
+            "  {} [Scorer] Scores updated — Top 5: {}",
             "📊".cyan(),
             scores_str.join(" | "),
         );
@@ -1474,14 +1497,14 @@ pub fn print_discovery_stats(registry: &Arc<RwLock<LivePoolRegistry>>, pools: &[
     let active_count = reg.active_flags.iter().filter(|&&a| a).count();
     let sleeping_count = reg.sleeping_pools.len();
 
-    println!("  {} ─── Keşif Motoru İstatistikleri ─────────", "│".yellow());
-    println!("  {}  Toplam Keşfedilen   : {}", "│".yellow(), reg.stats.total_discovered);
-    println!("  {}  Factory Eventleri   : {}", "│".yellow(), reg.stats.factory_events_received);
-    println!("  {}  API Keşifleri       : {}", "│".yellow(), reg.stats.api_discoveries);
-    println!("  {}  Aktif Havuz         : {}", "│".yellow(), active_count);
-    println!("  {}  Uyuyan Havuz        : {}", "│".yellow(), sleeping_count);
-    println!("  {}  GC Temizlenen       : {}", "│".yellow(), reg.stats.pools_garbage_collected);
-    println!("  {}  Skor Güncelleme     : {}", "│".yellow(), reg.stats.score_recalculations);
+    println!("  {} ─── Discovery Engine Stats ─────────", "│".yellow());
+    println!("  {}  Total Discovered    : {}", "│".yellow(), reg.stats.total_discovered);
+    println!("  {}  Factory Events      : {}", "│".yellow(), reg.stats.factory_events_received);
+    println!("  {}  API Discoveries     : {}", "│".yellow(), reg.stats.api_discoveries);
+    println!("  {}  Active Pools        : {}", "│".yellow(), active_count);
+    println!("  {}  Sleeping Pools      : {}", "│".yellow(), sleeping_count);
+    println!("  {}  GC Cleaned          : {}", "│".yellow(), reg.stats.pools_garbage_collected);
+    println!("  {}  Score Updates       : {}", "│".yellow(), reg.stats.score_recalculations);
 
     // Top 3 skorlu havuz
     let top3 = reg.top_scored_indices(3);
@@ -1493,6 +1516,6 @@ pub fn print_discovery_stats(registry: &Arc<RwLock<LivePoolRegistry>>, pools: &[
                 Some(format!("{}: {:.0}", name, score))
             })
             .collect();
-        println!("  {}  En İyi Havuzlar     : {}", "│".yellow(), top_str.join(", "));
+        println!("  {}  Top Pools           : {}", "│".yellow(), top_str.join(", "));
     }
 }

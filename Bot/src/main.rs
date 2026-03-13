@@ -24,6 +24,8 @@ mod executor;
 mod pool_discovery;
 mod discovery_engine;
 mod route_engine;
+mod json_logger;
+mod dust_sweeper;
 
 use types::*;
 use state_sync::*;
@@ -61,12 +63,12 @@ fn print_banner(config: &BotConfig) {
     );
     println!(
         "{}",
-        "║       ARBITRAJ BOTU v25.0 — Kuantum Beyin IV                   ║"
+        "║       ARBITRAGE BOT v25.0 — Quantum Brain IV                    ║"
             .cyan().bold()
     );
     println!(
         "{}",
-        "║    Base Network Çapraz-DEX Arbitraj Sistemi                     ║"
+        "║    Base Network Cross-DEX Arbitrage System                       ║"
             .cyan().bold()
     );
     println!(
@@ -76,27 +78,27 @@ fn print_banner(config: &BotConfig) {
     );
     println!(
         "{}",
-        "║  [v25] Otonom Keşif: Factory WSS + Multi-API + Skorlama + GC   ║"
+        "║  [v25] Autonomous Discovery: Factory WSS + Multi-API + Scoring + GC ║"
             .cyan()
     );
     println!(
         "{}",
-        "║  [v9] Executor/Admin Rol Ayrımı + Deadline Block               ║"
+        "║  [v9] Executor/Admin Role Separation + Deadline Block             ║"
             .cyan()
     );
     println!(
         "{}",
-        "║  [v9] Şifreli Key Management (AES-256-GCM + PBKDF2)            ║"
+        "║  [v9] Encrypted Key Management (AES-256-GCM + PBKDF2)             ║"
             .cyan()
     );
     println!(
         "{}",
-        "║  [v9] Dinamik Bribe/Priority Fee + 134-Byte Calldata           ║"
+        "║  [v9] Dynamic Bribe/Priority Fee + 134-Byte Calldata              ║"
             .cyan()
     );
     println!(
         "{}",
-        "║  [v6] TickBitmap + Multi-Tick Derinlik + REVM Simülasyon        ║"
+        "║  [v6] TickBitmap + Multi-Tick Depth + REVM Simulation              ║"
             .cyan()
     );
     println!(
@@ -110,31 +112,31 @@ fn print_banner(config: &BotConfig) {
             .cyan().bold()
     );
     println!();
-    println!("  {} Motor          : {}", "▸".cyan(), "Rust + Alloy + REVM (Sıfır Gecikme)".white());
-    println!("  {} Ağ             : {}", "▸".cyan(), format!("Base Network (Chain ID: {})", config.chain_id).white());
-    println!("  {} Transport      : {}", "▸".cyan(), format!("{:?} (Öncelik: IPC > WSS > HTTP)", config.transport_mode).white());
-    println!("  {} Strateji       : {}", "▸".cyan(), "Çapraz-DEX Spread Arbitrajı (Uniswap V3 + Aerodrome)".white());
-    println!("  {} Derinlik       : {}", "▸".cyan(), format!("TickBitmap (±{} tick aralığı, max {}blk yaş)", config.tick_bitmap_range, config.tick_bitmap_max_age_blocks).white());
-    println!("  {} Calldata       : {}", "▸".cyan(), format!("134 byte kompakt (deadline: +{} blok)", config.deadline_blocks).white());
-    println!("  {} Bribe          : {}", "▸".cyan(), format!("Dinamik %{:.0} kâr → priority fee", config.bribe_pct * 100.0).white());
-    println!("  {} Key Yönetimi   : {}", "▸".cyan(), if config.key_manager_active { "Şifreli Keystore (AES-256-GCM)".green().to_string() } else if config.private_key.is_some() { "Env Var (GÜVENSİZ)".yellow().to_string() } else { "Yok".red().to_string() });
-    println!("  {} Flash Loan     : {}", "▸".cyan(), format!("Aave V3 (%{:.2} Komisyon)", config.flash_loan_fee_bps / 100.0).white());
-    println!("  {} Maks İşlem     : {}", "▸".cyan(), format!("{:.1} WETH", config.max_trade_size_weth).white());
-    println!("  {} Min. Net Kâr   : {}", "▸".cyan(), format!("{:.6} WETH", config.min_net_profit_weth).white());
+    println!("  {} Engine         : {}", "▸".cyan(), "Rust + Alloy + REVM (Zero Latency)".white());
+    println!("  {} Network        : {}", "▸".cyan(), format!("Base Network (Chain ID: {})", config.chain_id).white());
+    println!("  {} Transport      : {}", "▸".cyan(), format!("{:?} (Priority: IPC > WSS > HTTP)", config.transport_mode).white());
+    println!("  {} Strategy       : {}", "▸".cyan(), "Cross-DEX Spread Arbitrage (Uniswap V3 + Aerodrome)".white());
+    println!("  {} Depth          : {}", "▸".cyan(), format!("TickBitmap (±{} tick range, max {}blk age)", config.tick_bitmap_range, config.tick_bitmap_max_age_blocks).white());
+    println!("  {} Calldata       : {}", "▸".cyan(), format!("134 byte compact (deadline: +{} block)", config.deadline_blocks).white());
+    println!("  {} Bribe          : {}", "▸".cyan(), format!("Dynamic %{:.0} profit → priority fee", config.bribe_pct * 100.0).white());
+    println!("  {} Key Mgmt       : {}", "▸".cyan(), if config.key_manager_active { "Encrypted Keystore (AES-256-GCM)".green().to_string() } else if config.private_key.is_some() { "Env Var (UNSAFE)".yellow().to_string() } else { "None".red().to_string() });
+    println!("  {} Flash Loan     : {}", "▸".cyan(), format!("Aave V3 ({:.2}% Fee)", config.flash_loan_fee_bps / 100.0).white());
+    println!("  {} Max Trade      : {}", "▸".cyan(), format!("{:.1} WETH", config.max_trade_size_weth).white());
+    println!("  {} Min Net Profit : {}", "▸".cyan(), format!("{:.6} WETH", config.min_net_profit_weth).white());
     println!(
-        "  {} Başlangıç      : {}",
+        "  {} Start Time     : {}",
         "▸".cyan(),
         Local::now().format("%Y-%m-%d %H:%M:%S").to_string().yellow()
     );
     println!(
-        "  {} Mod            : {}",
+        "  {} Mode           : {}",
         "▸".cyan(),
         if config.execution_enabled() {
-            "CANLI (Kontrat Tetikleme Aktif)".green().bold().to_string()
+            "LIVE (Contract Execution Active)".green().bold().to_string()
         } else if config.shadow_mode() {
-            "GÖLGE MODU (Kuru Sıkı — shadow_analytics.jsonl'e kayıt)".yellow().bold().to_string()
+            "SHADOW MODE (Dry Run — logging to shadow_analytics.jsonl)".yellow().bold().to_string()
         } else {
-            "GÖZLEM (Sadece İzleme)".yellow().bold().to_string()
+            "OBSERVE (Watch Only)".yellow().bold().to_string()
         }
     );
     println!();
@@ -142,7 +144,7 @@ fn print_banner(config: &BotConfig) {
 
 fn print_pool_header(pools: &[PoolConfig], states: &[SharedPoolState]) {
     println!("{}", "  ┌──────────────────────────────────────────────────────────────┐".dimmed());
-    println!("  {} {}", "│".dimmed(), "Gözetlenen Havuzlar:".white().bold());
+    println!("  {} {}", "│".dimmed(), "Monitored Pools:".white().bold());
     for (i, p) in pools.iter().enumerate() {
         let icon = if i == 0 { "🔵" } else { "🟣" };
         let fee_display = if i < states.len() {
@@ -153,7 +155,7 @@ fn print_pool_header(pools: &[PoolConfig], states: &[SharedPoolState]) {
             p.fee_bps as f64 / 100.0
         };
         println!(
-            "  {}   {} {} ({} — Ücret: %{:.2})",
+            "  {}   {} {} ({} — Fee: %{:.2})",
             "│".dimmed(),
             icon,
             p.name,
@@ -193,13 +195,16 @@ fn print_block_update(
     }
 
     println!(
-        "  {} [{}] Blok #{} | {} | Senk: {}ms",
+        "  {} [{}] Block #{} | {} | Sync: {}ms",
         "🧱".blue(),
         timestamp().dimmed(),
         format!("{}", block_number).white().bold(),
         pool_info,
         sync_ms,
     );
+
+    // JSON structured log: block processed
+    json_logger::log_block(block_number, sync_ms, pools.len());
 }
 
 fn print_spread_info(pools: &[PoolConfig], states: &[SharedPoolState]) {
@@ -231,13 +236,12 @@ fn print_spread_info(pools: &[PoolConfig], states: &[SharedPoolState]) {
 
         if spread_pct > 0.05 {
             println!(
-                "     {} Spread: {:.4}% ({:.6}Q) | {} AL→SAT",
+                "     {} Spread: {:.4}% ({:.6}Q) | {} BUY→SELL",
                 "📊".yellow(), spread_pct, spread, direction,
             );
         } else {
             println!(
-                "     {} Spread: {:.4}% ({:.6}Q) | {}",
-                "📊", spread_pct, spread, direction,
+                "     📊 Spread: {:.4}% ({:.6}Q) | {}", spread_pct, spread, direction,
             );
         }
     }
@@ -245,12 +249,12 @@ fn print_spread_info(pools: &[PoolConfig], states: &[SharedPoolState]) {
 
 fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools: &[PoolConfig], pair_combos: &[pool_discovery::PairCombo]) {
     println!();
-    println!("{}", "  ┌───── OTURUM İSTATİSTİKLERİ (v16.2) ─────────────────────────┐".yellow());
-    println!("  {}  Çalışma Süresi       : {}", "│".yellow(), stats.uptime_str().white().bold());
-    println!("  {}  İşlenen Blok         : {}", "│".yellow(), format!("{}", stats.total_blocks_processed).white());
-    println!("  {}  Tespit Edilen Fırsat  : {}", "│".yellow(), format!("{}", stats.total_opportunities).white());
+    println!("{}", "  ┌───── SESSION STATISTICS (v16.2) ──────────────────────────────┐".yellow());
+    println!("  {}  Uptime               : {}", "│".yellow(), stats.uptime_str().white().bold());
+    println!("  {}  Blocks Processed     : {}", "│".yellow(), format!("{}", stats.total_blocks_processed).white());
+    println!("  {}  Opportunities Detected: {}", "│".yellow(), format!("{}", stats.total_opportunities).white());
     println!(
-        "  {}  Net Kârlı Fırsat     : {}",
+        "  {}  Net Profitable       : {}",
         "│".yellow(),
         if stats.profitable_opportunities > 0 {
             format!("{}", stats.profitable_opportunities).green().bold().to_string()
@@ -258,9 +262,9 @@ fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools
             format!("{}", stats.profitable_opportunities).dimmed().to_string()
         }
     );
-    println!("  {}  Başarısız Simülasyon  : {}", "│".yellow(), stats.failed_simulations);
+    println!("  {}  Failed Simulations   : {}", "│".yellow(), stats.failed_simulations);
     println!(
-        "  {}  Yürütülen İşlem      : {}",
+        "  {}  Executed Trades      : {}",
         "│".yellow(),
         if stats.executed_trades > 0 {
             format!("{}", stats.executed_trades).green().bold().to_string()
@@ -268,12 +272,12 @@ fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools
             format!("{}", stats.executed_trades).dimmed().to_string()
         }
     );
-    println!("  {}  Maks. Spread          : {:.4}%", "│".yellow(), stats.max_spread_pct);
-    println!("  {}  Maks. Kâr (tek)       : {:.6} WETH", "│".yellow(), stats.max_profit_weth);
-    println!("  {}  Toplam Pot. Kâr       : {:.6} WETH", "│".yellow(), stats.total_potential_profit);
+    println!("  {}  Max Spread           : {:.4}%", "│".yellow(), stats.max_spread_pct);
+    println!("  {}  Max Profit (single)  : {:.6} WETH", "│".yellow(), stats.max_profit_weth);
+    println!("  {}  Total Pot. Profit    : {:.6} WETH", "│".yellow(), stats.total_potential_profit);
 
     // v11.0: Fee & break-even — tüm çiftler
-    println!("  {} ─── Fee & Ekonomik Analiz ─────────────", "│".yellow());
+    println!("  {} ─── Fee & Economic Analysis ───────────────", "│".yellow());
     let mut min_total_fee_pct = f64::MAX;
     for combo in pair_combos {
         if combo.pool_a_idx < pools.len() && combo.pool_b_idx < pools.len() {
@@ -302,19 +306,19 @@ fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools
     if min_total_fee_pct < f64::MAX {
         let profitable = stats.max_spread_pct > min_total_fee_pct;
         if profitable {
-            println!("  {}  Durum                 : {} (spread > fee)", "│".yellow(), "KÂRLI OLABİLİR".green().bold());
+            println!("  {}  Status               : {} (spread > fee)", "│".yellow(), "POTENTIALLY PROFITABLE".green().bold());
         } else {
-            println!("  {}  Durum                 : {} (spread {:.4}% < min fee {:.2}%)", "│".yellow(), "KÂRSIZ".red().bold(), stats.max_spread_pct, min_total_fee_pct);
+            println!("  {}  Status               : {} (spread {:.4}% < min fee {:.2}%)", "│".yellow(), "UNPROFITABLE".red().bold(), stats.max_spread_pct, min_total_fee_pct);
         }
     }
 
     // v6.0: Gecikme istatistikleri
-    println!("  {} ─── Gecikme (State Sync) ──────────────", "│".yellow());
-    println!("  {}  Ort. Gecikme          : {:.1}ms", "│".yellow(), stats.avg_block_latency_ms);
-    println!("  {}  Min. Gecikme          : {:.1}ms", "│".yellow(), stats.min_block_latency_ms);
-    println!("  {}  Maks. Gecikme         : {:.1}ms", "│".yellow(), stats.max_block_latency_ms);
-    println!("  {}  Gecikme Spike         : {} kez", "│".yellow(), stats.latency_spikes);
-    println!("  {}  TickBitmap Sync       : {} kez", "│".yellow(), stats.tick_bitmap_syncs);
+    println!("  {} ─── Latency (State Sync) ─────────────────", "│".yellow());
+    println!("  {}  Avg Latency          : {:.1}ms", "│".yellow(), stats.avg_block_latency_ms);
+    println!("  {}  Min Latency          : {:.1}ms", "│".yellow(), stats.min_block_latency_ms);
+    println!("  {}  Max Latency          : {:.1}ms", "│".yellow(), stats.max_block_latency_ms);
+    println!("  {}  Latency Spikes       : {} times", "│".yellow(), stats.latency_spikes);
+    println!("  {}  TickBitmap Sync       : {} times", "│".yellow(), stats.tick_bitmap_syncs);
 
     for (i, state_lock) in states.iter().enumerate() {
         let state = state_lock.read();
@@ -322,10 +326,10 @@ fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools
             let bitmap_info = if let Some(ref bm) = state.tick_bitmap {
                 format!(" | Bitmap: {} tick", bm.ticks.len())
             } else {
-                " | Bitmap: YOK".to_string()
+                " | Bitmap: NONE".to_string()
             };
             println!(
-                "  {}  Havuz {} Fiyat       : {:.6} Q (tick: {}){}",
+                "  {}  Pool {} Price        : {:.6} Q (tick: {}){}",
                 "│".yellow(), i + 1, state.eth_price_usd, state.tick, bitmap_info,
             );
         }
@@ -333,6 +337,17 @@ fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools
 
     println!("{}", "  └──────────────────────────────────────────────────────────────┘".yellow());
     println!();
+
+    // JSON structured log: session statistics snapshot
+    json_logger::log_stats(
+        &stats.uptime_str(),
+        stats.total_blocks_processed,
+        stats.total_opportunities,
+        stats.profitable_opportunities,
+        stats.executed_trades,
+        stats.total_potential_profit,
+        stats.avg_block_latency_ms,
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -343,14 +358,14 @@ fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools
 /// kullanıcıya RPC URL'lerini girmesini söyleyip zarifçe (graceful) kapanır.
 fn generate_default_env_and_exit() -> ! {
     let template = r#"# ═══════════════════════════════════════════════════════════════════════════════
-#  Kuantum Beyin III v9.0 — Otomatik Oluşturulan .env Şablonu
+#  Quantum Brain III v9.0 — Auto-Generated .env Template
 #
-#  Bu dosya bot tarafından otomatik oluşturulmuştur.
-#  Lütfen aşağıdaki RPC URL'lerini kendi Alchemy/Infura/QuickNode
-#  bilgilerinizle doldurun ve botu yeniden başlatın.
+#  This file was auto-generated by the bot.
+#  Please fill in the RPC URLs below with your Alchemy/Infura/QuickNode
+#  credentials and restart the bot.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# ─── RPC Bağlantıları (ZORUNLU — Alchemy / Infura / QuickNode) ───
+# ─── RPC Connections (REQUIRED — Alchemy / Infura / QuickNode) ───
 RPC_WSS_URL=
 RPC_HTTP_URL=
 RPC_WSS_URL_BACKUP=
@@ -359,45 +374,45 @@ RPC_WSS_URL_3=
 RPC_IPC_PATH=
 TRANSPORT_MODE=auto
 
-# ─── Zincir Ayarı (Base Mainnet) ───
+# ─── Chain Config (Base Mainnet) ───
 CHAIN_ID=8453
 
-# ─── Cüzdan ve Kontrat ───
+# ─── Wallet and Contract ───
 PRIVATE_KEY=
 KEYSTORE_PATH=
 ARBITRAGE_CONTRACT_ADDRESS=
 
-# ─── MEV Koruması (opsiyonel) ───
+# ─── MEV Protection (optional) ───
 PRIVATE_RPC_URL=
 
-# ─── Maliyet ve Strateji (WETH cinsinden) ───
+# ─── Cost and Strategy (in WETH) ───
 GAS_COST_FALLBACK_WETH=0.00005
 FLASH_LOAN_FEE_BPS=0.0
-MIN_NET_PROFIT_WETH=0.0005
+MIN_NET_PROFIT_WETH=0.00003
 MAX_TRADE_SIZE_WETH=5.0
 MAX_STALENESS_MS=3000
 STATS_INTERVAL=10
 MAX_RETRIES=0
 
-# ─── Havuz Komisyon Filtresi ───
+# ─── Pool Fee Filter ───
 MAX_POOL_FEE_BPS=100
 
-# ─── TickBitmap Derinlik Ayarları ───
-TICK_BITMAP_RANGE=10
+# ─── TickBitmap Depth Settings ───
+TICK_BITMAP_RANGE=100
 TICK_BITMAP_MAX_AGE_BLOCKS=5
 
-# ─── Gölge Modu (Shadow Mode) ───
+# ─── Shadow Mode ───
 EXECUTION_ENABLED=false
 
-# ─── RPC Failover & Gecikme Ayarları ───
+# ─── RPC Failover & Latency Settings ───
 LATENCY_SPIKE_THRESHOLD_MS=200
 
-# ─── MEV & TX Ayarları ───
+# ─── MEV & TX Settings ───
 DEADLINE_BLOCKS=2
 BRIBE_PCT=0.25
 CIRCUIT_BREAKER_THRESHOLD=3
 
-# ─── Admin (opsiyonel) ───
+# ─── Admin (optional) ───
 ADMIN_ADDRESS=
 "#;
 
@@ -405,37 +420,30 @@ ADMIN_ADDRESS=
         Ok(_) => {
             println!();
             println!(
-                "{}",
                 "╔══════════════════════════════════════════════════════════════════╗"
             );
             println!(
-                "{}",
-                "║  .env dosyası bulunamadı — varsayılan şablon oluşturuldu.       ║"
+                "║  .env file not found — default template generated.             ║"
             );
             println!(
-                "{}",
                 "║                                                                  ║"
             );
             println!(
-                "{}",
-                "║  Lütfen .env dosyasını açın,                                     ║"
+                "║  Please open the .env file,                                      ║"
             );
             println!(
-                "{}",
-                "║  RPC_WSS_URL ve RPC_HTTP_URL alanlarını doldurun                 ║"
+                "║  fill in RPC_WSS_URL and RPC_HTTP_URL fields                     ║"
             );
             println!(
-                "{}",
-                "║  ve botu tekrar başlatın.                                        ║"
+                "║  and restart the bot.                                            ║"
             );
             println!(
-                "{}",
                 "╚══════════════════════════════════════════════════════════════════╝"
             );
             println!();
         }
         Err(e) => {
-            eprintln!("  HATA: .env şablonu yazılamadı: {}", e);
+            eprintln!("  ERROR: Could not write .env template: {}", e);
         }
     }
 
@@ -450,13 +458,13 @@ ADMIN_ADDRESS=
 async fn main() -> Result<()> {
     // ═══ GÖREV 3: Kendi Kendini Onaran .env Şablonu ═══
     // .env dosyası yoksa standart HFT şablonu oluştur ve zarifçe kapat.
-    if let Err(_) = dotenvy::dotenv() {
+    if dotenvy::dotenv().is_err() {
         if !std::path::Path::new(".env").exists() {
             generate_default_env_and_exit();
         }
         // .env var ama parse hatası olabilir — devam et, env::var fallback'leri yeterli
         eprintln!(
-            "  {} .env dosyası okundu ama bazı satırlar parse edilemedi — varsayılanlar kullanılacak.",
+            "  {} .env file was read but some lines could not be parsed — defaults will be used.",
             "⚠️".yellow()
         );
     }
@@ -472,6 +480,12 @@ async fn main() -> Result<()> {
         return pool_discovery::cli_discover_pools().await;
     }
 
+    // ═══ CLI: --sweep-dust ile dust token temizliği ═══
+    if args.iter().any(|a| a == "--sweep-dust") {
+        let execute = args.iter().any(|a| a == "--execute");
+        return dust_sweeper::run_sweep(execute).await;
+    }
+
     // Yapılandırmayı oku
     let mut config = BotConfig::from_env()?;
 
@@ -482,20 +496,20 @@ async fn main() -> Result<()> {
                 "shadow" => {
                     config.execution_enabled_flag = false;
                     println!(
-                        "  {} CLI: --mode shadow → Gölge modu zorlandı",
+                        "  {} CLI: --mode shadow → Shadow mode forced",
                         "👻".yellow()
                     );
                 }
                 "live" => {
                     config.execution_enabled_flag = true;
                     println!(
-                        "  {} CLI: --mode live → Canlı mod zorlandı",
+                        "  {} CLI: --mode live → Live mode forced",
                         "🚀".green()
                     );
                 }
                 other => {
                     return Err(eyre::eyre!(
-                        "Geçersiz mod: '{}'. Kullanım: --mode shadow|live",
+                        "Invalid mode: '{}'. Usage: --mode shadow|live",
                         other
                     ));
                 }
@@ -506,10 +520,10 @@ async fn main() -> Result<()> {
     // ═══ GÖREV 2: Auto-Bootstrap — Her başlangıçta havuz keşfi (v32.0) ═══
     // ═══ v29.0: CORE POOLS — Statik beyaz liste öncelikli ═══
     let matched_cfg = if let Some(core_cfg) = pool_discovery::load_core_pools() {
-        eprintln!("  {} core_pools.json bulundu — otomatik keşif atlanıyor.", "⚙️".cyan());
+        eprintln!("  {} core_pools.json found — skipping auto-discovery.", "⚙️".cyan());
         core_cfg
     } else {
-        eprintln!("  {} Otomatik havuz keşfi (Kutsal Üçlü) başlatılıyor...", "🔍".cyan());
+        eprintln!("  {} Auto pool discovery (Holy Trinity) starting...", "🔍".cyan());
         pool_discovery::cli_discover_pools().await?;
         pool_discovery::load_matched_pools()?
     };
@@ -524,9 +538,9 @@ async fn main() -> Result<()> {
     // Shadow mode'da Private RPC gerekmez.
     if config.execution_enabled() && config.private_rpc_url.is_none() {
         return Err(eyre::eyre!(
-            "PRIVATE_RPC_URL tanımlanmamış! v21.0'dan itibaren public mempool gönderimi \
-             kaldırıldı. .env dosyasına PRIVATE_RPC_URL=https://... ekleyin veya \
-             EXECUTION_ENABLED=false ile shadow mode kullanın."
+            "PRIVATE_RPC_URL not defined! Since v21.0 public mempool submission has been \
+             removed. Add PRIVATE_RPC_URL=https://... to .env or \
+             use shadow mode with EXECUTION_ENABLED=false."
         ));
     }
 
@@ -534,16 +548,16 @@ async fn main() -> Result<()> {
     {
         let wl = crate::types::token_whitelist();
         if !wl.contains(&config.weth_address) {
-            return Err(eyre::eyre!("WETH adresi ({}) whitelist'te YOK!", config.weth_address));
+            return Err(eyre::eyre!("WETH address ({}) NOT in whitelist!", config.weth_address));
         }
         for pool in &pools {
             if !wl.contains(&pool.quote_token_address) {
-                return Err(eyre::eyre!("Quote token {} whitelist'te YOK!", pool.quote_token_address));
+                return Err(eyre::eyre!("Quote token {} NOT in whitelist!", pool.quote_token_address));
             }
         }
     }
     println!(
-        "  {} Token Whitelist: Tüm token adresleri doğrulandı ({} havuz)",
+        "  {} Token Whitelist: All token addresses verified ({} pools)",
         "✅".green(), pools.len()
     );
 
@@ -557,13 +571,13 @@ async fn main() -> Result<()> {
             config.private_key = key_manager.private_key().map(|k: &str| k.to_string());
         }
         println!(
-            "  {} Key Yönetimi: {}",
+            "  {} Key Mgmt: {}",
             "🔐".green(),
             key_manager.source()
         );
     } else {
         println!(
-            "  {} Key Yönetimi: Anahtar yüklenmedi (gözlem modu)",
+            "  {} Key Mgmt: No key loaded (observe mode)",
             "ℹ️".blue()
         );
     }
@@ -577,7 +591,7 @@ async fn main() -> Result<()> {
     loop {
         if retry_count > 0 {
             println!(
-                "  {} Yeniden bağlanma denemesi #{}",
+                "  {} Reconnection attempt #{}",
                 "🔄".yellow(), retry_count
             );
         }
@@ -585,7 +599,7 @@ async fn main() -> Result<()> {
         match run_bot(&config, &mut pools, &mut pair_combos).await {
             Ok(_) => {
                 println!(
-                    "\n  {} Bağlantı kesildi. Yeniden bağlanılıyor...",
+                    "\n  {} Connection lost. Reconnecting...",
                     "⚠️".yellow()
                 );
             }
@@ -594,7 +608,7 @@ async fn main() -> Result<()> {
                 // run_bot döndüğünde token scope'u biter, yeni döngüde
                 // yeni token üretilir.
                 println!(
-                    "\n  {} Hata: {:#}",
+                    "\n  {} Error: {:#}",
                     "❌".red(), e
                 );
             }
@@ -604,10 +618,10 @@ async fn main() -> Result<()> {
 
         if config.max_retries > 0 && retry_count >= config.max_retries {
             println!(
-                "  {} Maksimum deneme ({}) aşıldı. Bot kapatılıyor.",
+                "  {} Maximum retries ({}) exceeded. Bot shutting down.",
                 "🛑".red(), config.max_retries
             );
-            return Err(eyre::eyre!("Maksimum yeniden bağlanma denemesi aşıldı"));
+            return Err(eyre::eyre!("Maximum reconnection attempts exceeded"));
         }
 
         // v13.0: Akıllı reconnect — ilk 3 deneme hızlı, sonra exponential backoff
@@ -621,11 +635,11 @@ async fn main() -> Result<()> {
             exp_delay.min(30_000) // v22.1: Üst sınır: 30 saniye (eski: 10s)
         };
         // v23.0 (D-4): Random jitter eklendi (0..%50 delay veya max 2s)
-        let jitter_range = (delay_ms / 2).min(2000).max(1);
+        let jitter_range = (delay_ms / 2).clamp(1, 2000);
         let jitter = rand::random::<u64>() % jitter_range;
         let delay_ms = delay_ms + jitter;
         println!(
-            "  {} {}ms sonra yeniden bağlanılıyor... (deneme #{})",
+            "  {} Reconnecting in {}ms... (attempt #{})",
             "⚡".yellow(), delay_ms, retry_count
         );
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
@@ -657,7 +671,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
 
     // ══════════════ MULTI-TRANSPORT BAĞLANTI (v10.0: RpcPool) ══════════════
     // IPC öncelikli, Round-Robin WSS fallback, arka plan sağlık kontrolü
-    println!("  {} Transport bağlantısı kuruluyor ({:?} mod)...", "⏳".yellow(), config.transport_mode);
+    println!("  {} Establishing transport connection ({:?} mode)...", "⏳".yellow(), config.transport_mode);
     let connect_start = Instant::now();
 
     // RPC Pool için WSS URL listesi oluştur
@@ -679,7 +693,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     rpc_pool.spawn_health_checker();
 
     println!(
-        "  {} RpcPool hazır: {} | Sağlıklı node: {}",
+        "  {} RpcPool ready: {} | Healthy nodes: {}",
         "✅".green(),
         rpc_pool.transport_info().cyan(),
         rpc_pool.healthy_node_count(),
@@ -699,22 +713,22 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     ));
     if config.private_rpc_url.is_some() {
         println!(
-            "  {} MEV Koruması: {} (eth_sendRawTransaction aktif)",
+            "  {} MEV Protection: {} (eth_sendRawTransaction active)",
             "🛡️".green(),
-            "AKTİF".green().bold()
+            "ACTIVE".green().bold()
         );
     } else {
         println!(
-            "  {} MEV Koruması: {} (PRIVATE_RPC_URL tanımlayın)",
+            "  {} MEV Protection: {} (define PRIVATE_RPC_URL)",
             "⚠️".yellow(),
-            "DEVRE DIŞI".yellow().bold()
+            "DISABLED".yellow().bold()
         );
     }
 
     // Son blok
     let block = provider.get_block_number().await?;
     println!(
-        "  {} Güncel blok: #{} | Transport: {} | Bağlantı: {}ms",
+        "  {} Current block: #{} | Transport: {} | Connection: {}ms",
         "🧱".blue(),
         format!("{}", block).white().bold(),
         active_transport.cyan(),
@@ -727,14 +741,14 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         .collect();
 
     // ══════════════ İLK SENKRONİZASYON ══════════════
-    println!("\n  {} İlk durum senkronizasyonu yapılıyor...", "🔄".yellow());
+    println!("\n  {} Performing initial state sync...", "🔄".yellow());
 
     // Bytecode önbelleğe al (bir kez — REVM için)
     let bytecode_results = cache_all_bytecodes(&provider, pools, &states).await;
     for (i, result) in bytecode_results.iter().enumerate() {
         match result {
-            Ok(_) => println!("  {}   {} bytecode önbelleğe alındı", "✅".green(), pools[i].name),
-            Err(e) => println!("  {}   {} bytecode hatası: {}", "⚠️".yellow(), pools[i].name, e),
+            Ok(_) => println!("  {}   {} bytecode cached", "✅".green(), pools[i].name),
+            Err(e) => println!("  {}   {} bytecode error: {}", "⚠️".yellow(), pools[i].name, e),
         }
     }
 
@@ -742,11 +756,11 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     // v10.0: Başlangıçta tüm havuzları on-chain doğrula. Geçersiz havuzlar
     // (execution reverted, slot0/liquidity okunamayan) listeden çıkarılır.
     // Bu, runtime'da "error code 3: execution reverted" hatalarını önler.
-    println!("\n  {} Havuz sağlamlık kontrolü yapılıyor ({} havuz)...", "🔍".yellow(), pools.len());
+    println!("\n  {} Performing pool health check ({} pools)...", "🔍".yellow(), pools.len());
     let invalid_pool_indices = validate_pools(&provider, pools).await;
     if !invalid_pool_indices.is_empty() {
         println!(
-            "  {} {} geçersiz havuz tespit edildi — listeden çıkarılıyor",
+            "  {} {} invalid pools detected — removing from list",
             "⚠️".yellow(), invalid_pool_indices.len(),
         );
         // Büyükten küçüğe sırala — indeks kayması olmasın
@@ -754,7 +768,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         sorted_invalid.sort_unstable_by(|a, b| b.cmp(a));
         for &idx in &sorted_invalid {
             println!(
-                "  {}   Silinen: {} ({})",
+                "  {}   Removed: {} ({})",
                 "🗑️".red(), pools[idx].name, pools[idx].address,
             );
             pools.remove(idx);
@@ -765,7 +779,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         for combo in pair_combos.iter() {
             if combo.pool_a_idx >= pools.len() || combo.pool_b_idx >= pools.len() {
                 return Err(eyre::eyre!(
-                    "Pool validation sonrası geçersiz pair combo indeksi üretildi: {} -> ({}, {}) / pool_count={} ",
+                    "Invalid pair combo index generated after pool validation: {} -> ({}, {}) / pool_count={} ",
                     combo.pair_name,
                     combo.pool_a_idx,
                     combo.pool_b_idx,
@@ -774,12 +788,12 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             }
         }
         println!(
-            "  {} Havuz listesi güncellendi: {} geçerli havuz kaldı",
+            "  {} Pool list updated: {} valid pools remaining",
             "✅".green(), pools.len(),
         );
     } else {
         println!(
-            "  {} Tüm havuzlar doğrulandı — {} havuz geçerli",
+            "  {} All pools validated — {} pools valid",
             "✅".green(), pools.len(),
         );
     }
@@ -795,7 +809,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                     None => format!("Fee: N/A (config: {}bps)", pools[i].fee_bps),
                 };
                 println!(
-                    "  {}   {} → {:.6} Q | Tick: {} | Likidite: {:.2e} | {}",
+                    "  {}   {} → {:.6} Q | Tick: {} | Liquidity: {:.2e} | {}",
                     "✅".green(),
                     pools[i].name,
                     state.eth_price_usd,
@@ -804,12 +818,12 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                     fee_info,
                 );
             }
-            Err(e) => println!("  {}   {} state hatası: {}", "❌".red(), pools[i].name, e),
+            Err(e) => println!("  {}   {} state error: {}", "❌".red(), pools[i].name, e),
         }
     }
 
     // ══════════════ İLK TİCKBİTMAP SENKRONİZASYONU ══════════════
-    println!("\n  {} TickBitmap derinlik haritası çekiliyor (±{} tick)...", "🗺️".yellow(), config.tick_bitmap_range);
+    println!("\n  {} Fetching TickBitmap depth map (±{} tick)...", "🗺️".yellow(), config.tick_bitmap_range);
     let bitmap_start = Instant::now();
     let bitmap_results = sync_all_tick_bitmaps(
         &provider, pools, &states, block, config.tick_bitmap_range,
@@ -831,10 +845,10 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                     );
                 }
             }
-            Err(e) => println!("  {}   {} bitmap hatası: {}", "⚠️".yellow(), pools[i].name, e),
+            Err(e) => println!("  {}   {} bitmap error: {}", "⚠️".yellow(), pools[i].name, e),
         }
     }
-    println!("  {} TickBitmap toplam süre: {}ms", "🗺️".cyan(), bitmap_ms);
+    println!("  {} TickBitmap total time: {}ms", "🗺️".cyan(), bitmap_ms);
 
     // State sync tamamlandı — havuz başlığını canlı fee'lerle göster
     print_pool_header(pools, &states);
@@ -850,15 +864,15 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         let mut bytecode_loaded = false;
         match provider.get_code_at(contract_addr).await {
             Ok(code) if !code.is_empty() => {
-                println!("  {} Kontrat bytecode yüklendi ({} byte — zincirden)", "✅".green(), code.len());
+                println!("  {} Contract bytecode loaded ({} bytes — from chain)", "✅".green(), code.len());
                 sim_engine.set_contract_bytecode(code.to_vec());
                 bytecode_loaded = true;
             }
             Ok(_) => {
-                eprintln!("  {} Kontrat bytecode boş — deploy edilmemiş olabilir, local artifact aranıyor...", "⚠️".yellow());
+                eprintln!("  {} Contract bytecode empty — may not be deployed, searching local artifact...", "⚠️".yellow());
             }
             Err(e) => {
-                eprintln!("  {} Kontrat bytecode alınamadı: {} — local artifact aranıyor...", "⚠️".yellow(), e);
+                eprintln!("  {} Contract bytecode fetch failed: {} — searching local artifact...", "⚠️".yellow(), e);
             }
         }
         // v24.0: Fallback — Foundry out/ veya Contract/out/ dizininden derlenmiş bytecode yükle
@@ -877,7 +891,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                             let hex_str = deployed.strip_prefix("0x").unwrap_or(deployed);
                             if let Ok(bytes) = alloy::primitives::hex::decode(hex_str) {
                                 if !bytes.is_empty() {
-                                    println!("  {} Kontrat bytecode yüklendi ({} byte — local artifact: {})", "✅".green(), bytes.len(), path);
+                                    println!("  {} Contract bytecode loaded ({} bytes — local artifact: {})", "✅".green(), bytes.len(), path);
                                     sim_engine.set_contract_bytecode(bytes);
                                     bytecode_loaded = true;
                                     break;
@@ -888,7 +902,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                 }
             }
             if !bytecode_loaded {
-                eprintln!("  {} Kontrat bytecode bulunamadı — REVM simülasyonu matematiksel fallback kullanacak", "⚠️".yellow());
+                eprintln!("  {} Contract bytecode not found — REVM simulation will use mathematical fallback", "⚠️".yellow());
             }
         }
     }
@@ -901,7 +915,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             .unwrap_or_default();
         let contract_addr = config.contract_address.unwrap_or_default();
         sim_engine.initialize_base_db(pools, &states, caller_addr, contract_addr);
-        println!("\n  {} REVM simülasyon motoru hazır (Singleton base_db)", "✅".green());
+        println!("\n  {} REVM simulation engine ready (Singleton base_db)", "✅".green());
     }
 
     // ══════════════ ATOMİK NONCE YÖNETİCİSİ ══════════════
@@ -910,14 +924,14 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         .map(|signer| signer.address());
 
     let nonce_manager = if let Some(address) = executor_address {
-        println!("  {} Nonce okunuyor ({})...", "🔢".yellow(), address);
+        println!("  {} Reading nonce ({})...", "🔢".yellow(), address);
         match provider.get_transaction_count(address).await {
             Ok(nonce) => {
-                println!("  {} Başlangıç nonce: {} (RPC'den)", "✅".green(), nonce);
+                println!("  {} Initial nonce: {} (from RPC)", "✅".green(), nonce);
                 Arc::new(NonceManager::new(nonce))
             }
             Err(e) => {
-                println!("  {} Nonce okunamadı, 0'dan başlanıyor: {}", "⚠️".yellow(), e);
+                println!("  {} Nonce read failed, starting from 0: {}", "⚠️".yellow(), e);
                 Arc::new(NonceManager::new(0))
             }
         }
@@ -928,17 +942,17 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     // Execution modu
     if config.execution_enabled() {
         println!(
-            "  {} Kontrat tetikleme: {} (Adres: {})",
+            "  {} Contract execution: {} (Address: {})",
             "🚀".green(),
-            "AKTİF".green().bold(),
+            "ACTIVE".green().bold(),
             config.contract_address
-                .expect("BUG: execution_enabled() true ama contract_address None")
+                .expect("BUG: execution_enabled() true but contract_address None")
         );
     } else {
         println!(
-            "  {} Kontrat tetikleme: {} (Sadece gözlem)",
+            "  {} Contract execution: {} (Observe only)",
             "ℹ️".blue(),
-            "DEVRE DIŞI".yellow().bold()
+            "DISABLED".yellow().bold()
         );
     }
 
@@ -971,11 +985,11 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                     startup_base_fee,
                 ).await {
                     Ok(_) => println!(
-                        "  {} [Whitelist] {} havuz on-chain whiteliste eklendi (startup sync)",
+                        "  {} [Whitelist] {} pools added to on-chain whitelist (startup sync)",
                         "✅".green(), all_pool_addrs.len(),
                     ),
                     Err(e) => eprintln!(
-                        "  {} [Whitelist] Startup whitelist hatası: {} — admin manuel eklemelidir",
+                        "  {} [Whitelist] Startup whitelist error: {} — admin must add manually",
                         "⚠️".yellow(), e,
                     ),
                 }
@@ -986,8 +1000,8 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     // ══════════════ BLOK BAŞLIĞI ABONELİĞİ ══════════════
     println!();
     println!("{}", "  ════════════════════════════════════════════════════════════════".green());
-    println!("  {}  CANLI YAYIN v9.0 — Yeni bloklar + Pending TX dinleniyor...", "📡".green());
-    println!("  {}  Döngü: Pending TX → State Sync → TickBitmap → NR → REVM → Yürüt", "📡".green());
+    println!("  {}  LIVE FEED v9.0 — Listening for new blocks + Pending TX...", "📡".green());
+    println!("  {}  Loop: Pending TX → State Sync → TickBitmap → NR → REVM → Execute", "📡".green());
     println!("{}", "  ════════════════════════════════════════════════════════════════".green());
     println!();
 
@@ -1003,7 +1017,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     let pool_addresses: Vec<Address> = pools.iter().map(|p| p.address).collect();
     {
         let pools_bg = pools.to_vec();
-        let states_bg: Vec<SharedPoolState> = states.iter().map(|s| Arc::clone(s)).collect();
+        let states_bg: Vec<SharedPoolState> = states.iter().map(Arc::clone).collect();
         let pool_addrs_bg = pool_addresses.clone();
         let rpc_url_bg = config.rpc_wss_url.clone();
         let token_bg = cancel_token.clone();
@@ -1011,7 +1025,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         tokio::spawn(async move {
             tokio::select! {
                 _ = token_bg.cancelled() => {
-                    eprintln!("  {} Pending TX dinleyici graceful shutdown (CancellationToken)", "🔌");
+                    eprintln!("  🔌 Pending TX listener graceful shutdown (CancellationToken)");
                 }
                 result = pending_tx_listener(
                     &rpc_url_bg,
@@ -1023,8 +1037,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                         Ok(_) => {}
                         Err(e) => {
                             eprintln!(
-                                "  {} Pending TX dinleyici hatası (blok bazlı akış devam ediyor): {}",
-                                "⚠️", e
+                                "  ⚠️ Pending TX listener error (block-based flow continues): {}", e
                             );
                         }
                     }
@@ -1043,14 +1056,14 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     // TODO: Havuz listesi değiştiğinde event listener'ı yeniden başlat.
     {
         let pools_ev = pools.to_vec();
-        let states_ev: Vec<SharedPoolState> = states.iter().map(|s| Arc::clone(s)).collect();
+        let states_ev: Vec<SharedPoolState> = states.iter().map(Arc::clone).collect();
         let rpc_url_ev = config.rpc_wss_url.clone();
         let token_ev = cancel_token.clone();
 
         tokio::spawn(async move {
             tokio::select! {
                 _ = token_ev.cancelled() => {
-                    eprintln!("  {} Swap event dinleyici graceful shutdown (CancellationToken)", "🔌");
+                    eprintln!("  🔌 Swap event listener graceful shutdown (CancellationToken)");
                 }
                 _result = async {
                     let ws = WsConnect::new(&rpc_url_ev);
@@ -1064,16 +1077,14 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                                 Ok(_) => {}
                                 Err(e) => {
                                     eprintln!(
-                                        "  {} Swap event dinleyici hatası (blok bazlı akış devam ediyor): {}",
-                                        "⚠️", e
+                                        "  ⚠️ Swap event listener error (block-based flow continues): {}", e
                                     );
                                 }
                             }
                         }
                         Err(e) => {
                             eprintln!(
-                                "  {} Swap event WS bağlantı hatası: {}",
-                                "⚠️", e
+                                "  ⚠️ Swap event WS connection error: {}", e
                             );
                         }
                     }
@@ -1119,18 +1130,18 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             Ok(None) => {
                 // Stream kapandı — reconnect gerekli
                 println!(
-                    "  {} WSS stream kapandı — yeniden bağlanılıyor...",
+                    "  {} WSS stream closed — reconnecting...",
                     "⚠️".yellow()
                 );
-                return Err(eyre::eyre!("WSS stream kapandı"));
+                return Err(eyre::eyre!("WSS stream closed"));
             }
             Err(_) => {
                 // 15s timeout — bağlantı muhtemelen koptu
                 println!(
-                    "  {} WSS heartbeat timeout (15s blok yok) — bağlantı yeniden kurulacak",
+                    "  {} WSS heartbeat timeout (no block for 15s) — reconnecting",
                     "💔".red()
                 );
-                return Err(eyre::eyre!("WSS heartbeat timeout: 15 saniyedir blok gelmedi"));
+                return Err(eyre::eyre!("WSS heartbeat timeout: no block received for 15 seconds"));
             }
         };
 
@@ -1176,7 +1187,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             let bm_ok = bm_results.iter().filter(|r| r.is_ok()).count();
             if bm_ok > 0 {
                 println!(
-                    "     {} TickBitmap güncellendi ({}/{} havuz, {}ms) [PARALEL]",
+                    "     {} TickBitmap updated ({}/{} pools, {}ms) [PARALLEL]",
                     "🗺️".cyan(), bm_ok, pools.len(), bm_ms,
                 );
             }
@@ -1188,13 +1199,11 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         let l1_fee_eth = l1_data_fee_wei as f64 / 1e18;
         if l1_data_fee_wei == 0 {
             eprintln!(
-                "  {} [L1 Fee] UYARI: L1 data fee = 0 wei — GasPriceOracle yanıt vermiyor olabilir!",
-                "⚠️",
+                "  ⚠️ [L1 Fee] WARNING: L1 data fee = 0 wei — GasPriceOracle may not be responding!",
             );
         } else {
             eprintln!(
-                "  {} [L1 Fee] {} wei ({:.8} ETH)",
-                "⛽", l1_data_fee_wei, l1_fee_eth,
+                "  ⛽ [L1 Fee] {} wei ({:.8} ETH)", l1_data_fee_wei, l1_fee_eth,
             );
         }
 
@@ -1207,8 +1216,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         if (sync_ms as f64) > config.latency_spike_threshold_ms {
             stats.latency_spikes += 1;
             eprintln!(
-                "  {} [Blok #{}] Gecikme SPIKE: {}ms (eşik: {:.0}ms) — #{} spike",
-                "⚡", block_number, sync_ms,
+                "  ⚡ [Block #{}] Latency SPIKE: {}ms (threshold: {:.0}ms) — #{} spike", block_number, sync_ms,
                 config.latency_spike_threshold_ms,
                 stats.latency_spikes,
             );
@@ -1220,7 +1228,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         for (i, result) in sync_results.iter().enumerate() {
             if let Err(e) = result {
                 println!(
-                    "  {} [Blok #{}] {} sync hatası: {}",
+                    "  {} [Block #{}] {} sync error: {}",
                     "⚠️".yellow(), block_number, pools[i].name, e
                 );
             }
@@ -1266,13 +1274,17 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                     let pool_state = &states[i];
                     let bitmap_range = config.tick_bitmap_range;
                     async move {
-                        let _ = crate::state_sync::sync_pool_state(
+                        if let Err(e) = crate::state_sync::sync_pool_state(
                             provider, pool_cfg, pool_state, block_number,
-                        ).await;
-                        let _ = crate::state_sync::sync_tick_bitmap(
+                        ).await {
+                            eprintln!("  ⚠️ [Hot-Reload] {} state sync failed: {}", pool_cfg.name, e);
+                        }
+                        if let Err(e) = crate::state_sync::sync_tick_bitmap(
                             provider, pool_cfg, pool_state, block_number,
                             bitmap_range,
-                        ).await;
+                        ).await {
+                            eprintln!("  ⚠️ [Hot-Reload] {} bitmap sync failed: {}", pool_cfg.name, e);
+                        }
                     }
                 })
                 .collect();
@@ -1286,8 +1298,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             let reload_contract = config.contract_address.unwrap_or_default();
             sim_engine.initialize_base_db(pools, &states, reload_caller, reload_contract);
             eprintln!(
-                "  {} [Hot-Reload] REVM base_db yeniden oluşturuldu ({} havuz)",
-                "🔧", pools.len(),
+                "  🔧 [Hot-Reload] REVM base_db rebuilt ({} pools)", pools.len(),
             );
 
             // v25.0: Yeni havuzları on-chain pool whitelist'e ekle
@@ -1310,12 +1321,10 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                                 calldata, nonce, nm_clone, base_fee,
                             ).await {
                                 Ok(_) => eprintln!(
-                                    "  {} [Whitelist] {} havuz on-chain whiteliste eklendi",
-                                    "✅", addr_count,
+                                    "  ✅ [Whitelist] {} pools added to on-chain whitelist", addr_count,
                                 ),
                                 Err(e) => eprintln!(
-                                    "  {} [Whitelist] On-chain whitelist hatası: {} — admin manuel eklemeli",
-                                    "⚠️", e,
+                                    "  ⚠️ [Whitelist] On-chain whitelist error: {} — admin must add manually", e,
                                 ),
                             }
                         });
@@ -1400,8 +1409,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                         if block_number % 25 == 0 {
                             // Her 25 blokta bir hatırlatma logu
                             eprintln!(
-                                "     {} [Blacklist] {} \u{2192} blok #{}'a kadar engelli (kalan: {} blok)",
-                                "\u{26d4}", combo.pair_name, until_block,
+                                "     \u{26d4} [Blacklist] {} \u{2192} blocked until block #{} (remaining: {} blocks)", combo.pair_name, until_block,
                                 until_block.saturating_sub(block_number),
                             );
                         }
@@ -1411,8 +1419,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                         pair_cooldown.remove(&combo_idx);
                         pair_failures.remove(&combo_idx);
                         eprintln!(
-                            "     {} [Blacklist] {} cool-down süresi doldu — yeniden aktif",
-                            "\u{2705}", combo.pair_name,
+                            "     \u{2705} [Blacklist] {} cool-down expired — reactivated", combo.pair_name,
                         );
                     }
                 }
@@ -1450,8 +1457,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                             let cooldown_until = block_number + 100;
                             pair_cooldown.insert(combo_idx, cooldown_until);
                             eprintln!(
-                                "\n  {} CIRCUIT BREAKER: {} {} ardışık başarısızlık — blok #{}'a kadar blacklist'e alındı (~{}s)",
-                                "\u{1f6d1}",
+                                "\n  \u{1f6d1} CIRCUIT BREAKER: {} {} consecutive failures — blacklisted until block #{} (~{}s)",
                                 combo.pair_name,
                                 failures,
                                 cooldown_until,
@@ -1466,7 +1472,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         } else if pipeline_elapsed_ms > PIPELINE_BUDGET_MS {
             // v28.0: Pipeline bütçesi aşıldı — bu bloğu atla
             eprintln!(
-                "  \u{26a0}\u{fe0f} [Pipeline] Blok #{} işleme süresi {}ms > bütçe {}ms — fırsat taraması atlandı (MEV koruması)",
+                "  \u{26a0}\u{fe0f} [Pipeline] Block #{} processing time {}ms > budget {}ms — opportunity scan skipped (MEV protection)",
                 block_number, pipeline_elapsed_ms, PIPELINE_BUDGET_MS,
             );
         }
@@ -1484,7 +1490,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                 let multi_hop_count = multi_hop_routes.len();
 
                 eprintln!(
-                    "     {} [Graph] {} düğüm, {} kenar | {} rota (2-hop: {}, 3+hop: {})",
+                    "     {} [Graph] {} nodes, {} edges | {} routes (2-hop: {}, 3+hop: {})",
                     "🔀".cyan(),
                     graph.node_count(),
                     graph.edge_count(),
@@ -1524,7 +1530,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                     );
 
                     eprintln!(
-                        "     {} [Multi-Hop] #{} {} | {:.4} WETH → {:.6} WETH kâr | {} | exact={} wei | {}B calldata | {}-hop NR({}/{})",
+                        "     {} [Multi-Hop] #{} {} | {:.4} WETH → {:.6} WETH profit | {} | exact={} wei | {}B calldata | {}-hop NR({}/{})",
                         "🔀".cyan(),
                         best.route_idx,
                         best.label,
@@ -1561,7 +1567,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         }
 
         // ── 5. PERİYODİK İSTATİSTİK ────────────────────────
-        if stats.total_blocks_processed % config.stats_interval == 0
+        if stats.total_blocks_processed.is_multiple_of(config.stats_interval)
             && stats.total_blocks_processed > 0
         {
             print_stats_summary(&stats, &states, pools, pair_combos);
@@ -1572,7 +1578,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         // ── 6. PERİYODİK NONCE SENKRONİZASYONU (v10.0) ──────
         // Her 50 blokta bir zincirdeki gerçek nonce ile lokal nonce'u karşılaştır.
         // Uyumsuzluk varsa zincir değeri ile düzelt (TX kayıpları veya dış müdahale).
-        if stats.total_blocks_processed % 50 == 0
+        if stats.total_blocks_processed.is_multiple_of(50)
             && stats.total_blocks_processed > 0
         {
             if let Some(addr) = executor_address {
@@ -1581,14 +1587,14 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                         let local_nonce = nonce_manager.current();
                         if local_nonce != onchain_nonce {
                             println!(
-                                "  {} Nonce uyumsuzluğu tespit edildi: lokal={} zincir={} → düzeltiliyor",
+                                "  {} Nonce mismatch detected: local={} chain={} → correcting",
                                 "🔄".yellow(), local_nonce, onchain_nonce
                             );
                             nonce_manager.force_set(onchain_nonce);
                         }
                     }
                     Err(e) => {
-                        println!("  {} Nonce sync başarısız: {}", "⚠️".yellow(), e);
+                        println!("  {} Nonce sync failed: {}", "⚠️".yellow(), e);
                     }
                 }
             }
@@ -1621,13 +1627,13 @@ async fn pending_tx_listener(
 
     let ws = WsConnect::new(rpc_url);
     let provider = ProviderBuilder::default().connect_ws(ws).await
-        .map_err(|e| eyre::eyre!("Pending TX provider bağlantı hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("Pending TX provider connection error: {}", e))?;
 
-    println!("  {} Pending TX dinleyici başlatıldı (optimistic mode)", "🔮".cyan());
+    println!("  {} Pending TX listener started (optimistic mode)", "🔮".cyan());
 
     // Pending TX stream — full TX nesneleri ile
     let sub: alloy::pubsub::Subscription<alloy::rpc::types::Transaction> = provider.subscribe_full_pending_transactions().await
-        .map_err(|e| eyre::eyre!("Pending TX abonelik hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("Pending TX subscription error: {}", e))?;
     let mut stream = sub.into_stream();
 
     while let Some(tx) = stream.next().await {
@@ -1654,7 +1660,7 @@ async fn pending_tx_listener(
                     // Fiyat değişti — havuz güncellendi
                     let state = states[pool_idx].read();
                     println!(
-                        "     {} [Pending TX] {} iyimser güncelleme: {:.6} Q",
+                        "     {} [Pending TX] {} optimistic update: {:.6} Q",
                         "🔮".magenta(),
                         pools[pool_idx].name,
                         state.eth_price_usd,
@@ -1664,8 +1670,7 @@ async fn pending_tx_listener(
                 Err(e) => {
                     // Hata — sessiz devam et, blok bazlı akış zaten çalışıyor
                     eprintln!(
-                        "     {} [Pending TX] {} refresh hatası: {}",
-                        "⚠️", pools[pool_idx].name, e
+                        "     ⚠️ [Pending TX] {} refresh error: {}", pools[pool_idx].name, e
                     );
                 }
             }
@@ -1697,7 +1702,7 @@ async fn whitelist_pools_on_chain(
     use alloy::network::EthereumWallet;
 
     let signer: PrivateKeySigner = private_key.parse()
-        .map_err(|e| eyre::eyre!("Whitelist TX: key parse hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("Whitelist TX: key parse error: {}", e))?;
     let wallet = EthereumWallet::from(signer.clone());
 
     // Basit TX gönderimi — whitelist işlemi düşük öncelikli
@@ -1705,7 +1710,7 @@ async fn whitelist_pools_on_chain(
     let provider = ProviderBuilder::new()
         .wallet(wallet)
         .connect_ws(ws).await
-        .map_err(|e| eyre::eyre!("Whitelist TX: provider hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("Whitelist TX: provider error: {}", e))?;
 
     let max_fee = block_base_fee as u128 + 1_000_000_000; // base_fee + 1 Gwei tip
     let tx = alloy::rpc::types::TransactionRequest::default()
@@ -1718,14 +1723,14 @@ async fn whitelist_pools_on_chain(
 
     match provider.send_transaction(tx).await {
         Ok(pending) => {
-            eprintln!("  {} [Whitelist] TX gönderildi: {:?}", "📤", pending.tx_hash());
+            eprintln!("  📤 [Whitelist] TX sent: {:?}", pending.tx_hash());
             // Fire-and-forget — receipt beklenmez
             Ok(())
         }
         Err(e) => {
             // Nonce'u geri al (TX gönderilemedi)
             nonce_manager.force_set(nonce);
-            Err(eyre::eyre!("Whitelist TX gönderilemedi: {}", e))
+            Err(eyre::eyre!("Whitelist TX failed to send: {}", e))
         }
     }
 }

@@ -105,9 +105,9 @@ pub enum KeySource {
 impl std::fmt::Display for KeySource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            KeySource::EncryptedKeystore(path) => write!(f, "Şifreli Keystore ({})", path),
-            KeySource::EnvironmentVariable => write!(f, "Ortam Değişkeni (GÜVENSİZ)"),
-            KeySource::None => write!(f, "Yüklenmedi"),
+            KeySource::EncryptedKeystore(path) => write!(f, "Encrypted Keystore ({})", path),
+            KeySource::EnvironmentVariable => write!(f, "Env Variable (UNSAFE)"),
+            KeySource::None => write!(f, "Not Loaded"),
         }
     }
 }
@@ -151,31 +151,31 @@ impl KeyManager {
             &salt,
             PBKDF2_ITERATIONS,
             derived_key.as_mut(),
-        ).map_err(|e| eyre::eyre!("PBKDF2 anahtar türetme hatası: {:?}", e))?;
+        ).map_err(|e| eyre::eyre!("PBKDF2 key derivation error: {:?}", e))?;
 
         // 3. AES-256-GCM ile şifrele
         let cipher = Aes256Gcm::new_from_slice(derived_key.as_ref())
-            .map_err(|e| eyre::eyre!("AES-256-GCM oluşturma hatası: {}", e))?;
+            .map_err(|e| eyre::eyre!("AES-256-GCM cipher creation error: {}", e))?;
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ciphertext = cipher
             .encrypt(nonce, private_key.as_bytes())
-            .map_err(|e| eyre::eyre!("Şifreleme hatası: {}", e))?;
+            .map_err(|e| eyre::eyre!("Encryption error: {}", e))?;
 
         // 4. Keystore dosyasını oluştur
         let keystore = KeystoreFile {
             version: KEYSTORE_VERSION,
             kdf: "pbkdf2-hmac-sha256".into(),
             kdf_iterations: PBKDF2_ITERATIONS,
-            salt: hex::encode(&salt),
-            nonce: hex::encode(&nonce_bytes),
+            salt: hex::encode(salt),
+            nonce: hex::encode(nonce_bytes),
             ciphertext: hex::encode(&ciphertext),
         };
 
         let json = serde_json::to_string_pretty(&keystore)
-            .map_err(|e| eyre::eyre!("JSON serileştirme hatası: {}", e))?;
+            .map_err(|e| eyre::eyre!("JSON serialization error: {}", e))?;
 
         std::fs::write(path, json)
-            .map_err(|e| eyre::eyre!("Keystore dosyası yazma hatası: {}", e))?;
+            .map_err(|e| eyre::eyre!("Keystore file write error: {}", e))?;
 
         Ok(())
     }
@@ -189,10 +189,10 @@ impl KeyManager {
     pub fn load_from_keystore(path: &str, password: &str) -> Result<Self> {
         // 1. Dosyayı oku ve JSON çözümle
         let json = std::fs::read_to_string(path)
-            .map_err(|e| eyre::eyre!("Keystore dosyası okunamadı ({}): {}", path, e))?;
+            .map_err(|e| eyre::eyre!("Keystore file could not be read ({}): {}", path, e))?;
 
         let keystore: KeystoreFile = serde_json::from_str(&json)
-            .map_err(|e| eyre::eyre!("Keystore JSON çözümleme hatası: {}", e))?;
+            .map_err(|e| eyre::eyre!("Keystore JSON parse error: {}", e))?;
 
         // Versiyon kontrolü
         if keystore.version != KEYSTORE_VERSION {
@@ -205,11 +205,11 @@ impl KeyManager {
 
         // 2. Hex decode
         let salt = hex::decode(&keystore.salt)
-            .map_err(|e| eyre::eyre!("Salt hex çözümleme hatası: {}", e))?;
+            .map_err(|e| eyre::eyre!("Salt hex decode error: {}", e))?;
         let nonce_bytes = hex::decode(&keystore.nonce)
-            .map_err(|e| eyre::eyre!("Nonce hex çözümleme hatası: {}", e))?;
+            .map_err(|e| eyre::eyre!("Nonce hex decode error: {}", e))?;
         let ciphertext = hex::decode(&keystore.ciphertext)
-            .map_err(|e| eyre::eyre!("Ciphertext hex çözümleme hatası: {}", e))?;
+            .map_err(|e| eyre::eyre!("Ciphertext hex decode error: {}", e))?;
 
         // 3. PBKDF2 ile anahtar türet
         let mut derived_key = Zeroizing::new([0u8; 32]);
@@ -218,25 +218,25 @@ impl KeyManager {
             &salt,
             keystore.kdf_iterations,
             derived_key.as_mut(),
-        ).map_err(|e| eyre::eyre!("PBKDF2 anahtar türetme hatası: {:?}", e))?;
+        ).map_err(|e| eyre::eyre!("PBKDF2 key derivation error: {:?}", e))?;
 
         // 4. AES-256-GCM ile çöz
         let cipher = Aes256Gcm::new_from_slice(derived_key.as_ref())
-            .map_err(|e| eyre::eyre!("AES-256-GCM oluşturma hatası: {}", e))?;
+            .map_err(|e| eyre::eyre!("AES-256-GCM cipher creation error: {}", e))?;
 
         if nonce_bytes.len() != NONCE_SIZE {
-            return Err(eyre::eyre!("Geçersiz nonce boyutu: {}", nonce_bytes.len()));
+            return Err(eyre::eyre!("Invalid nonce size: {}", nonce_bytes.len()));
         }
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let plaintext = cipher
             .decrypt(nonce, ciphertext.as_ref())
             .map_err(|_| eyre::eyre!(
-                "Şifre çözme başarısız! Yanlış parola veya bozuk keystore dosyası."
+                "Decryption failed! Wrong password or corrupted keystore file."
             ))?;
 
         let key_string = String::from_utf8(plaintext)
-            .map_err(|_| eyre::eyre!("Çözülen anahtar geçerli UTF-8 değil"))?;
+            .map_err(|_| eyre::eyre!("Decrypted key is not valid UTF-8"))?;
 
         Ok(Self {
             decrypted_key: Some(Zeroizing::new(key_string)),
@@ -291,10 +291,10 @@ impl KeyManager {
         let manager = Self::load_from_env("PRIVATE_KEY")?;
         if manager.has_key() {
             eprintln!(
-                "  ⚠️  GÜVENLİK UYARISI: Private key düz metin ortam değişkeninden okundu!"
+                "  ⚠️  SECURITY WARNING: Private key read from plaintext env var!"
             );
             eprintln!(
-                "  ⚠️  Şifreli keystore'a geçmek için: cargo run -- --encrypt-key"
+                "  ⚠️  To switch to encrypted keystore: cargo run -- --encrypt-key"
             );
         }
 
@@ -334,9 +334,9 @@ impl KeyManager {
         }
 
         // Terminal'den güvenli parola girişi
-        eprint!("🔐 Keystore parolassı: ");
+        eprint!("🔐 Keystore password: ");
         rpassword::read_password()
-            .map_err(|e| eyre::eyre!("Parola okuma hatası: {}", e))
+            .map_err(|e| eyre::eyre!("Password read error: {}", e))
     }
 
     /// CLI: Private key'i şifreleyip keystore dosyasına kaydet
@@ -346,34 +346,34 @@ impl KeyManager {
     /// KeyManager::cli_encrypt_key()?;
     /// ```
     pub fn cli_encrypt_key() -> Result<()> {
-        println!("\n🔐 Private Key Şifreleme Aracı");
+        println!("\n🔐 Private Key Encryption Tool");
         println!("─────────────────────────────────────────");
-        println!("Bu araç private key'inizi AES-256-GCM ile şifreler.");
-        println!("Şifreli dosya güvenle disk üzerinde saklanabilir.\n");
+        println!("This tool encrypts your private key with AES-256-GCM.");
+        println!("Encrypted file can be safely stored on disk.\n");
 
         // Private key al
         eprint!("Private key (0x...): ");
         let private_key = rpassword::read_password()
-            .map_err(|e| eyre::eyre!("Private key okuma hatası: {}", e))?;
+            .map_err(|e| eyre::eyre!("Private key read error: {}", e))?;
 
         if private_key.is_empty() {
-            return Err(eyre::eyre!("Private key boş olamaz!"));
+            return Err(eyre::eyre!("Private key cannot be empty!"));
         }
 
         // Parola al (iki kez, doğrulama)
-        eprint!("Şifreleme parolası: ");
+        eprint!("Encryption password: ");
         let password = rpassword::read_password()
-            .map_err(|e| eyre::eyre!("Parola okuma hatası: {}", e))?;
-        eprint!("Parolayı tekrar girin: ");
+            .map_err(|e| eyre::eyre!("Password read error: {}", e))?;
+        eprint!("Re-enter password: ");
         let password_confirm = rpassword::read_password()
-            .map_err(|e| eyre::eyre!("Parola okuma hatası: {}", e))?;
+            .map_err(|e| eyre::eyre!("Password read error: {}", e))?;
 
         if password != password_confirm {
-            return Err(eyre::eyre!("Parolalar eşleşmiyor!"));
+            return Err(eyre::eyre!("Passwords do not match!"));
         }
 
         if password.len() < 8 {
-            return Err(eyre::eyre!("Parola en az 8 karakter olmalıdır!"));
+            return Err(eyre::eyre!("Password must be at least 8 characters!"));
         }
 
         // Dosya yolu
@@ -381,14 +381,14 @@ impl KeyManager {
             .unwrap_or_else(|_| "keystore.enc".into());
 
         // Şifrele ve kaydet
-        println!("\n⏳ Anahtar türetiliyor (PBKDF2, {} iterasyon)...", PBKDF2_ITERATIONS);
+        println!("\n⏳ Deriving key (PBKDF2, {} iterations)...", PBKDF2_ITERATIONS);
         Self::encrypt_and_save(&private_key, &password, &path)?;
 
-        println!("✅ Keystore başarıyla oluşturuldu: {}", path);
-        println!("\n📋 .env dosyanıza ekleyin:");
+        println!("✅ Keystore created successfully: {}", path);
+        println!("\n📋 Add to your .env file:");
         println!("   KEYSTORE_PATH={}", path);
-        println!("   KEY_PASSWORD=<parolanız>  (veya runtime'da prompt)");
-        println!("\n⚠️  PRIVATE_KEY satırını .env'den SİLMEYİ unutmayın!");
+        println!("   KEY_PASSWORD=<your_password>  (or prompt at runtime)");
+        println!("\n⚠️  Don't forget to REMOVE the PRIVATE_KEY line from .env!");
 
         Ok(())
     }

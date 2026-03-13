@@ -271,6 +271,7 @@ fn infer_tick_spacing(dex_id: &str, fee_bps: u32) -> i32 {
     }
 }
 
+#[allow(clippy::if_same_then_else)]
 fn infer_token_decimals(address: &str) -> u8 {
     let lower = address.to_lowercase();
     if lower.ends_with("0000000000000000000006") { 18 }
@@ -303,7 +304,7 @@ fn infer_dex_type(dex_id: &str) -> Option<DexType> {
             } else {
                 // v23.0 (Y-3): Bilinmeyen DEX — havuz atlanır (eski: sessiz UniswapV3 fallback)
                 eprintln!(
-                    "  ⚠️  Bilinmeyen DEX ID '{}' — havuz atlanıyor (güvenli mod)",
+                    "  ⚠️  Unknown DEX ID '{}' — pool skipped (safe mode)",
                     dex_id
                 );
                 None
@@ -322,19 +323,19 @@ async fn fetch_dexscreener_pools() -> Result<Vec<DexPair>> {
         BASE_WETH_LOWER
     );
 
-    eprintln!("  {} [Aşama 1a] DexScreener API sorgulanıyor...", "🔍".cyan());
+    eprintln!("  {} [Phase 1a] Querying DexScreener API...", "🔍".cyan());
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .map_err(|e| eyre::eyre!("HTTP client hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("HTTP client error: {}", e))?;
 
     let resp = client
         .get(&url)
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| eyre::eyre!("DexScreener API hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("DexScreener API error: {}", e))?;
 
     // Rate limiting — 429 Too Many Requests durumunda backoff
     if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -344,7 +345,7 @@ async fn fetch_dexscreener_pools() -> Result<Vec<DexPair>> {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(60);
         eprintln!(
-            "  ⚠️ [DexScreener] Rate limit (429) — {}s bekleniyor",
+            "  ⚠️ [DexScreener] Rate limit (429) — waiting {}s",
             retry_after
         );
         tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
@@ -353,7 +354,7 @@ async fn fetch_dexscreener_pools() -> Result<Vec<DexPair>> {
 
     let resp: DexScreenerResponse = resp.json()
         .await
-        .map_err(|e| eyre::eyre!("DexScreener JSON parse hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("DexScreener JSON parse error: {}", e))?;
 
     let pairs: Vec<DexPair> = resp.pairs.unwrap_or_default()
         .into_iter()
@@ -369,7 +370,7 @@ async fn fetch_dexscreener_pools() -> Result<Vec<DexPair>> {
         .collect();
 
     eprintln!(
-        "  {} [DexScreener] {} havuz alındı (Base, beyaz liste DEX'ler)",
+        "  {} [DexScreener] {} pools fetched (Base, whitelisted DEXes)",
         "✅".green(), pairs.len()
     );
 
@@ -391,7 +392,7 @@ async fn fetch_geckoterminal_pools() -> Vec<GeckoPoolData> {
     {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("  ⚠️ [GeckoTerminal] HTTP client oluşturulamadı: {} — atlanıyor", e);
+            eprintln!("  ⚠️ [GeckoTerminal] HTTP client creation failed: {} — skipping", e);
             return Vec::new();
         }
     };
@@ -410,14 +411,14 @@ async fn fetch_geckoterminal_pools() -> Vec<GeckoPoolData> {
         {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("  ⚠️ [GeckoTerminal] Sayfa {} API hatası: {} — devam ediliyor", page, e);
+                eprintln!("  ⚠️ [GeckoTerminal] Page {} API error: {} — continuing", page, e);
                 continue;
             }
         };
 
         // Rate limit handling
         if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            eprintln!("  ⚠️ [GeckoTerminal] Rate limit (429) — sayfa {} atlanıyor", page);
+            eprintln!("  ⚠️ [GeckoTerminal] Rate limit (429) — skipping page {}", page);
             // Kısa bekleme ve devam
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             continue;
@@ -425,7 +426,7 @@ async fn fetch_geckoterminal_pools() -> Vec<GeckoPoolData> {
 
         if !resp.status().is_success() {
             eprintln!(
-                "  ⚠️ [GeckoTerminal] Sayfa {} HTTP {} — atlanıyor",
+                "  ⚠️ [GeckoTerminal] Page {} HTTP {} — skipping",
                 page, resp.status()
             );
             continue;
@@ -437,7 +438,7 @@ async fn fetch_geckoterminal_pools() -> Vec<GeckoPoolData> {
                 all_pools.extend(pools);
             }
             Err(e) => {
-                eprintln!("  ⚠️ [GeckoTerminal] Sayfa {} JSON parse hatası: {} — atlanıyor", page, e);
+                eprintln!("  ⚠️ [GeckoTerminal] Page {} JSON parse error: {} — skipping", page, e);
                 continue;
             }
         }
@@ -447,7 +448,7 @@ async fn fetch_geckoterminal_pools() -> Vec<GeckoPoolData> {
     }
 
     eprintln!(
-        "  {} [GeckoTerminal] {} havuz alındı (Base, {} sayfa)",
+        "  {} [GeckoTerminal] {} pools fetched (Base, {} pages)",
         if all_pools.is_empty() { "⚠️" } else { "✅" },
         all_pools.len(),
         pages.len()
@@ -537,7 +538,7 @@ fn merge_pool_sources(dex_pairs: Vec<DexPair>, gecko_pools: Vec<GeckoPoolData>) 
     }
 
     eprintln!(
-        "  {} [Birleştirme] {} havuz birleştirildi, {} tanesi GeckoTerminal ile zenginleştirildi",
+        "  {} [Merge] {} pools merged, {} enriched with GeckoTerminal",
         "🔗".cyan(), pool_map.len(), gecko_enriched
     );
 
@@ -558,8 +559,7 @@ fn off_chain_filter(pools: Vec<DiscoveredPool>) -> Vec<DiscoveredPool> {
             let pass = is_v3_pool(&p.labels, &p.dex, &p.fee_tier, &p.gecko_name);
             if !pass {
                 eprintln!(
-                    "  {} V2 havuz reddedildi: {} ({}) [labels: {:?}]",
-                    "🛡️", p.address, p.dex, p.labels
+                    "  🛡️ V2 pool rejected: {} ({}) [labels: {:?}]", p.address, p.dex, p.labels
                 );
             }
             pass
@@ -569,7 +569,7 @@ fn off_chain_filter(pools: Vec<DiscoveredPool>) -> Vec<DiscoveredPool> {
         // Minimum 24h hacim: $10K
         .filter(|p| p.volume_24h >= 10_000.0)
         // Maksimum fee: %0.05
-        .filter(|p| p.fee_tier.map_or(true, |fee| fee <= 0.05))
+        .filter(|p| p.fee_tier.is_none_or(|fee| fee <= 0.05))
         .collect();
 
     // Fee'ye göre artan sırala, eşit fee'de en yüksek hacmi tercih et
@@ -589,7 +589,7 @@ fn off_chain_filter(pools: Vec<DiscoveredPool>) -> Vec<DiscoveredPool> {
     filtered.truncate(100);
 
     eprintln!(
-        "  {} [Off-Chain Filtre] {} → {} aday havuz (V3 + likidite + hacim + fee)",
+        "  {} [Off-Chain Filter] {} → {} candidate pools (V3 + liquidity + volume + fee)",
         "🛡️".yellow(), before, filtered.len()
     );
 
@@ -617,14 +617,14 @@ pub async fn on_chain_validate(candidates: Vec<DiscoveredPool>) -> Vec<Discovere
         Ok(url) if !url.is_empty() && !url.starts_with("https://your-") => url,
         _ => {
             eprintln!(
-                "  ⚠️ [On-Chain] RPC_HTTP_URL tanımlı değil — On-Chain doğrulama atlanıyor (tüm adaylar geçiyor)"
+                "  ⚠️ [On-Chain] RPC_HTTP_URL not defined — On-Chain validation skipped (all candidates pass)"
             );
             return candidates;
         }
     };
 
     eprintln!(
-        "  {} [Aşama 3] On-Chain slot0() doğrulaması başlıyor ({} aday)...",
+        "  {} [Phase 3] On-Chain slot0() validation starting ({} candidates)...",
         "⛓️".cyan(), candidates.len()
     );
 
@@ -680,8 +680,7 @@ pub async fn on_chain_validate(candidates: Vec<DiscoveredPool>) -> Vec<Discovere
                             // Hata varsa → V2 veya sahte havuz
                             if json.get("error").is_some() {
                                 eprintln!(
-                                    "  {} [On-Chain] REDDEDILDI: {} ({}) — execution reverted",
-                                    "❌", pool_address_str, pool_dex
+                                    "  ❌ [On-Chain] REJECTED: {} ({}) — execution reverted", pool_address_str, pool_dex
                                 );
                                 return (i, false);
                             }
@@ -693,8 +692,7 @@ pub async fn on_chain_validate(candidates: Vec<DiscoveredPool>) -> Vec<Discovere
                                 if hex_data.is_empty() || hex_data.len() < 128 {
                                     // 128 hex karakter = 64 byte minimum (sqrtPriceX96 + tick)
                                     eprintln!(
-                                        "  {} [On-Chain] REDDEDILDI: {} ({}) — slot0 yanıtı çok kısa ({}B)",
-                                        "❌", pool_address_str, pool_dex, hex_data.len() / 2
+                                        "  ❌ [On-Chain] REJECTED: {} ({}) — slot0 response too short ({}B)", pool_address_str, pool_dex, hex_data.len() / 2
                                     );
                                     return (i, false);
                                 }
@@ -711,8 +709,7 @@ pub async fn on_chain_validate(candidates: Vec<DiscoveredPool>) -> Vec<Discovere
                 Err(e) => {
                     // Timeout veya ağ hatası — güvenli tarafta kal, reddet
                     eprintln!(
-                        "  {} [On-Chain] TIMEOUT/HATA: {} ({}) — {}",
-                        "⏱️", pool_address_str, pool_dex, e
+                        "  ⏱️ [On-Chain] pool TIMEOUT/ERROR: {} ({}) — {}", pool_address_str, pool_dex, e
                     );
                     (i, false)
                 }
@@ -739,7 +736,7 @@ pub async fn on_chain_validate(candidates: Vec<DiscoveredPool>) -> Vec<Discovere
         .collect();
 
     eprintln!(
-        "  {} [On-Chain] {} havuz ONAYLANDI ✅ | {} havuz REDDEDİLDİ ❌",
+        "  {} [On-Chain] {} pools VALIDATED ✅ | {} pools REJECTED ❌",
         "⛓️".green(), passed_count, rejected_count
     );
 
@@ -851,7 +848,7 @@ fn match_arbitrage_pairs(pools: &[DiscoveredPool]) -> Vec<MatchedPair> {
 pub async fn cli_discover_pools() -> Result<()> {
     println!();
     println!("{}", "  ╔═══════════════════════════════════════════════════════════════════╗".cyan().bold());
-    println!("{}", "  ║   Kutsal Üçlü Keşif Motoru v26.0 — Base Ağı                      ║".cyan().bold());
+    println!("{}", "  ║   Holy Trinity Discovery Engine v26.0 — Base Network               ║".cyan().bold());
     println!("{}", "  ║   DexScreener + GeckoTerminal + On-Chain RPC Validation           ║".cyan().bold());
     println!("{}", "  ╠═══════════════════════════════════════════════════════════════════╣".cyan().bold());
     println!();
@@ -867,17 +864,17 @@ pub async fn cli_discover_pools() -> Result<()> {
     let dex_pairs = match dex_result {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("  ⚠️  DexScreener API hatası: {} — mevcut cache kontrol ediliyor...", e);
+            eprintln!("  ⚠️  DexScreener API error: {} — checking existing cache...", e);
             if std::path::Path::new(MATCHED_POOLS_PATH).exists() {
-                eprintln!("  📦 Mevcut matched_pools.json cache'i kullanılıyor (DexScreener erişilemez)");
+                eprintln!("  📦 Using existing matched_pools.json cache (DexScreener unreachable)");
                 return Ok(());
             }
-            return Err(eyre::eyre!("DexScreener API erişilemez ve mevcut cache bulunamadı: {}", e));
+            return Err(eyre::eyre!("DexScreener unreachable and no existing cache found: {}", e));
         }
     };
 
     if dex_pairs.is_empty() {
-        eprintln!("  {} Hiç havuz bulunamadı.", "⚠️".yellow());
+        eprintln!("  {} No pools found.", "⚠️".yellow());
         return Ok(());
     }
 
@@ -888,7 +885,7 @@ pub async fn cli_discover_pools() -> Result<()> {
     let candidates = off_chain_filter(merged);
 
     if candidates.is_empty() {
-        eprintln!("  {} Off-Chain filtreden geçen aday yok.", "⚠️".yellow());
+        eprintln!("  {} No candidates passed off-chain filter.", "⚠️".yellow());
         return Ok(());
     }
 
@@ -896,12 +893,12 @@ pub async fn cli_discover_pools() -> Result<()> {
     let validated = on_chain_validate(candidates).await;
 
     if validated.is_empty() {
-        eprintln!("  {} On-Chain doğrulamayı geçen havuz yok.", "⚠️".yellow());
+        eprintln!("  {} No pools passed on-chain validation.", "⚠️".yellow());
         return Ok(());
     }
 
     eprintln!(
-        "  {} {} havuz %100 onaylandı, eşleştirme yapılıyor...",
+        "  {} {} pools validated, matching in progress...",
         "✅".green(), validated.len()
     );
 
@@ -909,18 +906,18 @@ pub async fn cli_discover_pools() -> Result<()> {
     let matched_pairs = match_arbitrage_pairs(&validated);
 
     if matched_pairs.is_empty() {
-        eprintln!("  {} Arbitraj çifti bulunamadı (en az 2 DEX'te aynı çift gerekli).", "⚠️".yellow());
+        eprintln!("  {} No arbitrage pairs found (same pair needed on at least 2 DEXes).", "⚠️".yellow());
         return Ok(());
     }
 
     // Terminal çıktısı
     println!("{}", "  ╠═══════════════════════════════════════════════════════════════════╣".cyan().bold());
-    println!("{}", "  ║   Onaylanmış Arbitraj Çiftleri (On-Chain Doğrulanmış)             ║".cyan().bold());
+    println!("{}", "  ║   Validated Arbitrage Pairs (On-Chain Verified)                    ║".cyan().bold());
     println!("{}", "  ╠═══════════════════════════════════════════════════════════════════╣".cyan().bold());
 
     for (i, pair) in matched_pairs.iter().enumerate() {
         println!(
-            "  {}  #{} {} ({} havuz)",
+            "  {}  #{} {} ({} pools)",
             "║".cyan(), i + 1,
             pair.pair_name.white().bold(),
             pair.pools.len(),
@@ -950,7 +947,7 @@ pub async fn cli_discover_pools() -> Result<()> {
     write_matched_pools_json(&config)?;
 
     println!(
-        "\n  {} matched_pools.json yazıldı ({} çift, {} toplam havuz)",
+        "\n  {} matched_pools.json written ({} pairs, {} total pools)",
         "✅".green(),
         config.matched_pairs.len(),
         config.matched_pairs.iter().map(|p| p.pools.len()).sum::<usize>(),
@@ -965,18 +962,18 @@ pub async fn cli_discover_pools() -> Result<()> {
 
 fn write_matched_pools_json(config: &MatchedPoolsConfig) -> Result<()> {
     let json = serde_json::to_string_pretty(config)
-        .map_err(|e| eyre::eyre!("JSON serileştirme hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("JSON serialization error: {}", e))?;
     std::fs::write(MATCHED_POOLS_PATH, json)
-        .map_err(|e| eyre::eyre!("matched_pools.json yazma hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("matched_pools.json write error: {}", e))?;
     Ok(())
 }
 
 /// matched_pools.json dosyasını yükle
 pub fn load_matched_pools() -> Result<MatchedPoolsConfig> {
     let content = std::fs::read_to_string(MATCHED_POOLS_PATH)
-        .map_err(|e| eyre::eyre!("matched_pools.json okunamadı: {} — Önce `--discover-pools` çalıştırın", e))?;
+        .map_err(|e| eyre::eyre!("matched_pools.json read error: {} — Run `--discover-pools` first", e))?;
     let config: MatchedPoolsConfig = serde_json::from_str(&content)
-        .map_err(|e| eyre::eyre!("matched_pools.json parse hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("matched_pools.json parse error: {}", e))?;
     Ok(config)
 }
 
@@ -992,20 +989,19 @@ pub fn load_core_pools() -> Option<MatchedPoolsConfig> {
             match serde_json::from_str::<MatchedPoolsConfig>(&content) {
                 Ok(config) => {
                     eprintln!(
-                        "  {} core_pools.json yüklendi ({} çift, {} havuz) — DexScreener atlanıyor",
-                        "📦", config.matched_pairs.len(),
+                        "  📦 core_pools.json loaded ({} pairs, {} pools) — skipping DexScreener", config.matched_pairs.len(),
                         config.matched_pairs.iter().map(|p| p.pools.len()).sum::<usize>(),
                     );
                     Some(config)
                 }
                 Err(e) => {
-                    eprintln!("  ⚠️  core_pools.json parse hatası: {} — matched_pools.json'a düşülüyor", e);
+                    eprintln!("  ⚠️  core_pools.json parse error: {} — falling back to matched_pools.json", e);
                     None
                 }
             }
         }
         Err(e) => {
-            eprintln!("  ⚠️  core_pools.json okunamadı: {} — matched_pools.json'a düşülüyor", e);
+            eprintln!("  ⚠️  core_pools.json read error: {} — falling back to matched_pools.json", e);
             None
         }
     }
@@ -1025,9 +1021,9 @@ pub fn build_runtime(config: &MatchedPoolsConfig) -> Result<(Vec<PoolConfig>, Ve
 
     for pair in &config.matched_pairs {
         let quote_token_address = pair.quote_token.address.parse::<Address>()
-            .map_err(|e| eyre::eyre!("Geçersiz quote token adresi '{}': {}", pair.quote_token.address, e))?;
+            .map_err(|e| eyre::eyre!("Invalid quote token address '{}': {}", pair.quote_token.address, e))?;
         let base_token_address = pair.base_token.address.parse::<Address>()
-            .map_err(|e| eyre::eyre!("Geçersiz base token adresi '{}': {}", pair.base_token.address, e))?;
+            .map_err(|e| eyre::eyre!("Invalid base token address '{}': {}", pair.base_token.address, e))?;
 
         let mut pair_indices: Vec<usize> = Vec::new();
 
@@ -1038,7 +1034,7 @@ pub fn build_runtime(config: &MatchedPoolsConfig) -> Result<(Vec<PoolConfig>, Ve
                 existing_idx
             } else {
                 let address = pool_entry.address.parse::<Address>()
-                    .map_err(|e| eyre::eyre!("Geçersiz havuz adresi '{}': {}", pool_entry.address, e))?;
+                    .map_err(|e| eyre::eyre!("Invalid pool address '{}': {}", pool_entry.address, e))?;
 
                 // v23.0 (Y-3): Bilinmeyen DEX'ler atlanır
                 let dex_type = match infer_dex_type(&pool_entry.dex_id) {
@@ -1082,7 +1078,7 @@ pub fn build_runtime(config: &MatchedPoolsConfig) -> Result<(Vec<PoolConfig>, Ve
     }
 
     if all_pools.is_empty() {
-        return Err(eyre::eyre!("matched_pools.json'da geçerli havuz bulunamadı"));
+        return Err(eyre::eyre!("no valid pools found in matched_pools.json"));
     }
 
     Ok((all_pools, pair_combos))
@@ -1106,7 +1102,7 @@ pub fn rebuild_pair_combos(pools: &[PoolConfig]) -> Vec<PairCombo> {
     }
 
     let mut combos = Vec::new();
-    for (_, indices) in &pair_groups {
+    for indices in pair_groups.values() {
         for i in 0..indices.len() {
             for j in (i + 1)..indices.len() {
                 debug_assert!(indices[i] < pools.len());

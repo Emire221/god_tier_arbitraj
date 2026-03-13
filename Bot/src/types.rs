@@ -168,10 +168,10 @@ pub enum TransportMode {
 impl std::fmt::Display for TransportMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TransportMode::Ipc => write!(f, "IPC (Düşük Gecikme)"),
+            TransportMode::Ipc => write!(f, "IPC (Low Latency)"),
             TransportMode::Ws => write!(f, "WebSocket"),
             TransportMode::Http => write!(f, "HTTP"),
-            TransportMode::Auto => write!(f, "Otomatik (IPC→WSS→HTTP)"),
+            TransportMode::Auto => write!(f, "Auto (IPC→WSS→HTTP)"),
         }
     }
 }
@@ -513,7 +513,8 @@ pub struct BotConfig {
     /// Base zincir ID
     pub chain_id: u64,
     /// TickBitmap tarama yarıçapı (mevcut tick ± range)
-    /// Varsayılan: 500 tick (Uniswap V3 %0.05 için ~5% fiyat aralığı)
+    /// v26.0: 500 → 100. No profitable arb moves price >5%.
+    /// Narrower range cuts RPC data by ~80% and reduces parse overhead.
     pub tick_bitmap_range: u32,
     /// TickBitmap'in kaç blok eskiyene kadar geçerli sayılacağı
     pub tick_bitmap_max_age_blocks: u64,
@@ -563,10 +564,10 @@ impl BotConfig {
     /// .env dosyasından yapılandırmayı oku
     pub fn from_env() -> Result<Self> {
         let rpc_wss_url = std::env::var("RPC_WSS_URL")
-            .map_err(|_| eyre::eyre!("RPC_WSS_URL .env dosyasında tanımlanmalıdır!"))?;
+            .map_err(|_| eyre::eyre!("RPC_WSS_URL must be defined in .env!"))?;
 
         if rpc_wss_url.is_empty() || rpc_wss_url.starts_with("wss://your-") {
-            return Err(eyre::eyre!("RPC_WSS_URL geçerli bir URL olmalıdır!"));
+            return Err(eyre::eyre!("RPC_WSS_URL must be a valid URL!"));
         }
 
         // v15.0: Yedek RPC URL (opsiyonel)
@@ -575,10 +576,10 @@ impl BotConfig {
             .filter(|u| !u.is_empty() && !u.starts_with("wss://your-"));
 
         let rpc_http_url = std::env::var("RPC_HTTP_URL")
-            .map_err(|_| eyre::eyre!("RPC_HTTP_URL .env dosyasında tanımlanmalıdır!"))?;
+            .map_err(|_| eyre::eyre!("RPC_HTTP_URL must be defined in .env!"))?;
 
         if rpc_http_url.is_empty() || rpc_http_url.starts_with("https://your-") {
-            return Err(eyre::eyre!("RPC_HTTP_URL geçerli bir URL olmalıdır!"));
+            return Err(eyre::eyre!("RPC_HTTP_URL must be a valid URL!"));
         }
 
         let private_key = std::env::var("PRIVATE_KEY")
@@ -598,8 +599,9 @@ impl BotConfig {
 
         let gas_cost_fallback_weth = Self::parse_env_f64("GAS_COST_FALLBACK_WETH", 0.00005);
         let flash_loan_fee_bps = Self::parse_env_f64("FLASH_LOAN_FEE_BPS", 5.0);
-        // v22.0: Default 0.0001 → 0.001 WETH (gas maliyetini karşılayacak eşik)
-        let min_net_profit_weth = Self::parse_env_f64("MIN_NET_PROFIT_WETH", 0.001);
+        // v26.0: Default 0.001 → 0.00003 WETH (Base L2 micro-profit strategy)
+        // L2 gas is ~$0.01, collect frequent micro profits instead of rare large ones
+        let min_net_profit_weth = Self::parse_env_f64("MIN_NET_PROFIT_WETH", 0.00003);
         // v28.0: Default 50.0 → 5.0 WETH. Base L2 havuz derinlikleri genelde
         // 0.05-2 WETH aralığındadır. Bot effective_cap ile sınırlar ama yüksek
         // default NR tarama aralığını şişirir ve hesaplama süresi harcar.
@@ -643,10 +645,12 @@ impl BotConfig {
         };
 
         // ── TickBitmap Ayarları ───────────────────────────────────
+        // v26.0: Default 500 → 100. Arbitrage never moves price >5%.
+        // Reduces RPC payload ~80%, cuts parsing overhead significantly.
         let tick_bitmap_range = std::env::var("TICK_BITMAP_RANGE")
-            .unwrap_or_else(|_| "500".into())
+            .unwrap_or_else(|_| "100".into())
             .parse::<u32>()
-            .unwrap_or(500);
+            .unwrap_or(100);
 
         let tick_bitmap_max_age_blocks = std::env::var("TICK_BITMAP_MAX_AGE_BLOCKS")
             .unwrap_or_else(|_| "5".into())
@@ -821,7 +825,7 @@ impl ArbitrageStats {
             max_profit_weth: 0.0,
             total_potential_profit: 0.0,
             session_start: Instant::now(),
-            active_transport: String::from("Bilinmiyor"),
+            active_transport: String::from("Unknown"),
             avg_block_latency_ms: 0.0,
             min_block_latency_ms: f64::MAX,
             tick_bitmap_syncs: 0,

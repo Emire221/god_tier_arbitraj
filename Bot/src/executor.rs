@@ -89,6 +89,7 @@ impl MevExecutor {
     /// gas ödemese dahi L1 Data Fee ödemek zorundadır. Bu durum cüzdanın
     /// sürekli L1 ücretleri ile kanamasına yol açıyordu.
     /// Artık Private RPC başarısız olursa işlem iptal edilir.
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_protected(
         &self,
         private_key: &str,
@@ -139,7 +140,7 @@ impl MevExecutor {
         // 3. İmzala
         let signer: PrivateKeySigner = private_key
             .parse()
-            .map_err(|_| eyre::eyre!("Geçersiz private key"))?;
+            .map_err(|_| eyre::eyre!("Invalid private key"))?;
         let wallet = EthereumWallet::from(signer.clone());
 
         // 4. Gönder — YALNIZCA Private RPC (eth_sendRawTransaction).
@@ -157,17 +158,17 @@ impl MevExecutor {
                 Ok(hash) => Ok(hash),
                 Err(e) => {
                     eprintln!(
-                        "     ❌ [v25.0] Private RPC TX başarısız — işlem İPTAL EDİLDİ: {}",
+                        "     ❌ [v25.0] Private RPC TX failed — trade CANCELLED: {}",
                         e
                     );
-                    Err(eyre::eyre!("Private RPC TX başarısız: {}", e))
+                    Err(eyre::eyre!("Private RPC TX failed: {}", e))
                 }
             }
         } else {
             eprintln!(
-                "     ❌ [v25.0] PRIVATE_RPC_URL tanımlı değil — işlem İPTAL EDİLDİ"
+                "     ❌ [v25.0] PRIVATE_RPC_URL not defined — trade CANCELLED"
             );
-            Err(eyre::eyre!("Private RPC URL tanımlı değil. Güvenlik nedeniyle public mempool'a gönderilmez."))
+            Err(eyre::eyre!("Private RPC URL not defined. Not sending to public mempool for security reasons."))
         }
     }
 
@@ -187,7 +188,7 @@ impl MevExecutor {
         current_block: u64,
     ) -> Result<String> {
         let private_url: reqwest::Url = private_rpc_url.parse()
-            .map_err(|e| eyre::eyre!("Private RPC URL parse hatası: {}", e))?;
+            .map_err(|e| eyre::eyre!("Private RPC URL parse error: {}", e))?;
         let provider = ProviderBuilder::new()
             .wallet(wallet.clone())
             .connect_http(private_url);
@@ -196,14 +197,14 @@ impl MevExecutor {
         // TX yalnızca private endpoint'e ulaşır, public mempool'a DÜŞMEZ
         let pending = provider.send_transaction(tx)
             .await
-            .map_err(|e| eyre::eyre!("Private RPC TX gönderim hatası: {}", e))?;
+            .map_err(|e| eyre::eyre!("Private RPC TX send error: {}", e))?;
 
         let tx_hash = format!("{:?}", pending.tx_hash());
         let tx_hash_alloy = *pending.tx_hash();
         drop(pending);
 
         eprintln!(
-            "     📤 TX gönderildi → blok #{} | private RPC: {}",
+            "     📤 TX sent → blok #{} | private RPC: {}",
             current_block + 1,
             &private_rpc_url[..private_rpc_url.len().min(50)]
         );
@@ -216,14 +217,14 @@ impl MevExecutor {
             let poll_url: reqwest::Url = match rpc_url_clone.parse() {
                 Ok(u) => u,
                 Err(e) => {
-                    eprintln!("     ⚠️  Receipt polling URL parse hatası: {}", e);
+                    eprintln!("     ⚠️  Receipt polling URL parse error: {}", e);
                     return;
                 }
             };
             let poll_provider = ProviderBuilder::new().connect_http(poll_url);
             loop {
                 if tokio::time::Instant::now() > deadline {
-                    eprintln!("     ⏰ TX timeout (10s) — dahil edilmemiş olabilir: {}", &hash_clone);
+                    eprintln!("     ⏰ TX timeout (10s) — may not be included: {}", &hash_clone);
                     break;
                 }
                 match poll_provider.get_transaction_receipt(tx_hash_alloy).await {
@@ -238,7 +239,7 @@ impl MevExecutor {
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
                     Err(e) => {
-                        eprintln!("     ⚠️  TX receipt hatası: {}", e);
+                        eprintln!("     ⚠️  TX receipt error: {}", e);
                         break;
                     }
                 }

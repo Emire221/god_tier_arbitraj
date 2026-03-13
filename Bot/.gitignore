@@ -2,6 +2,8 @@
 /target
 
 # Gizli anahtarlar ve yapılandırma
+.env
+.env.*
 *.keystore
 
 # IDE

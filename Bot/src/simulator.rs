@@ -159,7 +159,7 @@ fn pack_slot0(sqrt_price_x96: U256, tick: i32, dex: DexType) -> RevmU256 {
 
     // sqrtPriceX96 — lower 160 bits
     let mask_160 = (U256::from(1u64) << 160) - U256::from(1u64);
-    packed = packed | (sqrt_price_x96 & mask_160);
+    packed |= sqrt_price_x96 & mask_160;
 
     // tick — int24 at bit 160 (two's complement, masked to 24 bits)
     let tick_bits = if tick >= 0 {
@@ -171,7 +171,7 @@ fn pack_slot0(sqrt_price_x96: U256, tick: i32, dex: DexType) -> RevmU256 {
         U256::from(twos)
     };
     let mask_24 = U256::from(0x00FF_FFFFu32);
-    packed = packed | ((tick_bits & mask_24) << 160);
+    packed |= (tick_bits & mask_24) << 160;
 
     // unlocked = true (1) — position depends on DEX type
     // PCS V3: uint32 feeProtocol (32 bit) slot 0'a SIĞMAZ (232+32=264 > 256)
@@ -184,11 +184,11 @@ fn pack_slot0(sqrt_price_x96: U256, tick: i32, dex: DexType) -> RevmU256 {
         }
         DexType::Aerodrome => {
             // Aerodrome: feeProtocol yok, unlocked bit 232
-            packed = packed | (U256::from(1u64) << 232);
+            packed |= U256::from(1u64) << 232;
         }
         _ => {
             // UniV3 / SushiSwap V3: uint8 feeProtocol, unlocked bit 240
-            packed = packed | (U256::from(1u64) << 240);
+            packed |= U256::from(1u64) << 240;
         }
     }
 
@@ -386,6 +386,7 @@ impl SimulationEngine {
     /// # Notlar
     /// - Dış RPC çağrısı YAPILMAZ — tamamen yerel
     /// - İlk block için ~0.5ms, sonraki bloklar için <0.1ms
+    #[allow(clippy::too_many_arguments)]
     pub fn simulate(
         &self,
         pools: &[PoolConfig],
@@ -471,7 +472,7 @@ impl SimulationEngine {
                 SimulationResult {
                     success: false,
                     gas_used: 0,
-                    error: Some(format!("EVM hatası: {:?}", e)),
+                    error: Some(format!("EVM error: {:?}", e)),
                 }
             }
         }
@@ -509,7 +510,7 @@ impl SimulationEngine {
             return SimulationResult {
                 success: false,
                 gas_used: 0,
-                error: Some("Havuz(lar) aktif değil".into()),
+                error: Some("Pool(s) not active".into()),
             };
         }
 
@@ -523,7 +524,7 @@ impl SimulationEngine {
                 success: false,
                 gas_used: 0,
                 error: Some(format!(
-                    "Anormal fiyat: AL={:.2}, SAT={:.2}",
+                    "Abnormal price: BUY={:.2}, SELL={:.2}",
                     buy_state.eth_price_usd, sell_state.eth_price_usd
                 )),
             };
@@ -535,7 +536,7 @@ impl SimulationEngine {
                 success: false,
                 gas_used: 0,
                 error: Some(format!(
-                    "Bayat veri: AL={}ms, SAT={}ms",
+                    "Stale data: BUY={}ms, SELL={}ms",
                     buy_state.staleness_ms(), sell_state.staleness_ms()
                 )),
             };
@@ -577,7 +578,7 @@ impl SimulationEngine {
                     success: false,
                     gas_used: 0,
                     error: Some(format!(
-                        "Yetersiz V3 likidite kapasitesi: AL_cap={:.4} SAT_cap={:.4} WETH, \u{0130}stenen={:.4} WETH",
+                        "Insufficient V3 liquidity capacity: BUY_cap={:.4} SELL_cap={:.4} WETH, Requested={:.4} WETH",
                         buy_cap, sell_cap, amount_weth
                     )),
                 };
@@ -649,6 +650,7 @@ impl SimulationEngine {
 /// - `aero_direction`: Slipstream yön (0=zeroForOne, 1=oneForZero)
 /// - `min_profit`: Minimum kâr eşiği (uint128, wei cinsinden)
 /// - `deadline_block`: Son geçerli blok numarası (uint32)
+#[allow(clippy::too_many_arguments)]
 pub fn encode_compact_calldata(
     pool_a: Address,
     pool_b: Address,
@@ -697,7 +699,7 @@ pub fn encode_compact_calldata(
 /// Kompakt calldata'yı çözümle (test/debug için)
 ///
 /// 134 byte → (pool_a, pool_b, owed_token, received_token, amount, uni_dir, aero_dir, min_profit, deadline_block)
-#[allow(dead_code)]
+#[allow(dead_code, clippy::type_complexity)]
 pub fn decode_compact_calldata(data: &[u8]) -> Option<(Address, Address, Address, Address, U256, u8, u8, u128, u32)> {
     if data.len() != 134 {
         return None;
@@ -755,7 +757,7 @@ pub fn encode_multi_hop_calldata(
     deadline_block: u32,
 ) -> Vec<u8> {
     let hop_count = pools.len();
-    debug_assert!(hop_count >= 2 && hop_count <= 4, "Hop sayısı 2-4 arası olmalı");
+    debug_assert!((2..=4).contains(&hop_count), "Hop sayısı 2-4 arası olmalı");
     debug_assert_eq!(pools.len(), directions.len(), "Pool ve direction sayıları eşit olmalı");
 
     // Header: 1 + 32 + 16 + 4 = 53 byte
@@ -790,14 +792,14 @@ pub fn encode_multi_hop_calldata(
 }
 
 /// Multi-hop calldata çözümle (test/debug için)
-#[allow(dead_code)]
+#[allow(dead_code, clippy::type_complexity)]
 pub fn decode_multi_hop_calldata(data: &[u8]) -> Option<(Vec<Address>, Vec<u8>, U256, u128, u32)> {
     if data.len() < 53 + 42 { // minimum 2-hop
         return None;
     }
 
     let hop_count = data[0] as usize;
-    if hop_count < 2 || hop_count > 4 {
+    if !(2..=4).contains(&hop_count) {
         return None;
     }
 
@@ -1144,8 +1146,8 @@ mod sequencer_reorg_tests {
         let result = sim.validate_mathematical(&pools, &states, 0, 1, 1.0);
         assert!(!result.success, "Bayat (stale) state ile simülasyon reddedilmeli");
         assert!(
-            result.error.as_deref().unwrap_or("").contains("Bayat"),
-            "Hata mesajı 'Bayat' içermeli, aldığımız: {:?}",
+            result.error.as_deref().unwrap_or("").contains("Stale data"),
+            "Hata mesajı 'Stale data' içermeli, aldığımız: {:?}",
             result.error
         );
     }
@@ -1185,8 +1187,8 @@ mod sequencer_reorg_tests {
         let result = sim.validate_mathematical(&pools, &states, 0, 1, 1.0);
         assert!(!result.success, "Hayalet fırsat (phantom opportunity) reddedilmeli");
         assert!(
-            result.error.as_deref().unwrap_or("").contains("aktif değil"),
-            "Hata mesajı 'aktif değil' içermeli: {:?}",
+            result.error.as_deref().unwrap_or("").contains("not active"),
+            "Hata mesajı 'not active' içermeli: {:?}",
             result.error
         );
     }
@@ -1227,8 +1229,8 @@ mod sequencer_reorg_tests {
         let result = sim.validate_mathematical(&pools, &states, 0, 1, 0.5);
         assert!(!result.success, "Tam kesintide her iki bayat havuz reddedilmeli");
         assert!(
-            result.error.as_deref().unwrap_or("").contains("Bayat"),
-            "Hata 'Bayat' içermeli: {:?}",
+            result.error.as_deref().unwrap_or("").contains("Stale data"),
+            "Hata 'Stale data' içermeli: {:?}",
             result.error
         );
     }
@@ -1266,8 +1268,8 @@ mod sequencer_reorg_tests {
         // 999,999 < 100,000 sınırı aşılıyor → anormal fiyat reddedilmeli
         assert!(!result.success, "Anormal fiyat ($999,999) reddedilmeli");
         assert!(
-            result.error.as_deref().unwrap_or("").contains("Anormal fiyat"),
-            "Hata 'Anormal fiyat' içermeli: {:?}",
+            result.error.as_deref().unwrap_or("").contains("Abnormal price"),
+            "Hata 'Abnormal price' içermeli: {:?}",
             result.error
         );
     }

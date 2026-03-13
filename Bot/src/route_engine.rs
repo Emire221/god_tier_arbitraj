@@ -233,6 +233,7 @@ impl LiquidityGraph {
     }
 
     /// DFS rekürsif arama — WETH → ... → WETH döngüleri bulur
+    #[allow(clippy::too_many_arguments)]
     fn dfs(
         &self,
         current_token: Address,

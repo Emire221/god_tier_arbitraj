@@ -80,7 +80,7 @@ pub fn check_arbitrage_opportunity(
             if state_a.is_active() && state_b.is_active() {
                 // Havuzlar aktif ama veri yaşlı — HARD-ABORT loglama
                 eprintln!(
-                    "     \u{1f6a8} [HARD-ABORT] Stale data tespit edildi! A={}ms B={}ms (eşik={}ms) — fırsat İPTAL",
+                    "     \u{1f6a8} [HARD-ABORT] Stale data detected! A={}ms B={}ms (threshold={}ms) — opportunity CANCELLED",
                     state_a.staleness_ms(), state_b.staleness_ms(), config.max_staleness_ms,
                 );
             }
@@ -97,7 +97,7 @@ pub fn check_arbitrage_opportunity(
         let fee_b_bps = state_b.live_fee_bps.unwrap_or(pools[1].fee_bps);
         if fee_a_bps > config.max_pool_fee_bps || fee_b_bps > config.max_pool_fee_bps {
             eprintln!(
-                "     \u{23ed}\u{fe0f} [FeeFilter] Havuz komisyonu g\u{00fc}venlik tavan\u{0131}n\u{0131} a\u{015f}\u{0131}yor: A={}bps B={}bps (maks={}bps)",
+                "     \u{23ed}\u{fe0f} [FeeFilter] Pool fee exceeds safety ceiling: A={}bps B={}bps (max={}bps)",
                 fee_a_bps, fee_b_bps, config.max_pool_fee_bps,
             );
             return None;
@@ -106,7 +106,7 @@ pub fn check_arbitrage_opportunity(
         let total_fee_bps = fee_a_bps + fee_b_bps;
         if total_fee_bps > 30 {
             eprintln!(
-                "     \u{2139}\u{fe0f} [FeeInfo] Y\u{00fc}ksek toplam komisyon: A={}bps + B={}bps = {}bps \u{2192} dinamik k\u{00e2}rl\u{0131}l\u{0131}k kontrol\u{00fc}ne devrediliyor",
+                "     \u{2139}\u{fe0f} [FeeInfo] High total fee: A={}bps + B={}bps = {}bps \u{2192} delegated to dynamic profitability check",
                 fee_a_bps, fee_b_bps, total_fee_bps,
             );
         }
@@ -155,7 +155,7 @@ pub fn check_arbitrage_opportunity(
         let age = current_block.saturating_sub(bm.snapshot_block);
         if age > bitmap_max_age {
             eprintln!(
-                "     \u{26a0}\u{fe0f} [TickBitmap] Sell havuzu bitmap'i eski ({} blok) � tek-tick fallback",
+                "     \u{26a0}\u{fe0f} [TickBitmap] Sell pool bitmap stale ({} blocks) — single-tick fallback",
                 age,
             );
             false
@@ -167,7 +167,7 @@ pub fn check_arbitrage_opportunity(
         let age = current_block.saturating_sub(bm.snapshot_block);
         if age > bitmap_max_age {
             eprintln!(
-                "     \u{26a0}\u{fe0f} [TickBitmap] Buy havuzu bitmap'i eski ({} blok) � tek-tick fallback",
+                "     \u{26a0}\u{fe0f} [TickBitmap] Buy pool bitmap stale ({} blocks) — single-tick fallback",
                 age,
             );
             false
@@ -203,7 +203,7 @@ pub fn check_arbitrage_opportunity(
     // Bu erken ��k��, NR + PreFilter hesaplamalar�n� tamamen atlar � CPU tasarrufu.
     if effective_cap <= 0.001 {
         eprintln!(
-            "     \u{23ed}\u{fe0f} [Liquidity] Yetersiz likidite � NR atlan�yor (cap={:.6} WETH)",
+            "     \u{23ed}\u{fe0f} [Liquidity] Insufficient liquidity — skipping NR (cap={:.6} WETH)",
             effective_cap,
         );
         return None;
@@ -212,7 +212,7 @@ pub fn check_arbitrage_opportunity(
     // v28.0: Dinamik likidite uyar�s� + ekonomik uygulanabilirlik kontrol�
     if effective_cap < config.max_trade_size_weth * 0.1 {
         eprintln!(
-            "     \u{26a0}\u{fe0f} [Liquidity] Havuz derinli�i s��: sell_cap={:.4} buy_cap={:.4} effective_cap={:.4} WETH (MAX_TRADE={:.1})",
+            "     \u{26a0}\u{fe0f} [Liquidity] Pool depth shallow: sell_cap={:.4} buy_cap={:.4} effective_cap={:.4} WETH (MAX_TRADE={:.1})",
             sell_hard_cap, buy_hard_cap, effective_cap, config.max_trade_size_weth,
         );
         // v28.0: S�� havuzda gas maliyetini kar��layacak spread var m�?
@@ -220,7 +220,7 @@ pub fn check_arbitrage_opportunity(
         let max_possible_gross = effective_cap * spread_pct / 100.0;
         if max_possible_gross < config.min_net_profit_weth {
             eprintln!(
-                "     \u{23ed}\u{fe0f} [EconViability] S�� havuz + d���k spread � k�r imk�ns�z: max_gross={:.8} < min_profit={:.8} WETH",
+                "     \u{23ed}\u{fe0f} [EconViability] Shallow pool + low spread — profit impossible: max_gross={:.8} < min_profit={:.8} WETH",
                 max_possible_gross, config.min_net_profit_weth,
             );
             return None;
@@ -265,8 +265,7 @@ pub fn check_arbitrage_opportunity(
         match pre_filter.check(price_a, price_b, probe_amount) {
             math::PreFilterResult::Unprofitable { reason } => {
                 eprintln!(
-                    "     {} [PreFilter] Spread {:.4}% � {:?} | fee_total={:.3}% | gas={:.8} WETH | probe={:.4} WETH",
-                    "\u{23ed}\u{fe0f}",
+                    "     \u{23ed}\u{fe0f} [PreFilter] Spread {:.4}% � {:?} | fee_total={:.3}% | gas={:.8} WETH | probe={:.4} WETH",
                     spread_pct,
                     reason,
                     (pre_filter.fee_a + pre_filter.fee_b + config.flash_loan_fee_bps / 10_000.0) * 100.0,
@@ -277,8 +276,7 @@ pub fn check_arbitrage_opportunity(
             }
             math::PreFilterResult::Profitable { estimated_profit_weth, spread_ratio } => {
                 eprintln!(
-                    "     {} [PreFilter] GE�TI | spread_ratio={:.6} | est_profit={:.8} WETH | probe={:.4} WETH � NR'ye devam",
-                    "\u{2705}",
+                    "     \u{2705} [PreFilter] PASSED | spread_ratio={:.6} | est_profit={:.8} WETH | probe={:.4} WETH — proceeding to NR",
                     spread_ratio,
                     estimated_profit_weth,
                     probe_amount,
@@ -346,8 +344,7 @@ pub fn check_arbitrage_opportunity(
     // v15.0 DEBUG: NR sonu� detaylar� � f�rsat filtreleme nedenini g�ster
     // (Bu loglar canl�ya ge�i� onay�na kadar kald�r�lmamal�)
     eprintln!(
-        "     {} [DEBUG NR] spread={:.4}% | nr_profit_weth={:.8} | min_required={:.8} | nr_amount={:.6} | converged={} | gas_cost_weth={:.8} (L1={:.8})",
-        "\u{1f52c}",
+        "     \u{1f52c} [DEBUG NR] spread={:.4}% | nr_profit_weth={:.8} | min_required={:.8} | nr_amount={:.6} | converged={} | gas_cost_weth={:.8} (L1={:.8})",
         spread_pct,
         expected_profit_weth,
         config.min_net_profit_weth,
@@ -360,8 +357,7 @@ pub fn check_arbitrage_opportunity(
     // K�rl� de�ilse f�rsat� atla
     if expected_profit_weth < config.min_net_profit_weth || nr_result.optimal_amount <= 0.0 {
         eprintln!(
-            "     {} [DEBUG] F�rsat k�rs�z � NR profit ({:.8}) < e�ik ({:.8}) veya amount<=0 ({:.6})",
-            "\u{23ed}\u{fe0f}",
+            "     \u{23ed}\u{fe0f} [DEBUG] Opportunity unprofitable — NR profit ({:.8}) < threshold ({:.8}) or amount<=0 ({:.6})",
             expected_profit_weth,
             config.min_net_profit_weth,
             nr_result.optimal_amount,
@@ -393,6 +389,7 @@ pub fn check_arbitrage_opportunity(
 ///
 /// v21.0: `mev_executor` parametresi eklendi � i�lemler yaln�zca Private RPC
 /// (eth_sendRawTransaction) �zerinden g�nderilir, public mempool kullan�lmaz.
+#[allow(clippy::too_many_arguments)]
 pub async fn evaluate_and_execute<P: Provider + Sync>(
     _provider: &P,
     config: &BotConfig,
@@ -436,7 +433,7 @@ pub async fn evaluate_and_execute<P: Provider + Sync>(
             drop(state_a_guard);
             drop(state_b_guard);
             eprintln!(
-                "     \u{1f6d1} [FreshnessGate] Havuz verileri çok eski veya stale: A={}ms B={}ms (eşik={}ms) — MEV koruması: işlem atlanıyor",
+                "     \u{1f6d1} [FreshnessGate] Pool data too old or stale: A={}ms B={}ms (threshold={}ms) — MEV protection: trade skipped",
                 staleness_a, staleness_b, config.max_staleness_ms,
             );
             return None;
@@ -512,7 +509,7 @@ pub async fn evaluate_and_execute<P: Provider + Sync>(
             contract_addr,
             calldata,
             U256::ZERO,
-            current_block as u64,
+            current_block,
             block_timestamp,
             block_base_fee,
         )
@@ -535,7 +532,15 @@ pub async fn evaluate_and_execute<P: Provider + Sync>(
     // Sim�lasyon ba�ar�l� � ard���k ba�ar�s�zl�k sayac�n� s�f�rla
     stats.consecutive_failures = 0;
 
-    // ��� K�RLI FIRSAT RAPORU ���������������������������������
+    // JSON structured log: profitable opportunity
+    crate::json_logger::log_opportunity(
+        &format!("{} vs {}", pools[opportunity.buy_pool_idx].name, pools[opportunity.sell_pool_idx].name),
+        opportunity.spread_pct,
+        opportunity.expected_profit_weth,
+        opportunity.optimal_amount_weth,
+        true,
+    );
+
     stats.profitable_opportunities += 1;
     stats.total_potential_profit += opportunity.expected_profit_weth;
     if opportunity.expected_profit_weth > stats.max_profit_weth {
@@ -559,14 +564,14 @@ pub async fn evaluate_and_execute<P: Provider + Sync>(
         println!(
             "  {} {}",
             "??".yellow(),
-            "G�LGE MODU: ��lem atland� � detaylar shadow_analytics.jsonl'e kaydediliyor".yellow().bold()
+            "SHADOW MODE: Trade skipped — details logged to shadow_analytics.jsonl".yellow().bold()
         );
         // v23.0 (Y-1): Periyodik ekonomik �zet (her 10 f�rsatta bir)
         let total_shadow = stats.shadow_sim_success + stats.shadow_sim_fail;
-        if total_shadow > 0 && total_shadow % 10 == 0 {
+        if total_shadow > 0 && total_shadow.is_multiple_of(10) {
             let success_rate = (stats.shadow_sim_success as f64 / total_shadow as f64) * 100.0;
             println!(
-                "  {} G�lge �zet: {} f�rsat | Sim ba�ar�: {:.1}% | K�m�latif k�r: {:.6} WETH",
+                "  {} Shadow Summary: {} opportunities | Sim success: {:.1}% | Cumulative profit: {:.6} WETH",
                 "??".cyan(),
                 total_shadow,
                 success_rate,
@@ -705,7 +710,7 @@ pub async fn evaluate_and_execute<P: Provider + Sync>(
                 base_fee_for_exec,
                 qt_decimals,
                 expected_profit,
-                current_block as u64,
+                current_block,
             ).await;
         });
     }
@@ -783,7 +788,7 @@ fn write_shadow_log(
             let rotated = format!("shadow_analytics.{}.jsonl",
                 chrono::Local::now().format("%Y%m%d_%H%M%S"));
             let _ = std::fs::rename(log_path, &rotated);
-            eprintln!("  ?? Shadow log rotate edildi � {}", rotated);
+            eprintln!("  ?? Shadow log rotated — {}", rotated);
         }
     }
 
@@ -796,14 +801,14 @@ fn write_shadow_log(
         Ok(mut file) => {
             if let Err(e) = writeln!(file, "{}", log_entry) {
                 eprintln!(
-                    "  {} shadow_analytics.jsonl yazma hatas�: {}",
+                    "  {} shadow_analytics.jsonl write error: {}",
                     "??".yellow(), e
                 );
             }
         }
         Err(e) => {
             eprintln!(
-                "  {} shadow_analytics.jsonl a�ma hatas�: {}",
+                "  {} shadow_analytics.jsonl open error: {}",
                 "??".yellow(), e
             );
         }
@@ -821,6 +826,7 @@ fn write_shadow_log(
 ///
 /// Public mempool kullan�lmaz � t�m i�lemler eth_sendRawTransaction ile Private RPC'ye g�nderilir.
 /// Private RPC yoksa veya ba�ar�s�zsa i�lem �PTAL ED�L�R (nonce geri al�n�r).
+#[allow(clippy::too_many_arguments)]
 async fn execute_on_chain_protected(
     mev_executor: Arc<crate::executor::MevExecutor>,
     private_key: String,
@@ -844,7 +850,7 @@ async fn execute_on_chain_protected(
     expected_profit_weth: f64,
     current_block: u64,
 ) {
-    println!("\n  {} {}", "??".yellow(), "KONTRAT TET�KLEME BA�LATILDI (Private RPC)".yellow().bold());
+    println!("\n  {} {}", "??".yellow(), "CONTRACT EXECUTION STARTED (Private RPC)".yellow().bold());
 
     // v10.0: Private key g�venli bellek y�netimi
     let mut pk_owned = private_key;
@@ -872,14 +878,14 @@ async fn execute_on_chain_protected(
 
     let calldata_hex = crate::simulator::format_compact_calldata_hex(&calldata);
     println!(
-        "  {} Kompakt calldata (134 byte): {}...{}",
+        "  {} Compact calldata (134 bytes): {}...{}",
         "??".cyan(),
         &calldata_hex[..22],
         &calldata_hex[calldata_hex.len().saturating_sub(10)..],
     );
 
     println!(
-        "  {} TX g�nderiliyor (Private RPC)... (miktar: {:.6} WETH, nonce: {}, deadline: blok #{}, payload: 134 byte)",
+        "  {} Sending TX (Private RPC)... (amount: {:.6} WETH, nonce: {}, deadline: block #{}, payload: 134 bytes)",
         "??".yellow(), trade_size_weth, nonce, deadline_block
     );
 
@@ -901,12 +907,12 @@ async fn execute_on_chain_protected(
 
     match result {
         Ok(hash) => {
-            println!("  {} TX ba�ar�l� (Private RPC): {}", "?".green(), hash.green().bold());
+            println!("  {} TX successful (Private RPC): {}", "?".green(), hash.green().bold());
         }
         Err(e) => {
             // TX zincire gitmediyse local nonce geri alınır.
             nonce_manager.force_set(nonce);
-            println!("  {} TX hatas�: {}", "?".red(), format!("{}", e).red());
+            println!("  {} TX error: {}", "?".red(), format!("{}", e).red());
         }
     }
 }
@@ -1027,11 +1033,11 @@ fn print_simulation_failure(
     _pools: &[PoolConfig],
 ) {
     println!(
-        "     {} [{}] REVM Sim�lasyon BA�ARISIZ | Spread: {:.4}% | Sebep: {}",
+        "     {} [{}] REVM Simulation FAILED | Spread: {:.4}% | Reason: {}",
         "??".yellow(),
         timestamp().dimmed(),
         opp.spread_pct,
-        sim.error.as_deref().unwrap_or("Bilinmiyor").red(),
+        sim.error.as_deref().unwrap_or("Unknown").red(),
     );
 }
 
@@ -1047,54 +1053,53 @@ fn print_opportunity_report(
 
     println!();
     println!("{}", "  -===========================================================�".red().bold());
-    println!("{}", "  �     ??????  K�RLI ARB�TRAJ FIRSATI  ??????              �".red().bold());
+    println!("{}", "  �     ??????  PROFITABLE ARBITRAGE OPPORTUNITY  ??????              �".red().bold());
     println!("{}", "  �===========================================================�".red().bold());
-    println!("  {}  Zaman            : {}", "�".red(), timestamp().white().bold());
+    println!("  {}  Time             : {}", "�".red(), timestamp().white().bold());
     println!(
-        "  {}  Y�n              : {} � {}",
+        "  {}  Direction        : {} — {}",
         "�".red(),
-        format!("{}'dan AL ({:.6} Q)", buy.name, opp.buy_price_quote).green().bold(),
-        format!("{}'e SAT ({:.6} Q)", sell.name, opp.sell_price_quote).red().bold(),
+        format!("BUY from {} ({:.6} Q)", buy.name, opp.buy_price_quote).green().bold(),
+        format!("SELL to {} ({:.6} Q)", sell.name, opp.sell_price_quote).red().bold(),
     );
     println!("  {}  Spread           : {:.4}%", "�".red(), opp.spread_pct);
     println!("  {}  ������������������������������������������������������", "�".red());
     println!(
-        "  {}  Optimal Miktar   : {} WETH (Newton-Raphson: {}i, {})",
+        "  {}  Optimal Amount   : {} WETH (Newton-Raphson: {}i, {})",
         "�".red(),
         format!("{:.6}", opp.optimal_amount_weth).white().bold(),
         opp.nr_iterations,
-        if opp.nr_converged { "yak�nsad�".green() } else { "yak�nsamad�".yellow() },
+        if opp.nr_converged { "converged".green() } else { "not converged".yellow() },
     );
     println!(
-        "  {}  {} NET K�R       : {:.6} WETH",
+        "  {}  ?? NET PROFIT    : {:.6} WETH",
         "�".red(),
-        "??",
         format!("{:.6}", opp.expected_profit_weth).green().bold(),
     );
     println!(
-        "  {}  REVM Sim�lasyon  : {} (Gas: {})",
+        "  {}  REVM Simulation  : {} (Gas: {})",
         "�".red(),
-        if sim.success { "BA�ARILI".green().bold() } else { "BA�ARISIZ".red().bold() },
+        if sim.success { "PASSED".green().bold() } else { "FAILED".red().bold() },
         sim.gas_used,
     );
 
     if config.execution_enabled() {
         println!(
-            "  {}  Durum            : {}",
+            "  {}  Status           : {}",
             "�".red(),
-            "?? KONTRAT TET�KLEN�YOR...".yellow().bold()
+            "?? EXECUTING CONTRACT...".yellow().bold()
         );
     } else if config.shadow_mode() {
         println!(
-            "  {}  Durum            : {}",
+            "  {}  Status           : {}",
             "�".red(),
-            "?? G�LGE MODU � shadow_analytics.jsonl'e kaydedildi".yellow().bold()
+            "?? SHADOW MODE — logged to shadow_analytics.jsonl".yellow().bold()
         );
     } else {
         println!(
-            "  {}  Durum            : {}",
+            "  {}  Status           : {}",
             "�".red(),
-            "?? G�zlem Modu (tetikleme devre d���)".dimmed()
+            "?? Observation Mode (execution disabled)".dimmed()
         );
     }
     println!("{}", "  L===========================================================-".red().bold());
@@ -1272,6 +1277,7 @@ pub fn check_multi_hop_opportunities(
 /// REVM sim�lasyonu yapar ve MevExecutor ile Private RPC'ye g�nderir.
 ///
 /// v25.0: G�lge modundan ��k�p ger�ek y�r�tme deste�i.
+#[allow(clippy::too_many_arguments)]
 pub async fn evaluate_and_execute_multi_hop<P: Provider + Sync>(
     _provider: &P,
     config: &BotConfig,
@@ -1300,7 +1306,7 @@ pub async fn evaluate_and_execute_multi_hop<P: Provider + Sync>(
         let state = states[pool_idx].read();
         if !state.is_fresh(config.max_staleness_ms) {
             eprintln!(
-                "     \u{1f6d1} [Multi-Hop FreshnessGate] Havuz #{} stale/eski: {}ms (eşik={}ms)",
+                "     \u{1f6d1} [Multi-Hop FreshnessGate] Pool #{} stale/outdated: {}ms (threshold={}ms)",
                 pool_idx, state.staleness_ms(), config.max_staleness_ms,
             );
             return None;
@@ -1327,7 +1333,7 @@ pub async fn evaluate_and_execute_multi_hop<P: Provider + Sync>(
     );
 
     if exact_profit.is_zero() {
-        eprintln!("     ?? [Multi-Hop] Exact profit s�f�r � atlan�yor");
+        eprintln!("     ?? [Multi-Hop] Exact profit zero — skipping");
         return None;
     }
 
@@ -1367,7 +1373,7 @@ pub async fn evaluate_and_execute_multi_hop<P: Provider + Sync>(
             contract_addr,
             calldata.clone(),
             U256::ZERO,
-            current_block as u64,
+            current_block,
             block_timestamp,
             block_base_fee,
         )
@@ -1388,8 +1394,8 @@ pub async fn evaluate_and_execute_multi_hop<P: Provider + Sync>(
         stats.failed_simulations += 1;
         stats.consecutive_failures += 1;
         eprintln!(
-            "     ?? [Multi-Hop] REVM Sim�lasyon BA�ARISIZ: {}",
-            revm_result.error.as_deref().unwrap_or("Bilinmiyor"),
+            "     ?? [Multi-Hop] REVM Simulation FAILED: {}",
+            revm_result.error.as_deref().unwrap_or("Unknown"),
         );
         return None;
     }
@@ -1403,14 +1409,14 @@ pub async fn evaluate_and_execute_multi_hop<P: Provider + Sync>(
 
     println!();
     println!("{}", "  -===========================================================�".red().bold());
-    println!("{}", "  �  ????  MULTI-HOP K�RLI ARB�TRAJ FIRSATI  ????           �".red().bold());
+    println!("{}", "  �  ????  MULTI-HOP PROFITABLE ARBITRAGE OPPORTUNITY  ????           �".red().bold());
     println!("{}", "  �===========================================================�".red().bold());
-    println!("  {}  Rota             : {} ({})", "�".red(), opportunity.label, opportunity.hop_count);
-    println!("  {}  Optimal Miktar   : {:.6} WETH", "�".red(), opportunity.optimal_amount_weth);
-    println!("  {}  ?? NET K�R       : {:.6} WETH", "�".red(), opportunity.expected_profit_weth);
+    println!("  {}  Route            : {} ({})", "�".red(), opportunity.label, opportunity.hop_count);
+    println!("  {}  Optimal Amount   : {:.6} WETH", "�".red(), opportunity.optimal_amount_weth);
+    println!("  {}  ?? NET PROFIT    : {:.6} WETH", "�".red(), opportunity.expected_profit_weth);
     println!("  {}  Exact Profit     : {} wei", "�".red(), exact_profit);
-    println!("  {}  Calldata         : {} byte ({}-hop)", "�".red(), calldata.len(), opportunity.hop_count);
-    println!("  {}  REVM Sim�lasyon  : BA�ARILI (Gas: {})", "�".red(), simulated_gas_used);
+    println!("  {}  Calldata         : {} bytes ({}-hop)", "�".red(), calldata.len(), opportunity.hop_count);
+    println!("  {}  REVM Simulation  : PASSED (Gas: {})", "�".red(), simulated_gas_used);
     println!("{}", "  L===========================================================-".red().bold());
     println!();
 
@@ -1425,7 +1431,7 @@ pub async fn evaluate_and_execute_multi_hop<P: Provider + Sync>(
         println!(
             "  {} {}",
             "??".yellow(),
-            "G�LGE MODU: Multi-hop i�lem atland� � shadow log'a kaydedildi".yellow().bold()
+            "SHADOW MODE: Multi-hop trade skipped — logged to shadow log".yellow().bold()
         );
     } else if config.execution_enabled() {
         let pk = config.private_key.clone()
@@ -1444,7 +1450,7 @@ pub async fn evaluate_and_execute_multi_hop<P: Provider + Sync>(
         let calldata_owned = calldata;
 
         tokio::spawn(async move {
-            println!("\n  {} {}", "????".yellow(), "MULTI-HOP KONTRAT TET�KLEME BA�LATILDI (Private RPC)".yellow().bold());
+            println!("\n  {} {}", "????".yellow(), "MULTI-HOP CONTRACT EXECUTION STARTED (Private RPC)".yellow().bold());
 
             let result = mev_exec.execute_protected(
                 &pk,
@@ -1454,16 +1460,16 @@ pub async fn evaluate_and_execute_multi_hop<P: Provider + Sync>(
                 expected_profit,
                 sim_gas,
                 block_base_fee,
-                current_block as u64,
+                current_block,
                 &nm_clone,
             ).await;
 
             match result {
                 Ok(hash) => {
-                    println!("  {} Multi-hop TX ba�ar�l� (Private RPC): {}", "?".green(), hash.green().bold());
+                    println!("  {} Multi-hop TX successful (Private RPC): {}", "?".green(), hash.green().bold());
                 }
                 Err(e) => {
-                    println!("  {} Multi-hop TX hatas�: {}", "?".red(), format!("{}", e).red());
+                    println!("  {} Multi-hop TX error: {}", "?".red(), format!("{}", e).red());
                 }
             }
         });
@@ -1658,7 +1664,7 @@ mod gas_spike_tests {
         // Not: Her ikisi de None olabilir (spread �ok dar) ama bu bile kabul
         // edilir � �nemli olan spike'�n None d�nd�rmesi.
         eprintln!(
-            "Gas spike test sonu�lar�: normal={:?}, spike={:?}, high_gas={:?}, low_gas={:?}",
+            "Gas spike test results: normal={:?}, spike={:?}, high_gas={:?}, low_gas={:?}",
             result_normal.as_ref().map(|r| r.expected_profit_weth),
             result_spike.as_ref().map(|r| r.expected_profit_weth),
             result_high_gas.as_ref().map(|r| r.expected_profit_weth),

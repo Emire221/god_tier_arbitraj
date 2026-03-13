@@ -62,3 +62,9 @@ hex = "0.4"
 [dev-dependencies]
 # ── Property-Based Testing (Çökme Testi) ──
 proptest = "1.4"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

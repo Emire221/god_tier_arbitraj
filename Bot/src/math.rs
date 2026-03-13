@@ -216,7 +216,7 @@ pub fn compute_eth_price(
         let deviation = ((price_from_sqrt - price_from_tick) / price_from_tick).abs();
         if deviation > 0.01 {
             eprintln!(
-                "  ⚠️ Fiyat sapması: sqrtPrice={:.2}$, tick={:.2}$ (sapma: {:.2}%)",
+                "  ⚠️ Price deviation: sqrtPrice={:.2}$, tick={:.2}$ (deviation: {:.2}%)",
                 price_from_sqrt, price_from_tick, deviation * 100.0
             );
             return price_from_tick;
@@ -227,6 +227,7 @@ pub fn compute_eth_price(
 }
 
 /// Bu sayede off-chain hesaplama, on-chain sonuçla wei bazında eşleşir.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_arbitrage_profit_with_bitmap(
     amount_in_weth: f64,
     sell_pool: &PoolState,
@@ -318,6 +319,7 @@ pub fn compute_arbitrage_profit_with_bitmap(
 // Newton-Raphson Türev Hesaplayıcı
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn profit_derivative(
     amount_in_weth: f64,
     sell_pool: &PoolState,
@@ -356,6 +358,7 @@ fn profit_derivative(
     (f_plus - f_minus) / (2.0 * h)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn profit_second_derivative(
     amount_in_weth: f64,
     sell_pool: &PoolState,
@@ -409,6 +412,7 @@ pub struct OptimalAmountResult {
 
 /// Newton-Raphson ile optimal flash loan miktarını bul.
 ///        Her havuzun kendi token0_is_weth değeri bağımsız kullanılır.
+#[allow(clippy::too_many_arguments)]
 pub fn find_optimal_amount_with_bitmap(
     sell_pool: &PoolState,
     sell_fee: f64,
@@ -1588,8 +1592,8 @@ pub mod exact {
         }
     }
 
-    /// İki havuz arasında exact arbitraj kârı hesapla (U256, wei bazında)
-    ///
+    // İki havuz arasında exact arbitraj kârı hesapla (U256, wei bazında)
+    //
     // v23.0 (D-3): compute_exact_arbitrage_profit tamamen kaldırıldı.
     // Tek token0_is_weth parametresi çapraz-DEX'te hatalı sonuç veriyordu.
     // Yerine compute_exact_directional_profit kullanılır.
@@ -1608,6 +1612,7 @@ pub mod exact {
     ///
     /// # Dönüş
     /// Kâr U256 (owedToken cinsinden, wei). Kâr yoksa U256::ZERO.
+    #[allow(clippy::too_many_arguments)]
     pub fn compute_exact_directional_profit(
         // Pool A (UniV3 — flash swap kaynağı)
         pool_a_sqrt_price: U256,

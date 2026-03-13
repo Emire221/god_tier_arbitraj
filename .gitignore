@@ -1,2 +1,6 @@
 # Root .gitignore — tüm alt dizinleri kapsar
 *.keystore
+
+# Ignore local changelog and readme
+CHANGELOG_v25_session.md
+README.md

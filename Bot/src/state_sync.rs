@@ -269,7 +269,7 @@ pub async fn sync_pool_state<P: Provider + Sync>(
                 // RPC hatası (timeout değil) — yeniden deneme
                 if attempt < SYNC_MAX_RETRIES {
                     eprintln!(
-                        "  \u{26a1} [{}] Sync hatası (deneme {}/{}): {}",
+                        "  \u{26a1} [{}] Sync error (attempt {}/{}): {}",
                         pool_config.name, attempt + 1, SYNC_MAX_RETRIES + 1, e
                     );
                 }
@@ -279,7 +279,7 @@ pub async fn sync_pool_state<P: Provider + Sync>(
                 // Timeout — yeniden deneme
                 if attempt < SYNC_MAX_RETRIES {
                     eprintln!(
-                        "  \u{26a1} [{}] Sync timeout ({}ms, deneme {}/{})",
+                        "  \u{26a1} [{}] Sync timeout ({}ms, attempt {}/{})",
                         pool_config.name, SYNC_TIMEOUT_MS,
                         attempt + 1, SYNC_MAX_RETRIES + 1,
                     );
@@ -292,7 +292,7 @@ pub async fn sync_pool_state<P: Provider + Sync>(
         }
     }
 
-    Err(last_err.unwrap_or_else(|| eyre::eyre!("[{}] sync başarısız", pool_config.name)))
+    Err(last_err.unwrap_or_else(|| eyre::eyre!("[{}] sync failed", pool_config.name)))
 }
 
 /// sync_pool_state iç implementasyonu (timeout wrapper'sız)
@@ -314,9 +314,9 @@ async fn sync_pool_state_inner<P: Provider + Sync>(
                 fee_call.call(),
             );
             let slot0 = slot0_result
-                .map_err(|e| eyre::eyre!("[{}] slot0 okuma hatası (V3/7-alan/uint8): {}", pool_config.name, e))?;
+                .map_err(|e| eyre::eyre!("[{}] slot0 read error (V3/7-field/uint8): {}", pool_config.name, e))?;
             let liq = liq_result
-                .map_err(|e| eyre::eyre!("[{}] liquidity okuma hatası: {}", pool_config.name, e))?;
+                .map_err(|e| eyre::eyre!("[{}] liquidity read error: {}", pool_config.name, e))?;
             let fee_bps: Option<u32> = fee_result.ok().map(|f| {
                 let fee_u32: u32 = f.to();
                 fee_u32 / 100
@@ -335,12 +335,12 @@ async fn sync_pool_state_inner<P: Provider + Sync>(
             );
             let slot0 = slot0_result
                 .map_err(|e| eyre::eyre!(
-                    "[{}] slot0 okuma hatası (PCS-V3/7-alan/uint32): {}\n\
-                    → Havuz adresi doğru bir PancakeSwap V3 Pool mu? Kontrol edin: {}",
+                    "[{}] slot0 read error (PCS-V3/7-field/uint32): {}\n\
+                    → Is the pool address a valid PancakeSwap V3 Pool? Check: {}",
                     pool_config.name, e, pool_config.address
                 ))?;
             let liq = liq_result
-                .map_err(|e| eyre::eyre!("[{}] liquidity okuma hatası: {}", pool_config.name, e))?;
+                .map_err(|e| eyre::eyre!("[{}] liquidity read error: {}", pool_config.name, e))?;
             let fee_bps: Option<u32> = fee_result.ok().map(|f| {
                 let fee_u32: u32 = f.to();
                 fee_u32 / 100
@@ -359,12 +359,12 @@ async fn sync_pool_state_inner<P: Provider + Sync>(
             );
             let slot0 = slot0_result
                 .map_err(|e| eyre::eyre!(
-                    "[{}] slot0 okuma hatası (Aero/6-alan): {}\n\
-                    → Havuz adresi doğru bir Aerodrome CLPool mu? Kontrol edin: {}",
+                    "[{}] slot0 read error (Aero/6-field): {}\n\
+                    → Is the pool address a valid Aerodrome CLPool? Check: {}",
                     pool_config.name, e, pool_config.address
                 ))?;
             let liq = liq_result
-                .map_err(|e| eyre::eyre!("[{}] liquidity okuma hatası: {}", pool_config.name, e))?;
+                .map_err(|e| eyre::eyre!("[{}] liquidity read error: {}", pool_config.name, e))?;
             let fee_bps: Option<u32> = fee_result.ok().map(|f| {
                 let fee_u32: u32 = f.to();
                 fee_u32 / 100
@@ -524,22 +524,22 @@ pub async fn sync_all_pools_multicall<P: Provider + Sync>(
 
         let mut calls: Vec<IMulticall3::Call3> = Vec::with_capacity(chunk_size * 3);
 
-        for i in chunk_start..chunk_end {
+        for pool in pools.iter().take(chunk_end).skip(chunk_start) {
             // slot0
             calls.push(IMulticall3::Call3 {
-                target: pools[i].address,
+                target: pool.address,
                 allowFailure: true,
                 callData: Bytes::from(slot0_calldata.clone()),
             });
             // liquidity
             calls.push(IMulticall3::Call3 {
-                target: pools[i].address,
+                target: pool.address,
                 allowFailure: true,
                 callData: Bytes::from(liquidity_calldata.clone()),
             });
             // fee
             calls.push(IMulticall3::Call3 {
-                target: pools[i].address,
+                target: pool.address,
                 allowFailure: true,
                 callData: Bytes::from(fee_calldata.clone()),
             });
@@ -557,7 +557,7 @@ pub async fn sync_all_pools_multicall<P: Provider + Sync>(
                 for i in chunk_start..chunk_end {
                     states[i].write().is_stale = true;
                     results[i] = Err(eyre::eyre!(
-                        "[{}] Multicall3 toplu sync hatası: {}",
+                        "[{}] Multicall3 batch sync error: {}",
                         pools[i].name, e
                     ));
                 }
@@ -573,7 +573,7 @@ pub async fn sync_all_pools_multicall<P: Provider + Sync>(
                     ));
                 }
                 eprintln!(
-                    "  \u{26a0}\u{fe0f} [Multicall3] Chunk {}-{} timeout ({}ms) — {} havuz STALE olarak işaretlendi",
+                    "  \u{26a0}\u{fe0f} [Multicall3] Chunk {}-{} timeout ({}ms) — {} pools marked as STALE",
                     chunk_start, chunk_end, SYNC_TIMEOUT_MS, chunk_size,
                 );
                 continue;
@@ -583,7 +583,7 @@ pub async fn sync_all_pools_multicall<P: Provider + Sync>(
         let expected_results = chunk_size * 3;
         if mc_result.len() != expected_results {
             eprintln!(
-                "  ⚠️ [Multicall3] Beklenmeyen sonuç uzunluğu: expected={} got={} (chunk {}-{})",
+                "  ⚠️ [Multicall3] Unexpected result length: expected={} got={} (chunk {}-{})",
                 expected_results,
                 mc_result.len(),
                 chunk_start,
@@ -656,10 +656,10 @@ pub async fn sync_all_pools_multicall<P: Provider + Sync>(
                     results[pool_idx] = Ok(());
                 }
                 _ => {
-                    // Decode başarısız — havuzu STALE olarak işaretle
+                    // Decode failed — mark pool as STALE
                     states[pool_idx].write().is_stale = true;
                     results[pool_idx] = Err(eyre::eyre!(
-                        "[{}] Multicall3 slot0/liquidity decode başarısız (execution reverted?)",
+                        "[{}] Multicall3 slot0/liquidity decode failed (execution reverted?)",
                         pools[pool_idx].name
                     ));
                 }
@@ -719,14 +719,14 @@ pub async fn validate_pools<P: Provider + Sync>(
         Ok(Ok(res)) => res,
         Ok(Err(e)) => {
             eprintln!(
-                "  \u{274c} [PoolValidation] Multicall3 doğrulama hatası: {} — doğrulama atlanıyor",
+                "  \u{274c} [PoolValidation] Multicall3 validation error: {} — validation skipped",
                 e
             );
             return vec![];
         }
         Err(_) => {
             eprintln!(
-                "  \u{274c} [PoolValidation] Multicall3 doğrulama timeout (10s) — doğrulama atlanıyor"
+                "  \u{274c} [PoolValidation] Multicall3 validation timeout (10s) — validation skipped"
             );
             return vec![];
         }
@@ -735,12 +735,13 @@ pub async fn validate_pools<P: Provider + Sync>(
     let expected_results = pool_count * 2;
     if mc_results.len() != expected_results {
         eprintln!(
-            "  ⚠️ [PoolValidation] Beklenmeyen Multicall3 sonuç uzunluğu: expected={} got={}",
+            "  ⚠️ [PoolValidation] Unexpected Multicall3 result length: expected={} got={}",
             expected_results,
             mc_results.len(),
         );
     }
 
+    #[allow(clippy::needless_range_loop)]
     for i in 0..pool_count {
         let slot0_res = mc_results.get(i * 2);
         let liq_res = mc_results.get(i * 2 + 1);
@@ -768,11 +769,11 @@ pub async fn validate_pools<P: Provider + Sync>(
         if !slot0_valid || !liq_valid {
             invalid_indices.push(i);
             eprintln!(
-                "  \u{274c} [PoolValidation] {} ({}) — GEÇERSİZ (slot0={}, liquidity={}) → listeden çıkarılacak",
+                "  \u{274c} [PoolValidation] {} ({}) — INVALID (slot0={}, liquidity={}) → will be removed",
                 pools[i].name,
                 pools[i].address,
-                if slot0_valid { "OK" } else { "HATA" },
-                if liq_valid { "OK" } else { "HATA" },
+                if slot0_valid { "OK" } else { "FAIL" },
+                if liq_valid { "OK" } else { "FAIL" },
             );
         }
     }
@@ -861,7 +862,7 @@ pub async fn sync_tick_bitmap<P: Provider + Sync>(
         let calls: Vec<IMulticall3::Call3> = word_positions
             .iter()
             .map(|&word_pos| {
-                let calldata = encode_tick_bitmap_call(pool_config.dex.clone(), word_pos);
+                let calldata = encode_tick_bitmap_call(pool_config.dex, word_pos);
                 IMulticall3::Call3 {
                     target: pool_config.address,
                     allowFailure: true,
@@ -876,7 +877,7 @@ pub async fn sync_tick_bitmap<P: Provider + Sync>(
             .aggregate3(calls)
             .call()
             .await
-            .map_err(|e| eyre::eyre!("[{}] Multicall3 tickBitmap hatası: {}", pool_config.name, e))?;
+            .map_err(|e| eyre::eyre!("[{}] Multicall3 tickBitmap error: {}", pool_config.name, e))?;
 
         // Sonuçları çözümle
         for (i, result) in results.iter().enumerate() {
@@ -905,7 +906,7 @@ pub async fn sync_tick_bitmap<P: Provider + Sync>(
             .iter()
             .map(|&tick| {
                 let tick_i24 = tick.clamp(-887272, 887272);
-                let calldata = encode_ticks_call(pool_config.dex.clone(), tick_i24);
+                let calldata = encode_ticks_call(pool_config.dex, tick_i24);
                 IMulticall3::Call3 {
                     target: pool_config.address,
                     allowFailure: true,
@@ -919,7 +920,7 @@ pub async fn sync_tick_bitmap<P: Provider + Sync>(
             .aggregate3(tick_calls)
             .call()
             .await
-            .map_err(|e| eyre::eyre!("[{}] Multicall3 ticks hatası: {}", pool_config.name, e))?;
+            .map_err(|e| eyre::eyre!("[{}] Multicall3 ticks error: {}", pool_config.name, e))?;
 
         // Sonuçları çözümle
         for (i, result) in tick_results.iter().enumerate() {
@@ -965,7 +966,7 @@ pub async fn cache_pool_bytecode<P: Provider + Sync>(
     let code = provider
         .get_code_at(pool_config.address)
         .await
-        .map_err(|e| eyre::eyre!("[{}] Bytecode okuma hatası: {}", pool_config.name, e))?;
+        .map_err(|e| eyre::eyre!("[{}] Bytecode read error: {}", pool_config.name, e))?;
 
     let mut state = pool_state.write();
     state.bytecode = Some(code.to_vec());
@@ -1023,7 +1024,7 @@ pub async fn sync_all_pools<P: Provider + Sync>(
                     Ok(Err(e)) => {
                         if attempt < FALLBACK_MAX_RETRIES {
                             eprintln!(
-                                "     \u{26a1} [{}] Fallback sync hatası ({}/{}): {}",
+                                "     \u{26a1} [{}] Fallback sync error ({}/{}): {}",
                                 config.name, attempt + 1, FALLBACK_MAX_RETRIES + 1, e,
                             );
                         }
@@ -1046,7 +1047,7 @@ pub async fn sync_all_pools<P: Provider + Sync>(
                 let staleness = state.read().staleness_ms();
                 state.write().is_stale = true;
                 eprintln!(
-                    "     \u{1f6a8} [{}] Sync tamamen başarısız — STALE olarak işaretlendi (veri yaşı: {}ms)",
+                    "     \u{1f6a8} [{}] Sync completely failed — marked as STALE (data age: {}ms)",
                     config.name, staleness,
                 );
             }
@@ -1085,7 +1086,7 @@ pub async fn sync_all_tick_bitmaps<P: Provider + Sync>(
                     Ok(result) => result,
                     Err(_) => {
                         eprintln!(
-                            "     ⚠️ [TickBitmap] {} sync timeout ({}ms) — eski veri korunuyor",
+                            "     ⚠️ [TickBitmap] {} sync timeout ({}ms) — keeping existing data",
                             name, BITMAP_TIMEOUT_MS,
                         );
                         Err(eyre::eyre!("[{}] TickBitmap timeout ({}ms)", name, BITMAP_TIMEOUT_MS))
@@ -1141,13 +1142,13 @@ pub async fn estimate_l1_data_fee<P: Provider + Sync>(
             let cached = CACHED_L1_FEE.load(Ordering::Relaxed);
             if cached > 0 {
                 eprintln!(
-                    "  ⚠️ [L1 Fee] GasPriceOracle sorgusu {}ms'de zaman aşımına uğradı — önbellek kullanılıyor ({} wei)",
+                    "  ⚠️ [L1 Fee] GasPriceOracle query timed out ({}ms) — using cache ({} wei)",
                     L1_FEE_TIMEOUT_MS, cached,
                 );
                 cached as u128
             } else {
                 eprintln!(
-                    "  ⚠️ [L1 Fee] GasPriceOracle sorgusu {}ms'de zaman aşımına uğradı — konservatif fallback kullanılıyor",
+                    "  ⚠️ [L1 Fee] GasPriceOracle query timed out ({}ms) — using conservative fallback",
                     L1_FEE_TIMEOUT_MS,
                 );
                 FALLBACK_FEE_WEI
@@ -1184,7 +1185,7 @@ async fn estimate_l1_data_fee_inner<P: Provider + Sync>(
                 // Konservatif fallback kullan ve uyar.
                 if fee_u128 == 0 {
                     eprintln!(
-                        "  ⚠️ [L1 Fee] GasPriceOracle.getL1Fee() = 0 döndü — oracle veri beslemesi hatalı olabilir, konservatif fallback kullanılıyor",
+                        "  ⚠️ [L1 Fee] GasPriceOracle.getL1Fee() returned 0 — oracle data feed may be faulty, using conservative fallback",
                     );
                     FALLBACK_FEE_WEI
                 } else {
@@ -1194,7 +1195,7 @@ async fn estimate_l1_data_fee_inner<P: Provider + Sync>(
         }
         Err(e) => {
             eprintln!(
-                "  ⚠️ L1 data fee tahmini başarısız (fallback: konservatif tahmin): {}",
+                "  ⚠️ L1 data fee estimation failed (fallback: conservative estimate): {}",
                 e
             );
             FALLBACK_FEE_WEI
@@ -1362,9 +1363,9 @@ pub async fn optimistic_refresh_pool<P: Provider + Sync>(
                 liq_call.call(),
             );
             let slot0 = slot0_result
-                .map_err(|e| eyre::eyre!("[OPT:{}] slot0 okuma hatası (V3/uint8): {}", pool_config.name, e))?;
+                .map_err(|e| eyre::eyre!("[OPT:{}] slot0 read error (V3/uint8): {}", pool_config.name, e))?;
             let liq = liq_result
-                .map_err(|e| eyre::eyre!("[OPT:{}] liquidity okuma hatası: {}", pool_config.name, e))?;
+                .map_err(|e| eyre::eyre!("[OPT:{}] liquidity read error: {}", pool_config.name, e))?;
             (slot0.sqrtPriceX96, slot0.tick.as_i32(), liq)
         }
         DexType::PancakeSwapV3 => {
@@ -1376,9 +1377,9 @@ pub async fn optimistic_refresh_pool<P: Provider + Sync>(
                 liq_call.call(),
             );
             let slot0 = slot0_result
-                .map_err(|e| eyre::eyre!("[OPT:{}] slot0 okuma hatası (PCS-V3/uint32): {}", pool_config.name, e))?;
+                .map_err(|e| eyre::eyre!("[OPT:{}] slot0 read error (PCS-V3/uint32): {}", pool_config.name, e))?;
             let liq = liq_result
-                .map_err(|e| eyre::eyre!("[OPT:{}] liquidity okuma hatası: {}", pool_config.name, e))?;
+                .map_err(|e| eyre::eyre!("[OPT:{}] liquidity read error: {}", pool_config.name, e))?;
             (slot0.sqrtPriceX96, slot0.tick.as_i32(), liq)
         }
         DexType::Aerodrome => {
@@ -1390,9 +1391,9 @@ pub async fn optimistic_refresh_pool<P: Provider + Sync>(
                 liq_call.call(),
             );
             let slot0 = slot0_result
-                .map_err(|e| eyre::eyre!("[OPT:{}] slot0 okuma hatası (Aero/6-alan): {}", pool_config.name, e))?;
+                .map_err(|e| eyre::eyre!("[OPT:{}] slot0 read error (Aero/6-field): {}", pool_config.name, e))?;
             let liq = liq_result
-                .map_err(|e| eyre::eyre!("[OPT:{}] liquidity okuma hatası: {}", pool_config.name, e))?;
+                .map_err(|e| eyre::eyre!("[OPT:{}] liquidity read error: {}", pool_config.name, e))?;
             (slot0.sqrtPriceX96, slot0.tick.as_i32(), liq)
         }
     };
@@ -1576,12 +1577,11 @@ pub async fn start_swap_event_listener<P: Provider + Sync>(
 
     // Log subscription başlat
     let sub = provider.subscribe_logs(&filter).await
-        .map_err(|e| eyre::eyre!("Swap event abonelik hatası: {}", e))?;
+        .map_err(|e| eyre::eyre!("Swap event subscription error: {}", e))?;
     let mut stream = sub.into_stream();
 
     println!(
-        "  {} Event-driven Swap dinleyici aktif ({} havuz)",
-        "âš¡", pools.len()
+        "  \u{26a1} Event-driven Swap listener active ({} pools)", pools.len()
     );
 
     while let Some(log) = stream.next().await {
@@ -1606,7 +1606,7 @@ pub async fn start_swap_event_listener<P: Provider + Sync>(
                 if let Some(idx) = pools.iter().position(|p| p.address == log_address) {
                     let state = states[idx].read();
                     eprintln!(
-                        "     ⚡ [Event] {} → {:.2}$ | Tick: {} | Blok: #{}",
+                        "     ⚡ [Event] {} → {:.2}$ | Tick: {} | Block: #{}",
                         pools[idx].name,
                         state.eth_price_usd,
                         state.tick,
@@ -1616,12 +1616,12 @@ pub async fn start_swap_event_listener<P: Provider + Sync>(
             }
             Ok(false) => {} // Güncelleme gerekmedi
             Err(e) => {
-                eprintln!("     ⚠️ [Event] Swap log işleme hatası: {}", e);
+                eprintln!("     ⚠️ [Event] Swap log processing error: {}", e);
             }
         }
     }
 
-    Err(eyre::eyre!("Swap event stream kapandı"))
+    Err(eyre::eyre!("Swap event stream closed"))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

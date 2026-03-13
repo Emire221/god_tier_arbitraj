@@ -99,10 +99,10 @@ impl RpcPool {
                 Ok(provider) => {
                     *self.ipc_provider.write() = Some(provider);
                     self.ipc_healthy.store(true, Ordering::Release);
-                    eprintln!("  ✅ IPC bağlantı kuruldu: {}", ipc_path);
+                    eprintln!("  ✅ IPC connection established: {}", ipc_path);
                 }
                 Err(e) => {
-                    eprintln!("  ⚠️  IPC bağlantı başarısız (WSS fallback aktif): {}", e);
+                    eprintln!("  ⚠️  IPC connection failed (WSS fallback active): {}", e);
                 }
             }
         }
@@ -112,14 +112,14 @@ impl RpcPool {
             match Self::try_connect_ws(&node.url).await {
                 Ok(provider) => {
                     node.healthy.store(true, Ordering::Release);
-                    eprintln!("  ✅ WSS bağlantı kuruldu: {}", &node.url[..node.url.len().min(40)]);
+                    eprintln!("  ✅ WSS connection established: {}", &node.url[..node.url.len().min(40)]);
 
                     // v22.0: Provider'ı cache'e al — get_provider her seferinde
                     // yeni bağlantı açmak yerine cache'den klonlar
                     *node.provider.write() = Some(provider);
                 }
                 Err(e) => {
-                    eprintln!("  ⚠️  WSS bağlantı başarısız: {} — {}", &node.url[..node.url.len().min(40)], e);
+                    eprintln!("  ⚠️  WSS connection failed: {} — {}", &node.url[..node.url.len().min(40)], e);
                 }
             }
         }
@@ -129,7 +129,7 @@ impl RpcPool {
         let has_ws = self.ws_nodes.iter().any(|n| n.healthy.load(Ordering::Acquire));
 
         if !has_ipc && !has_ws {
-            return Err(eyre::eyre!("Hiçbir RPC endpoint'e bağlanılamadı!"));
+            return Err(eyre::eyre!("Could not connect to any RPC endpoint!"));
         }
 
         Ok(())
@@ -149,7 +149,7 @@ impl RpcPool {
         // 2. WSS Round-Robin
         let node_count = self.ws_nodes.len();
         if node_count == 0 {
-            return Err(eyre::eyre!("WSS node listesi boş!"));
+            return Err(eyre::eyre!("WSS node list empty!"));
         }
 
         // Sağlıklı node bul (en fazla node_count deneme)
@@ -179,13 +179,13 @@ impl RpcPool {
                 }
                 Err(e) => {
                     node.healthy.store(false, Ordering::Release);
-                    eprintln!("  ⚠️  WSS node {} bağlantı kaybı: {}", idx, e);
+                    eprintln!("  ⚠️  WSS node {} connection lost: {}", idx, e);
                     continue;
                 }
             }
         }
 
-        Err(eyre::eyre!("Tüm RPC node'ları devre dışı — sağlık kontrolü bekleniyor"))
+        Err(eyre::eyre!("All RPC nodes disabled — waiting for health check"))
     }
 
     /// Arka plan sağlık kontrolü task'ı başlat.
@@ -242,7 +242,7 @@ impl RpcPool {
                                 if !node.healthy.load(Ordering::Acquire) {
                                     node.healthy.store(true, Ordering::Release);
                                     eprintln!(
-                                        "  🔄 WSS node #{} tekrar sağlıklı (blok #{})",
+                                        "  🔄 WSS node #{} healthy again (blok #{})",
                                         idx, bn
                                     );
                                 }
@@ -265,7 +265,7 @@ impl RpcPool {
                                         *node.provider.write() = Some(provider);
                                         node.healthy.store(true, Ordering::Release);
                                         eprintln!(
-                                            "  🔄 WSS node #{} yeniden bağlandı (blok #{})",
+                                            "  🔄 WSS node #{} reconnected (blok #{})",
                                             idx, bn
                                         );
                                     }
@@ -292,7 +292,7 @@ impl RpcPool {
                             if node.healthy.load(Ordering::Acquire) {
                                 node.healthy.store(false, Ordering::Release);
                                 eprintln!(
-                                    "  ⚠️  WSS node #{} geride kaldı (blok #{} vs max #{}) — geçici devre dışı",
+                                    "  ⚠️  WSS node #{} fell behind (blok #{} vs max #{}) — temporarily disabled",
                                     idx, bn, max_block
                                 );
                             }
@@ -319,50 +319,47 @@ impl RpcPool {
         // 1. Gerçek IPC soketi dene (Unix: /path/to/geth.ipc, Windows: \\.\pipe\geth.ipc)
         if std::path::Path::new(ipc_path).exists() {
             eprintln!(
-                "  ℹ️  IPC soket dosyası bulundu: {} — doğrudan IPC bağlantısı deneniyor",
+                "  ℹ️  IPC socket file found: {} — trying direct IPC connection",
                 ipc_path
             );
-            match alloy::providers::IpcConnect::new(ipc_path.to_string()) {
-                ipc_connect => {
-                    match ProviderBuilder::default()
-                        .connect_ipc(ipc_connect)
-                        .await
-                    {
-                        Ok(provider) => {
-                            let _block = provider.get_block_number().await
-                                .map_err(|e| eyre::eyre!("IPC sağlık kontrolü başarısız: {}", e))?;
-                            eprintln!("  ✅ Gerçek IPC bağlantı başarılı: {}", ipc_path);
-                            return Ok(provider);
-                        }
-                        Err(e) => {
-                            eprintln!("  ⚠️  Gerçek IPC bağlantı başarısız: {} — WSS fallback deneniyor", e);
-                        }
-                    }
+            let ipc_connect = alloy::providers::IpcConnect::new(ipc_path.to_string());
+            match ProviderBuilder::default()
+                .connect_ipc(ipc_connect)
+                .await
+            {
+                Ok(provider) => {
+                    let _block = provider.get_block_number().await
+                        .map_err(|e| eyre::eyre!("IPC health check failed: {}", e))?;
+                    eprintln!("  ✅ Real IPC connection successful: {}", ipc_path);
+                    return Ok(provider);
+                }
+                Err(e) => {
+                    eprintln!("  ⚠️  Real IPC connection failed: {} — trying WSS fallback", e);
                 }
             }
         }
 
         // 2. WSS fallback — ipc_path bir URL olabilir (wss://...)
         if ipc_path.starts_with("wss://") || ipc_path.starts_with("ws://") {
-            eprintln!("  ℹ️  IPC path URL formatında — WSS olarak bağlanılıyor: {}", ipc_path);
+            eprintln!("  ℹ️  IPC path in URL format — connecting as WSS: {}", ipc_path);
             let ws = WsConnect::new(ipc_path);
             let provider = ProviderBuilder::default()
                 .connect_ws(ws)
                 .await
-                .map_err(|e| eyre::eyre!("WSS bağlantı hatası ({}): {}", ipc_path, e))?;
+                .map_err(|e| eyre::eyre!("WSS connection error ({}): {}", ipc_path, e))?;
             let _block = provider.get_block_number().await
-                .map_err(|e| eyre::eyre!("WSS sağlık kontrolü başarısız: {}", e))?;
+                .map_err(|e| eyre::eyre!("WSS health check failed: {}", e))?;
             return Ok(provider);
         }
 
         // 3. HTTP fallback — ipc_path bir HTTP URL olabilir
         if ipc_path.starts_with("http://") || ipc_path.starts_with("https://") {
-            eprintln!("  ℹ️  IPC path HTTP formatında — HTTP provider kullanılamaz (PubSub gerekli)");
+            eprintln!("  ℹ️  IPC path in HTTP format — HTTP provider unusable (PubSub required)");
         }
 
         // 4. Son çare: IPC dosyası bulunamadı, local WSS dene
         eprintln!(
-            "  ⚠️  IPC soket '{}' bulunamadı — local WSS fallback deneniyor (ws://127.0.0.1:8546)",
+            "  ⚠️  IPC socket '{}' not found — trying local WSS fallback (ws://127.0.0.1:8546)",
             ipc_path
         );
         let ws_url = "ws://127.0.0.1:8546";
@@ -370,9 +367,9 @@ impl RpcPool {
         let provider = ProviderBuilder::default()
             .connect_ws(ws)
             .await
-            .map_err(|e| eyre::eyre!("Local WSS fallback hatası: {}", e))?;
+            .map_err(|e| eyre::eyre!("Local WSS fallback error: {}", e))?;
         let _block = provider.get_block_number().await
-            .map_err(|e| eyre::eyre!("Local WSS sağlık kontrolü başarısız: {}", e))?;
+            .map_err(|e| eyre::eyre!("Local WSS health check failed: {}", e))?;
 
         Ok(provider)
     }
@@ -383,7 +380,7 @@ impl RpcPool {
         let provider = ProviderBuilder::default()
             .connect_ws(ws)
             .await
-            .map_err(|e| eyre::eyre!("WSS bağlantı hatası ({}): {}", &url[..url.len().min(40)], e))?;
+            .map_err(|e| eyre::eyre!("WSS connection error ({}): {}", &url[..url.len().min(40)], e))?;
 
         Ok(provider)
     }
@@ -412,6 +409,6 @@ impl RpcPool {
             .count();
         let ws_total = self.ws_nodes.len();
 
-        format!("{} | WSS {}/{} aktif", ipc_status, ws_healthy, ws_total)
+        format!("{} | WSS {}/{} active", ipc_status, ws_healthy, ws_total)
     }
 }

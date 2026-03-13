@@ -1,10 +1,8 @@
 # Rust build çıktıları
 /target
 
-# Gizli anahtarlar ve yapılandırma
-.env
-.env.*
-*.keystore
+/CHANGELOG_v25_session.md
+/README.md  
 
 # IDE
 .vscode/

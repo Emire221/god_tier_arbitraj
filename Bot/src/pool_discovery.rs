@@ -46,8 +46,9 @@ const CORE_POOLS_PATH: &str = "core_pools.json";
 /// slot0() fonksiyon seçicisi (4 byte): keccak256("slot0()")[0..4]
 const SLOT0_SELECTOR: [u8; 4] = [0x38, 0x50, 0xc7, 0xbd];
 
-/// On-Chain doğrulama için eth_call timeout (saniye)
-const ONCHAIN_CALL_TIMEOUT_SECS: u64 = 2;
+/// On-Chain doğrulama için eth_call timeout (milisaniye)
+/// v29.0: 2000ms → 500ms. Bayat veri beklemek yerine hızlı başarısızlık.
+const ONCHAIN_CALL_TIMEOUT_MS: u64 = 500;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DexScreener API Yanıt Yapıları
@@ -641,7 +642,7 @@ pub async fn on_chain_validate(candidates: Vec<DiscoveredPool>) -> Vec<Discovere
         async move {
             // Her future kendi HTTP client'ını oluşturur (bağımsız timeout)
             let client = match reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(ONCHAIN_CALL_TIMEOUT_SECS))
+                .timeout(std::time::Duration::from_millis(ONCHAIN_CALL_TIMEOUT_MS))
                 .build()
             {
                 Ok(c) => c,

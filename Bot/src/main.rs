@@ -1116,6 +1116,11 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     // Sonraki bloklarda REVM'den dönen kesin gas ile dinamik maliyet hesaplanır
     let mut last_simulated_gas: Option<u64> = None;
 
+    // v29.0: Hot-Reload arka plan görevi handle'ı
+    // Yeni havuz keşfi → bytecode + state sync işlemleri arka planda çalışır,
+    // ana ticaret döngüsünü BLOKLAMAZ. Tamamlandığında REVM base_db rebuild edilir.
+    let mut hot_reload_task: Option<tokio::task::JoinHandle<()>> = None;
+
     // ══════════════ ANA DÖNGÜ — BLOK BAZLI + WSS HEARTBEAT ══════════════
     // v10.1: WSS bağlantı sağlığı kontrolü (Heartbeat)
     // 15 saniye içinde yeni blok gelmezse bağlantı kopmuş sayılır
@@ -1237,69 +1242,82 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         stats.total_blocks_processed += 1;
 
         // ── 1.4. KEŞİF MOTORU: HOT-RELOAD + GC + SKORLAMA ─────
+
+        // v29.0: Önceki arka plan hot-reload tamamlandı mı kontrol et
+        // Tamamlandıysa REVM base_db'yi yeniden oluştur (yeni havuz bytecode'ları dahil)
+        if let Some(ref handle) = hot_reload_task {
+            if handle.is_finished() {
+                let handle = hot_reload_task.take().unwrap();
+                if let Ok(()) = handle.await {
+                    sim_engine.cache_bytecodes(pools, &states);
+                    let reload_caller = executor_address.unwrap_or_default();
+                    let reload_contract = config.contract_address.unwrap_or_default();
+                    sim_engine.initialize_base_db(pools, &states, reload_caller, reload_contract);
+                    eprintln!(
+                        "  🔧 [Hot-Reload BG] REVM base_db rebuilt ({} pools)", pools.len(),
+                    );
+                }
+            }
+        }
+
         // [Adım 3] Bekleyen havuzları canlı sisteme enjekte et
         let hot_reload_count = discovery_engine::apply_pending_updates(
             &discovery_registry, pools, &mut states, pair_combos,
         );
         if hot_reload_count > 0 {
-            // v27.0: Yeni havuzların state'ini PARALEL senkronize et
-            // Eski: Sıralı for döngüsü → N havuz × 3 RTT = 3N RTT gecikme
-            // Yeni: join_all ile paralel → ~3 RTT (havuz sayısından bağımsız)
+            // v29.0: Bytecode + State sync + TickBitmap sync ARKA PLANDA çalışır
+            // Ana ticaret döngüsü BLOKLANMAZ — keşif sırasında fiyat okumaya devam eder.
+            // Yeni havuzlar sync tamamlanana kadar STALE kalır → arb pipeline atlar.
             let new_start = pools.len() - hot_reload_count;
+            let bg_provider = provider.clone();
+            let bg_pools: Vec<PoolConfig> = pools[new_start..].to_vec();
+            let bg_states: Vec<SharedPoolState> = states[new_start..].to_vec();
+            let bg_bitmap_range = config.tick_bitmap_range;
+            let bg_block = block_number;
 
-            // Adım 1: Bytecode al (paralel)
-            let bytecode_futs: Vec<_> = (new_start..pools.len())
-                .map(|i| {
-                    let provider = &provider;
-                    let addr = pools[i].address;
-                    async move {
-                        (i, provider.get_code_at(addr).await)
-                    }
-                })
-                .collect();
-            let bytecode_results = join_all(bytecode_futs).await;
-            for (i, result) in bytecode_results {
-                if let Ok(code) = result {
-                    if !code.is_empty() {
-                        states[i].write().bytecode = Some(code.to_vec());
+            hot_reload_task = Some(tokio::spawn(async move {
+                // Adım 1: Bytecode al (paralel)
+                let bytecode_futs: Vec<_> = bg_pools.iter().enumerate()
+                    .map(|(i, pool)| {
+                        let provider = &bg_provider;
+                        let addr = pool.address;
+                        async move { (i, provider.get_code_at(addr).await) }
+                    })
+                    .collect();
+                let bytecode_results = join_all(bytecode_futs).await;
+                for (i, result) in bytecode_results {
+                    if let Ok(code) = result {
+                        if !code.is_empty() {
+                            bg_states[i].write().bytecode = Some(code.to_vec());
+                        }
                     }
                 }
-            }
 
-            // Adım 2: State sync + TickBitmap sync (paralel)
-            let sync_futs: Vec<_> = (new_start..pools.len())
-                .map(|i| {
-                    let provider = &provider;
-                    let pool_cfg = &pools[i];
-                    let pool_state = &states[i];
-                    let bitmap_range = config.tick_bitmap_range;
-                    async move {
-                        if let Err(e) = crate::state_sync::sync_pool_state(
-                            provider, pool_cfg, pool_state, block_number,
-                        ).await {
-                            eprintln!("  ⚠️ [Hot-Reload] {} state sync failed: {}", pool_cfg.name, e);
+                // Adım 2: State sync + TickBitmap sync (paralel)
+                let sync_futs: Vec<_> = bg_pools.iter().enumerate()
+                    .map(|(i, pool_cfg)| {
+                        let provider = &bg_provider;
+                        let pool_state = &bg_states[i];
+                        let bitmap_range = bg_bitmap_range;
+                        async move {
+                            if let Err(e) = crate::state_sync::sync_pool_state(
+                                provider, pool_cfg, pool_state, bg_block,
+                            ).await {
+                                eprintln!("  ⚠️ [Hot-Reload BG] {} state sync failed: {}", pool_cfg.name, e);
+                            }
+                            if let Err(e) = crate::state_sync::sync_tick_bitmap(
+                                provider, pool_cfg, pool_state, bg_block, bitmap_range,
+                            ).await {
+                                eprintln!("  ⚠️ [Hot-Reload BG] {} bitmap sync failed: {}", pool_cfg.name, e);
+                            }
                         }
-                        if let Err(e) = crate::state_sync::sync_tick_bitmap(
-                            provider, pool_cfg, pool_state, block_number,
-                            bitmap_range,
-                        ).await {
-                            eprintln!("  ⚠️ [Hot-Reload] {} bitmap sync failed: {}", pool_cfg.name, e);
-                        }
-                    }
-                })
-                .collect();
-            join_all(sync_futs).await;
-            // v25.0: REVM bytecode cache güncelle (append-only, eski havuzlar korunur)
-            sim_engine.cache_bytecodes(&pools[new_start..], &states[new_start..]);
-            // v25.0: base_db'yi TÜM havuzlarla yeniden oluştur — yeni havuz bytecode'ları
-            // base_db'de yoksa build_db_from_base klon'u eksik kalır → REVM simülasyonu
-            // yeni havuzlarda boş bytecode ile çalışır ve hatalı sonuç verir.
-            let reload_caller = executor_address.unwrap_or_default();
-            let reload_contract = config.contract_address.unwrap_or_default();
-            sim_engine.initialize_base_db(pools, &states, reload_caller, reload_contract);
-            eprintln!(
-                "  🔧 [Hot-Reload] REVM base_db rebuilt ({} pools)", pools.len(),
-            );
+                    })
+                    .collect();
+                join_all(sync_futs).await;
+                eprintln!(
+                    "  ✅ [Hot-Reload BG] {} new pools synced in background", bg_pools.len(),
+                );
+            }));
 
             // v25.0: Yeni havuzları on-chain pool whitelist'e ekle
             // executorBatchAddPools() ile executor key'i kullanarak whitelist güncellenir.

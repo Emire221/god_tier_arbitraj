@@ -995,7 +995,7 @@ pub async fn sync_all_pools<P: Provider + Sync>(
     let multicall_results = sync_all_pools_multicall(provider, pools, states, block_number).await;
 
     // Multicall3'te başarısız olan havuzlar için tekil fallback
-    const FALLBACK_TIMEOUT_MS: u64 = 2000;
+    const FALLBACK_TIMEOUT_MS: u64 = 500;
     const FALLBACK_MAX_RETRIES: u32 = 1;
 
     let mut final_results = multicall_results;
@@ -1063,9 +1063,8 @@ pub async fn sync_all_pools<P: Provider + Sync>(
 ///   2. Başlatılmış tick'lerin liquidityNet bilgisini okur
 ///   3. PoolState.tick_bitmap'e yazar
 ///
-/// v28.0: 1000ms → 2000ms. Multicall3 2 RPC çağrısı yapar,
-/// yoğun dönemlerde 1s yetmeyebilir. Timeout durumunda eski bitmap
-/// geçerliliği staleness kontrolü ile yönetilir.
+/// v29.0: 2000ms → 500ms. Bayat veri beklemek yerine hızlı başarısızlık.
+/// Multicall3 başarısız olduğunda tekil fallback 500ms ile hızlıca dener.
 pub async fn sync_all_tick_bitmaps<P: Provider + Sync>(
     provider: &P,
     pools: &[PoolConfig],
@@ -1073,7 +1072,7 @@ pub async fn sync_all_tick_bitmaps<P: Provider + Sync>(
     block_number: u64,
     scan_range: u32,
 ) -> Vec<Result<()>> {
-    const BITMAP_TIMEOUT_MS: u64 = 2000;
+    const BITMAP_TIMEOUT_MS: u64 = 500;
 
     let futures: Vec<_> = pools.iter().zip(states.iter())
         .map(|(config, state)| {

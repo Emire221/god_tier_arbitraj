@@ -298,9 +298,9 @@ impl MevExecutor {
         };
 
         // v20.0: Minimum mutlak kâr koruması
-        // Bribe sonrası kalan kâr en az 0.0001 WETH (~$0.25) olmalı.
+        // Bribe sonrası kalan kâr en az 0.000005 WETH olmalı.
         // Bu, L1 Data Fee dalgalanmasını karşılayacak statik güvenlik marjıdır.
-        let min_absolute_profit_weth: f64 = 0.0001;
+        let min_absolute_profit_weth: f64 = 0.000005;
         let max_bribe_weth = (expected_profit_weth - gas_cost_weth - min_absolute_profit_weth).max(0.0);
         let computed_bribe_weth = expected_profit_weth * effective_pct;
         let actual_bribe_weth = computed_bribe_weth.min(max_bribe_weth);

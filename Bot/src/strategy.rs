@@ -151,29 +151,28 @@ pub fn check_arbitrage_opportunity(
     let current_block = sell_state.last_block.max(buy_state.last_block);
     let bitmap_max_age = config.tick_bitmap_max_age_blocks;
 
+    let sell_bitmap_stale = sell_state.tick_bitmap.as_ref().is_some_and(|bm| {
+        current_block.saturating_sub(bm.snapshot_block) > bitmap_max_age
+    });
+    let buy_bitmap_stale = buy_state.tick_bitmap.as_ref().is_some_and(|bm| {
+        current_block.saturating_sub(bm.snapshot_block) > bitmap_max_age
+    });
+
+    // v30.0: Bitmap VARDI ama stale ise havuzu bu blok icin tamamen atla.
+    // Bitmap hic yoksa (None) single-tick fallback devam eder (yeni havuzlar).
+    if sell_bitmap_stale || buy_bitmap_stale {
+        eprintln!(
+            "     [TickBitmap] Stale bitmap detected -- skipping pool entirely this block (age_limit={})",
+            bitmap_max_age,
+        );
+        return None;
+    }
+
     let sell_bitmap = sell_state.tick_bitmap.as_ref().filter(|bm| {
-        let age = current_block.saturating_sub(bm.snapshot_block);
-        if age > bitmap_max_age {
-            eprintln!(
-                "     \u{26a0}\u{fe0f} [TickBitmap] Sell pool bitmap stale ({} blocks) — single-tick fallback",
-                age,
-            );
-            false
-        } else {
-            true
-        }
+        current_block.saturating_sub(bm.snapshot_block) <= bitmap_max_age
     });
     let buy_bitmap = buy_state.tick_bitmap.as_ref().filter(|bm| {
-        let age = current_block.saturating_sub(bm.snapshot_block);
-        if age > bitmap_max_age {
-            eprintln!(
-                "     \u{26a0}\u{fe0f} [TickBitmap] Buy pool bitmap stale ({} blocks) — single-tick fallback",
-                age,
-            );
-            false
-        } else {
-            true
-        }
+        current_block.saturating_sub(bm.snapshot_block) <= bitmap_max_age
     });
 
     // ��� v11.0: Hard Liquidity Cap � PreFilter + NR �ncesi Havuz Derinlik Kontrol� �
@@ -232,9 +231,9 @@ pub fn check_arbitrage_opportunity(
     let gas_estimate: u64 = last_simulated_gas.unwrap_or(200_000);
     let dynamic_gas_cost_weth = if block_base_fee > 0 {
         let l2 = (gas_estimate as f64 * block_base_fee as f64) / 1e18;
-        ((l2 + l1_data_fee_weth) * 1.10).max(0.00002)
+        ((l2 + l1_data_fee_weth) * 1.10).max(0.000001)
     } else {
-        ((config.gas_cost_fallback_weth + l1_data_fee_weth) * 1.10).max(0.00002)
+        ((config.gas_cost_fallback_weth + l1_data_fee_weth) * 1.10).max(0.000001)
     };
 
     // PreFilter
@@ -244,8 +243,7 @@ pub fn check_arbitrage_opportunity(
             fee_b: state_b.live_fee_bps.map(|b| b as f64 / 10_000.0).unwrap_or(pools[1].fee_fraction),
             estimated_gas_cost_weth: dynamic_gas_cost_weth,
             min_profit_weth: config.min_net_profit_weth,
-            flash_loan_fee_rate: config.flash_loan_fee_bps / 10_000.0,
-            bribe_pct: config.bribe_pct * 1.05,
+            bribe_pct: config.bribe_pct,
         };
 
         let probe_amount = f64::min(config.max_trade_size_weth * 0.5, effective_cap);
@@ -292,7 +290,6 @@ pub fn check_arbitrage_opportunity(
         buy_state,
         buy_fee,
         dynamic_gas_cost_quote,
-        config.flash_loan_fee_bps,
         avg_price_in_quote, // ger�ek fiyat � k�r quote cinsinden d�ner
         nr_max,
         pools[sell_idx].token0_is_weth,
@@ -324,12 +321,23 @@ pub fn check_arbitrage_opportunity(
     );
 
     // K�rl� de�ilse f�rsat� atla
-    if expected_profit_weth < config.min_net_profit_weth || nr_result.optimal_amount <= 0.0 {
+    // v30.0: Dinamik ROI + mutlak esik kontrolu
+    // Ya mutlak kar yeterli VEYA ROI yuzde esigini gecmeli.
+    // Ikisi de karsilanmiyorsa reddet.
+    let roi = if nr_result.optimal_amount > 0.0 {
+        expected_profit_weth / nr_result.optimal_amount
+    } else {
+        0.0
+    };
+    if nr_result.optimal_amount <= 0.0
+        || (expected_profit_weth < config.min_net_profit_weth && roi < config.min_profit_roi)
+    {
         eprintln!(
-            "     \u{23ed}\u{fe0f} [DEBUG] Opportunity unprofitable — NR profit ({:.8}) < threshold ({:.8}) or amount<=0 ({:.6})",
+            "     [ProfitGate] Unprofitable -- profit={:.8} WETH, roi={:.6}%, min_profit={:.8}, min_roi={:.4}%",
             expected_profit_weth,
+            roi * 100.0,
             config.min_net_profit_weth,
-            nr_result.optimal_amount,
+            config.min_profit_roi * 100.0,
         );
         return None;
     }
@@ -1156,9 +1164,9 @@ pub fn check_multi_hop_opportunities(
         let multi_hop_gas: u64 = 310_000 + (route.hop_count() as u64 - 2) * 130_000;
         let dynamic_gas_cost_weth = if block_base_fee > 0 {
             let l2 = (multi_hop_gas as f64 * block_base_fee as f64) / 1e18;
-            ((l2 + l1_data_fee_weth) * 1.10).max(0.00002)
+            ((l2 + l1_data_fee_weth) * 1.10).max(0.000001)
         } else {
-            ((config.gas_cost_fallback_weth + l1_data_fee_weth) * 1.10).max(0.00002)
+            ((config.gas_cost_fallback_weth + l1_data_fee_weth) * 1.10).max(0.000001)
         };
 
         // Ortalama ETH fiyat� (ilk havuzdan)
@@ -1171,7 +1179,6 @@ pub fn check_multi_hop_opportunities(
             &pool_configs,
             &directions,
             gas_cost_usd,
-            config.flash_loan_fee_bps,
             avg_price,
             config.max_trade_size_weth,
         );
@@ -1184,7 +1191,13 @@ pub fn check_multi_hop_opportunities(
         };
 
         // Minimum k�r e�i�i kontrol�
-        if expected_profit_weth < config.min_net_profit_weth || nr_result.optimal_amount <= 0.0 {
+        // v30.0: Dinamik ROI + mutlak esik kontrolu (multi-hop)
+        let mh_roi = if nr_result.optimal_amount > 0.0 {
+            expected_profit_weth / nr_result.optimal_amount
+        } else { 0.0 };
+        if nr_result.optimal_amount <= 0.0
+            || (expected_profit_weth < config.min_net_profit_weth && mh_roi < config.min_profit_roi)
+        {
             continue;
         }
 
@@ -1469,8 +1482,9 @@ mod gas_spike_tests {
             contract_address: None,
             weth_address: WETH_ADDR,
             gas_cost_fallback_weth: gas_cost_fallback,
-            flash_loan_fee_bps: 5.0,
+            flash_loan_fee_bps: 0.0,
             min_net_profit_weth: min_profit,
+            min_profit_roi: 0.0005,
             stats_interval: 100,
             max_retries: 0,
             initial_retry_delay_secs: 2,

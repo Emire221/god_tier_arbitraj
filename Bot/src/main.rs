@@ -51,7 +51,7 @@ use tokio_util::sync::CancellationToken;
 // ── OPT-4: L1 Data Fee arka plan cache'i ──
 // OP Stack'te L1 fee ~12 saniyede bir değişir (L1 blok süresi).
 // Her 2 saniyede (Base blok) RPC sorgusu yapmak yerine, arka planda 12s'de bir güncelle.
-static GLOBAL_L1_FEE: AtomicU64 = AtomicU64::new(500_000_000_000_000); // 0.0005 ETH fallback
+static GLOBAL_L1_FEE: AtomicU64 = AtomicU64::new(5_000_000_000_000); // 0.000005 ETH fallback (Base post-EIP-4844)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Terminal Çıktı Yardımcıları
@@ -127,7 +127,7 @@ fn print_banner(config: &BotConfig) {
     println!("  {} Calldata       : {}", "▸".cyan(), format!("134 byte compact (deadline: +{} block)", config.deadline_blocks).white());
     println!("  {} Bribe          : {}", "▸".cyan(), format!("Dynamic %{:.0} profit → priority fee", config.bribe_pct * 100.0).white());
     println!("  {} Key Mgmt       : {}", "▸".cyan(), if config.key_manager_active { "Encrypted Keystore (AES-256-GCM)".green().to_string() } else if config.private_key.is_some() { "Env Var (UNSAFE)".yellow().to_string() } else { "None".red().to_string() });
-    println!("  {} Flash Loan     : {}", "▸".cyan(), format!("Aave V3 ({:.2}% Fee)", config.flash_loan_fee_bps / 100.0).white());
+    println!("  {} Flash Loan     : {}", "▸".cyan(), "Direct Flash Swap (No External Fee)".white());
     println!("  {} Max Trade      : {}", "▸".cyan(), format!("{:.1} WETH", config.max_trade_size_weth).white());
     println!("  {} Min Net Profit : {}", "▸".cyan(), format!("{:.6} WETH", config.min_net_profit_weth).white());
     println!(
@@ -356,7 +356,7 @@ PRIVATE_RPC_URL=
 # ─── Cost and Strategy (in WETH) ───
 GAS_COST_FALLBACK_WETH=0.00005
 FLASH_LOAN_FEE_BPS=0.0
-MIN_NET_PROFIT_WETH=0.00003
+MIN_NET_PROFIT_WETH=0.000005
 MAX_TRADE_SIZE_WETH=5.0
 MAX_STALENESS_MS=3000
 STATS_INTERVAL=10
@@ -1019,44 +1019,39 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     // Swap eventi sqrtPriceX96, liquidity, tick bilgisini doğrudan içerir —
     // ek RPC çağrısı olmadan state güncellenir (zero-latency).
     //
-    // v25.0 SINIRLILIK: Pending TX dinleyicisi ile aynı kısıt — başlangıçtaki
-    // havuz listesiyle çalışır, hot-reload ile eklenen yeni havuzları kapsamaz.
-    // TODO: Havuz listesi değiştiğinde event listener'ı yeniden başlat.
+    // v30.0: Event listener CancellationToken -- hot-reload'da yeniden baslatilabilir.
+    // Child token kullanilir: parent cancel olunca child da cancel olur,
+    // ama child tek basina da cancel edilebilir (hot-reload icin).
+    let mut event_listener_cancel = cancel_token.child_token();
     {
         let pools_ev = pools.to_vec();
         let states_ev: Vec<SharedPoolState> = states.iter().map(Arc::clone).collect();
         let rpc_url_ev = config.rpc_wss_url.clone();
-        let token_ev = cancel_token.clone();
+        let token_ev = event_listener_cancel.clone();
 
         tokio::spawn(async move {
-            tokio::select! {
-                _ = token_ev.cancelled() => {
-                    eprintln!("  🔌 Swap event listener graceful shutdown (CancellationToken)");
-                }
-                _result = async {
-                    let ws = WsConnect::new(&rpc_url_ev);
-                    match ProviderBuilder::default().connect_ws(ws).await {
-                        Ok(ws_provider) => {
-                            match state_sync::start_pool_event_listener(
-                                &ws_provider,
-                                &pools_ev,
-                                &states_ev,
-                            ).await {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    eprintln!(
-                                        "  ⚠️ Swap event listener error (block-based flow continues): {}", e
-                                    );
-                                }
-                            }
-                        }
+            let ws = WsConnect::new(&rpc_url_ev);
+            match ProviderBuilder::default().connect_ws(ws).await {
+                Ok(ws_provider) => {
+                    match state_sync::start_pool_event_listener(
+                        &ws_provider,
+                        &pools_ev,
+                        &states_ev,
+                        token_ev,
+                    ).await {
+                        Ok(_) => {}
                         Err(e) => {
                             eprintln!(
-                                "  ⚠️ Swap event WS connection error: {}", e
+                                "  [EventListener] error (block-based flow continues): {}", e
                             );
                         }
                     }
-                } => {}
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  [EventListener] WS connection error: {}", e
+                    );
+                }
             }
         });
     }
@@ -1347,12 +1342,66 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                     }
                 }
             }
+
+            // v30.0: Event listener'i yeni havuz listesiyle yeniden baslat.
+            // Eski child token cancel edilir, yeni child token olusturulur.
+            event_listener_cancel.cancel();
+            event_listener_cancel = cancel_token.child_token();
+            {
+                let pools_ev = pools.to_vec();
+                let states_ev: Vec<SharedPoolState> = states.iter().map(Arc::clone).collect();
+                let rpc_url_ev = config.rpc_wss_url.clone();
+                let token_ev = event_listener_cancel.clone();
+
+                tokio::spawn(async move {
+                    let ws = WsConnect::new(&rpc_url_ev);
+                    match ProviderBuilder::default().connect_ws(ws).await {
+                        Ok(ws_provider) => {
+                            if let Err(e) = state_sync::start_pool_event_listener(
+                                &ws_provider, &pools_ev, &states_ev, token_ev,
+                            ).await {
+                                eprintln!("  [EventListener] Hot-reload restart error: {}", e);
+                            }
+                        }
+                        Err(e) => eprintln!("  [EventListener] Hot-reload WS error: {}", e),
+                    }
+                });
+                eprintln!(
+                    "  [Hot-Reload] Event listener restarted with {} pools", pools.len(),
+                );
+            }
         }
 
         // [Adım 4] Çöp Toplayıcı — soğuk havuzları temizle
         let _gc_deactivated = discovery_engine::run_garbage_collector(
             &discovery_registry, pools, &states, block_number, &discovery_config,
         );
+
+        // v30.0: [Adim 4b] Uyuyan havuz tarayici -- her 50 blokta bir
+        if block_number % 50 == 0 {
+            let reactivated = discovery_engine::scan_sleeping_pools_for_reactivation(
+                &discovery_registry, pools, &mut states, pair_combos, &provider,
+            ).await;
+            if reactivated > 0 {
+                // Yeniden aktiflesen havuzlar icin event listener'i guncelle
+                event_listener_cancel.cancel();
+                event_listener_cancel = cancel_token.child_token();
+                {
+                    let pools_ev = pools.to_vec();
+                    let states_ev: Vec<SharedPoolState> = states.iter().map(Arc::clone).collect();
+                    let rpc_url_ev = config.rpc_wss_url.clone();
+                    let token_ev = event_listener_cancel.clone();
+                    tokio::spawn(async move {
+                        let ws = WsConnect::new(&rpc_url_ev);
+                        if let Ok(ws_provider) = ProviderBuilder::default().connect_ws(ws).await {
+                            let _ = state_sync::start_pool_event_listener(
+                                &ws_provider, &pools_ev, &states_ev, token_ev,
+                            ).await;
+                        }
+                    });
+                }
+            }
+        }
 
         // [Adım 5] Skor güncelleme (her ~10 dakikada bir)
         discovery_engine::update_scores(

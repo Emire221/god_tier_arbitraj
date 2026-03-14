@@ -1132,7 +1132,7 @@ pub async fn estimate_l1_data_fee<P: Provider + Sync>(
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const L1_FEE_TIMEOUT_MS: u64 = 1000;
-    const FALLBACK_FEE_WEI: u128 = 500_000_000_000_000; // 0.0005 ETH
+    const FALLBACK_FEE_WEI: u128 = 5_000_000_000_000; // 0.000005 ETH (Base post-EIP-4844)
 
     // v28.0: Son başarılı L1 fee sonucunu önbelleğe al.
     // AtomicU64 kullanılır (u128'i 2 parçaya bölmedik çünkü L1 fee
@@ -1174,7 +1174,7 @@ pub async fn estimate_l1_data_fee<P: Provider + Sync>(
 async fn estimate_l1_data_fee_inner<P: Provider + Sync>(
     provider: &P,
 ) -> u128 {
-    const FALLBACK_FEE_WEI: u128 = 500_000_000_000_000; // 0.0005 ETH
+    const FALLBACK_FEE_WEI: u128 = 5_000_000_000_000; // 0.000005 ETH (Base post-EIP-4844)
     // OPT-G: Gercekci calldata pattern — 134 byte compact calldata.
     // Gercek calldata'da ~%35 zero byte bulunur (adres leading zeros,
     // kucuk amount'lar). 0xFF tumu non-zero → L1 fee'yi %20-30 abartir.
@@ -1718,6 +1718,7 @@ pub async fn start_pool_event_listener<P: Provider + Sync>(
     provider: &P,
     pools: &[PoolConfig],
     states: &[SharedPoolState],
+    cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     use alloy::rpc::types::Filter;
 
@@ -1736,62 +1737,72 @@ pub async fn start_pool_event_listener<P: Provider + Sync>(
     let mut stream = sub.into_stream();
 
     println!(
-        "  \u{26a1} Event-driven pool listener active ({} pools, Swap+Mint+Burn)", pools.len()
+        "  Event-driven pool listener active ({} pools, Swap+Mint+Burn)", pools.len()
     );
 
-    while let Some(log) = stream.next().await {
-        let log_address = log.inner.address;
-        let block_number = log.block_number.unwrap_or(0);
-        let log_data: &[u8] = log.inner.data.data.as_ref();
-        let topics = log.inner.data.topics();
-
-        if topics.is_empty() {
-            continue;
-        }
-
-        let topic0 = topics[0];
-
-        if topic0 == swap_topic {
-            match process_swap_event_log(log_data, log_address, block_number, pools, states) {
-                Ok(true) => {
-                    if let Some(idx) = pools.iter().position(|p| p.address == log_address) {
-                        let state = states[idx].load();
-                        eprintln!(
-                            "     \u{26a1} [Event] {} → {:.2}$ | Tick: {} | Block: #{}",
-                            pools[idx].name, state.eth_price_usd, state.tick, block_number,
-                        );
-                    }
-                }
-                Ok(false) => {}
-                Err(e) => eprintln!("     \u{26a0}\u{fe0f} [Event] Swap log error: {}", e),
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                eprintln!("  [EventListener] Restarting with updated pool list...");
+                return Ok(());
             }
-        } else if topic0 == mint_topic {
-            let b256_topics: Vec<alloy::primitives::B256> = topics.iter().copied().collect();
-            match process_mint_event_log(log_data, &b256_topics, log_address, block_number, pools, states) {
-                Ok(true) => {
-                    if let Some(idx) = pools.iter().position(|p| p.address == log_address) {
-                        eprintln!(
-                            "     \u{1f7e2} [Event] Mint @ {} | Block: #{}",
-                            pools[idx].name, block_number,
-                        );
+            log_opt = stream.next() => {
+                let log = match log_opt {
+                    Some(l) => l,
+                    None => break,
+                };
+                let log_address = log.inner.address;
+                let block_number = log.block_number.unwrap_or(0);
+                let log_data: &[u8] = log.inner.data.data.as_ref();
+                let topics = log.inner.data.topics();
+
+                if topics.is_empty() { continue; }
+
+                let topic0 = topics[0];
+
+                if topic0 == swap_topic {
+                    match process_swap_event_log(log_data, log_address, block_number, pools, states) {
+                        Ok(true) => {
+                            if let Some(idx) = pools.iter().position(|p| p.address == log_address) {
+                                let state = states[idx].load();
+                                eprintln!(
+                                    "     [Event] {} Swap -> {:.2}$ | Tick: {} | Block: #{}",
+                                    pools[idx].name, state.eth_price_usd, state.tick, block_number,
+                                );
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(e) => eprintln!("     [Event] Swap log error: {}", e),
+                    }
+                } else if topic0 == mint_topic {
+                    let b256_topics: Vec<alloy::primitives::B256> = topics.iter().copied().collect();
+                    match process_mint_event_log(log_data, &b256_topics, log_address, block_number, pools, states) {
+                        Ok(true) => {
+                            if let Some(idx) = pools.iter().position(|p| p.address == log_address) {
+                                eprintln!(
+                                    "     [Event] Mint @ {} | Block: #{}",
+                                    pools[idx].name, block_number,
+                                );
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(e) => eprintln!("     [Event] Mint log error: {}", e),
+                    }
+                } else if topic0 == burn_topic {
+                    let b256_topics: Vec<alloy::primitives::B256> = topics.iter().copied().collect();
+                    match process_burn_event_log(log_data, &b256_topics, log_address, block_number, pools, states) {
+                        Ok(true) => {
+                            if let Some(idx) = pools.iter().position(|p| p.address == log_address) {
+                                eprintln!(
+                                    "     [Event] Burn @ {} | Block: #{}",
+                                    pools[idx].name, block_number,
+                                );
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(e) => eprintln!("     [Event] Burn log error: {}", e),
                     }
                 }
-                Ok(false) => {}
-                Err(e) => eprintln!("     \u{26a0}\u{fe0f} [Event] Mint log error: {}", e),
-            }
-        } else if topic0 == burn_topic {
-            let b256_topics: Vec<alloy::primitives::B256> = topics.iter().copied().collect();
-            match process_burn_event_log(log_data, &b256_topics, log_address, block_number, pools, states) {
-                Ok(true) => {
-                    if let Some(idx) = pools.iter().position(|p| p.address == log_address) {
-                        eprintln!(
-                            "     \u{1f534} [Event] Burn @ {} | Block: #{}",
-                            pools[idx].name, block_number,
-                        );
-                    }
-                }
-                Ok(false) => {}
-                Err(e) => eprintln!("     \u{26a0}\u{fe0f} [Event] Burn log error: {}", e),
             }
         }
     }

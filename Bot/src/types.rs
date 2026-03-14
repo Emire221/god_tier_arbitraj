@@ -553,6 +553,9 @@ pub struct BotConfig {
     pub flash_loan_fee_bps: f64,
     /// Minimum net kâr eşiği (WETH cinsinden)
     pub min_net_profit_weth: f64,
+    /// v30.0: Minimum kâr ROI eşiği (ör: 0.0005 = %0.05)
+    /// İşlem hacminin bu yüzdesi kadar net kâr yoksa reddet.
+    pub min_profit_roi: f64,
     /// İstatistik gösterme aralığı (blok sayısı)
     pub stats_interval: u64,
     /// Maks yeniden bağlanma denemesi (0 = sınırsız)
@@ -661,10 +664,12 @@ impl BotConfig {
         let weth_address: Address = address!("4200000000000000000000000000000000000006");
 
         let gas_cost_fallback_weth = Self::parse_env_f64("GAS_COST_FALLBACK_WETH", 0.00005);
-        let flash_loan_fee_bps = Self::parse_env_f64("FLASH_LOAN_FEE_BPS", 5.0);
-        // v26.0: Default 0.001 → 0.00003 WETH (Base L2 micro-profit strategy)
+        let flash_loan_fee_bps = Self::parse_env_f64("FLASH_LOAN_FEE_BPS", 0.0);
+        // v26.0: Default 0.001 → 0.000005 WETH (Base L2 micro-profit strategy)
         // L2 gas is ~$0.01, collect frequent micro profits instead of rare large ones
-        let min_net_profit_weth = Self::parse_env_f64("MIN_NET_PROFIT_WETH", 0.00003);
+        let min_net_profit_weth = Self::parse_env_f64("MIN_NET_PROFIT_WETH", 0.000005);
+        // v30.0: Dinamik ROI esigi -- islem hacminin yuzde kaci kadar net kar gerekli
+        let min_profit_roi = Self::parse_env_f64("MIN_PROFIT_ROI", 0.0005); // %0.05
         // v28.0: Default 50.0 → 5.0 WETH. Base L2 havuz derinlikleri genelde
         // 0.05-2 WETH aralığındadır. Bot effective_cap ile sınırlar ama yüksek
         // default NR tarama aralığını şişirir ve hesaplama süresi harcar.
@@ -768,6 +773,7 @@ impl BotConfig {
             gas_cost_fallback_weth,
             flash_loan_fee_bps,
             min_net_profit_weth,
+            min_profit_roi,
             stats_interval,
             max_retries,
             initial_retry_delay_secs: 2,

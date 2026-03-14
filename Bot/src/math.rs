@@ -47,8 +47,6 @@ pub struct PreFilter {
     pub estimated_gas_cost_weth: f64,
     /// Minimum kâr eşiği (WETH cinsinden)
     pub min_profit_weth: f64,
-    /// Flash loan fee oranı (ör: 0.0005 = 5 bps)
-    pub flash_loan_fee_rate: f64,
     /// Builder bribe yüzdesi (ör: 0.25 = %25)
     /// v19.0: Brüt kârdan bribe düşüldükten sonra net kâr hesaplanır
     pub bribe_pct: f64,
@@ -114,8 +112,8 @@ impl PreFilter {
         let min_price = price_a.min(price_b);
         let spread_ratio = spread / min_price;
 
-        // Toplam fee oranı = fee_a + fee_b + flash_loan_fee
-        let total_fee_ratio = self.fee_a + self.fee_b + self.flash_loan_fee_rate;
+        // Toplam fee oranı = fee_a + fee_b (AMM swap fee'leri)
+        let total_fee_ratio = self.fee_a + self.fee_b;
 
         // Spread fee'leri kurtarıyor mu?
         if spread_ratio <= total_fee_ratio {
@@ -237,7 +235,6 @@ pub fn compute_arbitrage_profit_presorted(
     buy_pool: &PoolState,
     buy_fee_fraction: f64,
     gas_cost_usd: f64,
-    flash_loan_fee_bps: f64,
     eth_price_usd: f64,
     sell_token0_is_weth: bool,
     buy_token0_is_weth: bool,
@@ -288,11 +285,9 @@ pub fn compute_arbitrage_profit_presorted(
         return f64::NEG_INFINITY;
     }
 
-    let flash_loan_fee_rate = flash_loan_fee_bps / 10_000.0;
-    let flash_loan_fee_wei = alloy::primitives::U256::from(
-        crate::types::safe_f64_to_u128(amount_in_weth * flash_loan_fee_rate * 1e18)
-    );
-    let repay_amount = amount_in_wei + flash_loan_fee_wei;
+    // Flash swap: havuz içi swap — ek flash loan ücreti yok.
+    // AMM fee zaten compute_swap_step içinde düşülüyor.
+    let repay_amount = amount_in_wei;
 
     if buy_result.amount_out > repay_amount {
         let profit_wei = buy_result.amount_out - repay_amount;
@@ -320,7 +315,6 @@ fn profit_derivative_presorted(
     buy_pool: &PoolState,
     buy_fee: f64,
     gas_cost_usd: f64,
-    flash_loan_fee_bps: f64,
     eth_price_usd: f64,
     sell_token0_is_weth: bool,
     buy_token0_is_weth: bool,
@@ -333,7 +327,7 @@ fn profit_derivative_presorted(
     let f_plus = compute_arbitrage_profit_presorted(
         amount_in_weth + h,
         sell_pool, sell_fee, buy_pool, buy_fee,
-        gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+        gas_cost_usd, eth_price_usd,
         sell_token0_is_weth, buy_token0_is_weth,
         sell_sorted, buy_sorted,
     );
@@ -363,7 +357,6 @@ pub fn find_optimal_amount_with_bitmap(
     buy_pool: &PoolState,
     buy_fee: f64,
     gas_cost_usd: f64,
-    flash_loan_fee_bps: f64,
     eth_price_usd: f64,
     max_amount_weth: f64,
     sell_token0_is_weth: bool,
@@ -411,9 +404,14 @@ pub fn find_optimal_amount_with_bitmap(
     // ── AŞAMA 1: Adaptif 2-Fazlı Kaba Tarama (OPT-E) ──────────────
     // Faz 1: 8 kaba adım ile bölgeyi tara
     // Faz 2: En iyi bölge etrafında 8 ince adım
+    // v30.0: Adaptif kaba tarama -- havuz kapasitesine gore adim sayisi
+    // Kucuk havuzlarda az adim yeterli, buyuk havuzlarda daha yuksek cozunurluk gerekir
     let mut best_amount = 0.0;
     let mut best_profit = f64::NEG_INFINITY;
-    let coarse_steps = 8;
+    let coarse_steps: u32 = if effective_max < 0.1 { 6 }
+        else if effective_max < 1.0 { 10 }
+        else if effective_max < 10.0 { 16 }
+        else { 24 };
 
     for i in 1..=coarse_steps {
         let fraction = i as f64 / coarse_steps as f64;
@@ -422,7 +420,7 @@ pub fn find_optimal_amount_with_bitmap(
         let profit = compute_arbitrage_profit_presorted(
             amount,
             sell_pool, sell_fee, buy_pool, buy_fee,
-            gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+            gas_cost_usd, eth_price_usd,
             sell_token0_is_weth, buy_token0_is_weth,
             sell_sorted, buy_sorted,
         );
@@ -437,7 +435,7 @@ pub fn find_optimal_amount_with_bitmap(
     if best_amount > 0.0 {
         let fine_lo = (best_amount * 0.75).max(min_amount);
         let fine_hi = (best_amount * 1.25).min(effective_max);
-        let fine_steps = 8;
+        let fine_steps = (coarse_steps / 2).max(6);
 
         for i in 0..=fine_steps {
             let amount = fine_lo + (fine_hi - fine_lo) * (i as f64 / fine_steps as f64);
@@ -445,7 +443,7 @@ pub fn find_optimal_amount_with_bitmap(
             let profit = compute_arbitrage_profit_presorted(
                 amount,
                 sell_pool, sell_fee, buy_pool, buy_fee,
-                gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+                gas_cost_usd, eth_price_usd,
                 sell_token0_is_weth, buy_token0_is_weth,
                 sell_sorted, buy_sorted,
             );
@@ -472,13 +470,13 @@ pub fn find_optimal_amount_with_bitmap(
     let mut x_prev = (best_amount * 0.9).max(min_amount);
     let f_at_x_prev = compute_arbitrage_profit_presorted(
         x_prev, sell_pool, sell_fee, buy_pool, buy_fee,
-        gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+        gas_cost_usd, eth_price_usd,
         sell_token0_is_weth, buy_token0_is_weth,
         sell_sorted, buy_sorted,
     );
     let mut fp_prev = profit_derivative_presorted(
         x_prev, sell_pool, sell_fee, buy_pool, buy_fee,
-        gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+        gas_cost_usd, eth_price_usd,
         sell_token0_is_weth, buy_token0_is_weth,
         sell_sorted, buy_sorted,
         f_at_x_prev,
@@ -493,7 +491,7 @@ pub fn find_optimal_amount_with_bitmap(
 
         let fp = profit_derivative_presorted(
             x, sell_pool, sell_fee, buy_pool, buy_fee,
-            gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+            gas_cost_usd, eth_price_usd,
             sell_token0_is_weth, buy_token0_is_weth,
             sell_sorted, buy_sorted,
             current_profit,
@@ -533,7 +531,7 @@ pub fn find_optimal_amount_with_bitmap(
         // Yeni x'teki profit'i hesapla (bir sonraki iterasyonun forward diff'i için)
         current_profit = compute_arbitrage_profit_presorted(
             x, sell_pool, sell_fee, buy_pool, buy_fee,
-            gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+            gas_cost_usd, eth_price_usd,
             sell_token0_is_weth, buy_token0_is_weth,
             sell_sorted, buy_sorted,
         );
@@ -668,7 +666,6 @@ mod tests {
             &sell_pool, 0.0005,
             &buy_pool, 0.01,
             0.10,
-            5.0,
             2000.0,
             10.0,
             true,
@@ -764,7 +761,7 @@ mod tests {
 ///
 /// Akış: WETH girdi → Pool1 → Pool2 → ... → PoolN → WETH çıktı
 /// Her adımda exact::compute_exact_swap kullanılır.
-/// Kâr = son çıktı (WETH) - girdi (WETH) - flash_loan_fee - gas_cost
+/// Kâr = son çıktı (WETH) - girdi (WETH) - gas_cost
 ///
 /// # Parametreler
 /// - `amount_in_weth`: Girdi WETH miktarı (f64)
@@ -772,7 +769,6 @@ mod tests {
 /// - `pool_configs`: Rotadaki her havuzun yapılandırması (sıralı)
 /// - `directions`: Her hop'un swap yönü (zero_for_one)
 /// - `gas_cost_usd`: Tahmini gas maliyeti (USD)
-/// - `flash_loan_fee_bps`: Flash loan ücreti (bps)
 /// - `eth_price_usd`: ETH/USD fiyatı
 ///
 /// # Dönüş
@@ -783,7 +779,6 @@ pub fn compute_arbitrage_profit_multi_hop(
     pool_configs: &[&crate::types::PoolConfig],
     directions: &[bool],
     gas_cost_usd: f64,
-    flash_loan_fee_bps: f64,
     eth_price_usd: f64,
 ) -> f64 {
     if amount_in_weth <= 0.0 || pool_states.is_empty() || pool_states.len() != directions.len() {
@@ -825,12 +820,8 @@ pub fn compute_arbitrage_profit_multi_hop(
         current_amount = result.amount_out;
     }
 
-    // Flash loan geri ödeme
-    let flash_loan_fee_rate = flash_loan_fee_bps / 10_000.0;
-    let flash_loan_fee_wei = alloy::primitives::U256::from(
-        crate::types::safe_f64_to_u128(amount_in_weth * flash_loan_fee_rate * 1e18)
-    );
-    let repay_amount = initial_amount_wei + flash_loan_fee_wei;
+    // Flash swap: havuz içi swap — ek flash loan ücreti yok.
+    let repay_amount = initial_amount_wei;
 
     // Net kâr → USD
     if current_amount > repay_amount {
@@ -863,7 +854,6 @@ pub fn find_optimal_amount_multi_hop(
     pool_configs: &[&crate::types::PoolConfig],
     directions: &[bool],
     gas_cost_usd: f64,
-    flash_loan_fee_bps: f64,
     eth_price_usd: f64,
     max_amount_weth: f64,
 ) -> MultiHopOptimalResult {
@@ -905,7 +895,7 @@ pub fn find_optimal_amount_multi_hop(
 
         let profit = compute_arbitrage_profit_multi_hop(
             amount, pool_states, pool_configs, directions,
-            gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+            gas_cost_usd, eth_price_usd,
         );
 
         if profit > best_profit {
@@ -935,11 +925,11 @@ pub fn find_optimal_amount_multi_hop(
         // Birinci türev (merkezi fark)
         let f_plus = compute_arbitrage_profit_multi_hop(
             x + h, pool_states, pool_configs, directions,
-            gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+            gas_cost_usd, eth_price_usd,
         );
         let f_minus = compute_arbitrage_profit_multi_hop(
             x - h, pool_states, pool_configs, directions,
-            gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+            gas_cost_usd, eth_price_usd,
         );
         let f_prime = (f_plus - f_minus) / (2.0 * h);
 
@@ -948,22 +938,22 @@ pub fn find_optimal_amount_multi_hop(
         let fp_plus_h = {
             let fph = compute_arbitrage_profit_multi_hop(
                 x + h2 + h, pool_states, pool_configs, directions,
-                gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+                gas_cost_usd, eth_price_usd,
             );
             let fmh = compute_arbitrage_profit_multi_hop(
                 x + h2 - h, pool_states, pool_configs, directions,
-                gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+                gas_cost_usd, eth_price_usd,
             );
             (fph - fmh) / (2.0 * h)
         };
         let fp_minus_h = {
             let fph = compute_arbitrage_profit_multi_hop(
                 x - h2 + h, pool_states, pool_configs, directions,
-                gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+                gas_cost_usd, eth_price_usd,
             );
             let fmh = compute_arbitrage_profit_multi_hop(
                 x - h2 - h, pool_states, pool_configs, directions,
-                gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+                gas_cost_usd, eth_price_usd,
             );
             (fph - fmh) / (2.0 * h)
         };
@@ -995,7 +985,7 @@ pub fn find_optimal_amount_multi_hop(
 
     let final_profit = compute_arbitrage_profit_multi_hop(
         x, pool_states, pool_configs, directions,
-        gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+        gas_cost_usd, eth_price_usd,
     );
 
     MultiHopOptimalResult {
@@ -1416,18 +1406,9 @@ pub mod exact {
 
     /// Exact multi-tick swap sonucu (U256 hassasiyetinde)
     #[derive(Debug, Clone)]
-#[allow(dead_code)]
     pub struct ExactSwapResult {
         /// Toplam çıktı miktarı (raw wei)
         pub amount_out: U256,
-        /// Toplam tüketilen girdi (raw wei, fee dahil)
-        pub amount_in_consumed: U256,
-        /// Son sqrtPriceX96
-        pub final_sqrt_price_x96: U256,
-        /// Son likidite
-        pub final_liquidity: u128,
-        /// Geçilen tick sayısı
-        pub tick_crossings: u32,
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1494,10 +1475,6 @@ pub mod exact {
         if amount_in.is_zero() || liquidity == 0 || sqrt_price_x96.is_zero() {
             return ExactSwapResult {
                 amount_out: U256::ZERO,
-                amount_in_consumed: U256::ZERO,
-                final_sqrt_price_x96: sqrt_price_x96,
-                final_liquidity: liquidity,
-                tick_crossings: 0,
             };
         }
 
@@ -1505,7 +1482,6 @@ pub mod exact {
         let mut state_liquidity = liquidity;
         let mut amount_remaining = amount_in;
         let mut total_amount_out = U256::ZERO;
-        let mut total_amount_in = U256::ZERO;
         let mut crossings: u32 = 0;
         let max_crossings: u32 = 50;
 
@@ -1525,7 +1501,6 @@ pub mod exact {
 
             total_amount_out += step.amount_out;
             let consumed = step.amount_in + step.fee_amount;
-            total_amount_in += consumed;
             if amount_remaining >= consumed {
                 amount_remaining -= consumed;
             } else {
@@ -1559,16 +1534,10 @@ pub mod exact {
                 fee_pips,
             );
             total_amount_out += step.amount_out;
-            total_amount_in += step.amount_in + step.fee_amount;
-            state_sqrt_price = step.sqrt_ratio_next;
         }
 
         ExactSwapResult {
             amount_out: total_amount_out,
-            amount_in_consumed: total_amount_in,
-            final_sqrt_price_x96: state_sqrt_price,
-            final_liquidity: state_liquidity,
-            tick_crossings: crossings,
         }
     }
 
@@ -1601,10 +1570,6 @@ pub mod exact {
         if amount_in.is_zero() || liquidity == 0 || sqrt_price_x96.is_zero() {
             return ExactSwapResult {
                 amount_out: U256::ZERO,
-                amount_in_consumed: U256::ZERO,
-                final_sqrt_price_x96: sqrt_price_x96,
-                final_liquidity: liquidity,
-                tick_crossings: 0,
             };
         }
 
@@ -1612,7 +1577,6 @@ pub mod exact {
         let mut state_liquidity = liquidity;
         let mut amount_remaining = amount_in;
         let mut total_amount_out = U256::ZERO;
-        let mut total_amount_in = U256::ZERO;
         let mut crossings: u32 = 0;
         let max_crossings: u32 = 50;
 
@@ -1655,7 +1619,6 @@ pub mod exact {
 
             total_amount_out += step.amount_out;
             let consumed = step.amount_in + step.fee_amount;
-            total_amount_in += consumed;
             if amount_remaining >= consumed {
                 amount_remaining -= consumed;
             } else {
@@ -1691,16 +1654,10 @@ pub mod exact {
                 fee_pips,
             );
             total_amount_out += step.amount_out;
-            total_amount_in += step.amount_in + step.fee_amount;
-            state_sqrt_price = step.sqrt_ratio_next;
         }
 
         ExactSwapResult {
             amount_out: total_amount_out,
-            amount_in_consumed: total_amount_in,
-            final_sqrt_price_x96: state_sqrt_price,
-            final_liquidity: state_liquidity,
-            tick_crossings: crossings,
         }
     }
 
@@ -2135,10 +2092,9 @@ pub mod exact {
             );
 
             assert!(result.amount_out > U256::ZERO, "Bitmap swap çıktısı > 0");
-            assert!(result.tick_crossings > 0, "Tick geçişi olmalı");
             println!(
-                "Exact bitmap swap: 5 WETH → {} raw çıktı, {} tick geçişi",
-                result.amount_out, result.tick_crossings
+                "Exact bitmap swap: 5 WETH → {} raw çıktı",
+                result.amount_out
             );
         }
     }

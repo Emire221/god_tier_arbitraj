@@ -1540,3 +1540,102 @@ pub fn print_discovery_stats(registry: &Arc<RwLock<LivePoolRegistry>>, pools: &[
         println!("  {}  Top Pools           : {}", "│".yellow(), top_str.join(", "));
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v30.0: Sleeping Pool Scanner — Uyuyan Havuzlari Periyodik Olarak Tara
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// GC tarafindan uyutulan havuzlar periyodik olarak taranir.
+// Likidite esigi asildiysa (ani hacim/likidite artisi) havuz tekrar aktif edilir.
+
+alloy::sol! {
+    #[sol(rpc)]
+    interface IUniswapV3PoolLiquidity {
+        function liquidity() external view returns (uint128);
+    }
+}
+
+/// Uyuyan havuzlari tara, likidite esigini asan havuzlari aktiflestir.
+/// Her ~50 blokta bir cagrilmali (main loop'tan).
+pub async fn scan_sleeping_pools_for_reactivation<P: Provider + Sync>(
+    registry: &Arc<RwLock<LivePoolRegistry>>,
+    pools: &mut Vec<PoolConfig>,
+    states: &mut Vec<SharedPoolState>,
+    pair_combos: &mut Vec<PairCombo>,
+    provider: &P,
+) -> usize {
+    // Minimum likidite esigi: 1e14 wei (~0.0001 ETH degerinde likidite)
+    const MIN_LIQUIDITY_THRESHOLD: u128 = 100_000_000_000_000; // 1e14
+
+    let sleeping_snapshot: Vec<PoolConfig> = {
+        let reg = registry.read();
+        if reg.sleeping_pools.is_empty() {
+            return 0;
+        }
+        // En fazla 10 havuzu tara (RPC yukunu sinirla)
+        reg.sleeping_pools.iter().take(10).cloned().collect()
+    };
+
+    let mut candidates: Vec<PoolConfig> = Vec::new();
+
+    for pool in &sleeping_snapshot {
+        let contract = IUniswapV3PoolLiquidity::new(pool.address, provider);
+        match contract.liquidity().call().await {
+            Ok(liq) => {
+                let liq_u128: u128 = liq;
+                if liq_u128 >= MIN_LIQUIDITY_THRESHOLD {
+                    eprintln!(
+                        "  [SleepingScan] {} has liquidity {} -- reactivating",
+                        pool.name, liq_u128,
+                    );
+                    candidates.push(pool.clone());
+                }
+            }
+            Err(_) => {
+                // RPC hatasi -- bu havuzu atla, bir sonraki turda tekrar dene
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return 0;
+    }
+
+    // Uyandirma: sleeping_pools'dan cikar, aktif listeye ekle
+    let mut reg = registry.write();
+    let mut reactivated = 0;
+
+    for candidate in &candidates {
+        if let Some(pos) = reg.sleeping_pools.iter().position(|p| p.address == candidate.address) {
+            let pool = reg.sleeping_pools.remove(pos);
+            let new_idx = pools.len();
+
+            // Pair combo olustur
+            for (existing_idx, existing_pool) in pools.iter().enumerate() {
+                if existing_pool.quote_token_address == pool.quote_token_address
+                    && existing_pool.address != pool.address
+                {
+                    let pair_name = format!("WETH/{:.8}", format!("{}", pool.quote_token_address));
+                    pair_combos.push(PairCombo {
+                        pair_name,
+                        pool_a_idx: existing_idx,
+                        pool_b_idx: new_idx,
+                    });
+                }
+            }
+
+            pools.push(pool);
+            states.push(Arc::new(ArcSwap::from_pointee(PoolState::default())));
+            reg.active_flags.push(true);
+            reactivated += 1;
+        }
+    }
+
+    if reactivated > 0 {
+        eprintln!(
+            "  [SleepingScan] {} pools reactivated from sleep", reactivated,
+        );
+    }
+
+    reactivated
+}

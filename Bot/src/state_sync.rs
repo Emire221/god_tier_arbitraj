@@ -385,18 +385,22 @@ async fn sync_pool_state_inner<P: Provider + Sync>(
     );
 
     {
-        let mut state = pool_state.write();
-        state.sqrt_price_x96 = U256::from(sqrt_price_x96);
-        state.sqrt_price_f64 = sqrt_price_f64;
-        state.tick = tick;
-        state.liquidity = liquidity;
-        state.liquidity_f64 = liquidity_f64;
-        state.eth_price_usd = eth_price;
-        state.last_block = block_number;
-        state.last_update = Instant::now();
-        state.is_initialized = true;
-        state.is_stale = false;
-        state.live_fee_bps = live_fee_bps;
+        let sqrt_price_x96_val = U256::from(sqrt_price_x96);
+        pool_state.rcu(|old| {
+            let mut s = (**old).clone();
+            s.sqrt_price_x96 = sqrt_price_x96_val;
+            s.sqrt_price_f64 = sqrt_price_f64;
+            s.tick = tick;
+            s.liquidity = liquidity;
+            s.liquidity_f64 = liquidity_f64;
+            s.eth_price_usd = eth_price;
+            s.last_block = block_number;
+            s.last_update = Instant::now();
+            s.is_initialized = true;
+            s.is_stale = false;
+            s.live_fee_bps = live_fee_bps;
+            s
+        });
     }
 
     Ok(())
@@ -555,7 +559,7 @@ pub async fn sync_all_pools_multicall<P: Provider + Sync>(
             Ok(Err(e)) => {
                 // Multicall3 çağrısı başarısız — tüm chunk'ı stale işaretle
                 for i in chunk_start..chunk_end {
-                    states[i].write().is_stale = true;
+                    states[i].rcu(|old| { let mut s = (**old).clone(); s.is_stale = true; s });
                     results[i] = Err(eyre::eyre!(
                         "[{}] Multicall3 batch sync error: {}",
                         pools[i].name, e
@@ -566,7 +570,7 @@ pub async fn sync_all_pools_multicall<P: Provider + Sync>(
             Err(_elapsed) => {
                 // Timeout — tüm chunk'ı stale işaretle
                 for i in chunk_start..chunk_end {
-                    states[i].write().is_stale = true;
+                    states[i].rcu(|old| { let mut s = (**old).clone(); s.is_stale = true; s });
                     results[i] = Err(eyre::eyre!(
                         "[{}] Multicall3 sync timeout ({}ms)",
                         pools[i].name, SYNC_TIMEOUT_MS
@@ -640,24 +644,27 @@ pub async fn sync_all_pools_multicall<P: Provider + Sync>(
                     );
 
                     {
-                        let mut state = states[pool_idx].write();
-                        state.sqrt_price_x96 = sqrt_price_x96;
-                        state.sqrt_price_f64 = sqrt_price_f64;
-                        state.tick = tick;
-                        state.liquidity = liquidity;
-                        state.liquidity_f64 = liquidity_f64;
-                        state.eth_price_usd = eth_price;
-                        state.last_block = block_number;
-                        state.last_update = Instant::now();
-                        state.is_initialized = true;
-                        state.is_stale = false;
-                        state.live_fee_bps = fee_bps;
+                        states[pool_idx].rcu(|old| {
+                            let mut s = (**old).clone();
+                            s.sqrt_price_x96 = sqrt_price_x96;
+                            s.sqrt_price_f64 = sqrt_price_f64;
+                            s.tick = tick;
+                            s.liquidity = liquidity;
+                            s.liquidity_f64 = liquidity_f64;
+                            s.eth_price_usd = eth_price;
+                            s.last_block = block_number;
+                            s.last_update = Instant::now();
+                            s.is_initialized = true;
+                            s.is_stale = false;
+                            s.live_fee_bps = fee_bps;
+                            s
+                        });
                     }
                     results[pool_idx] = Ok(());
                 }
                 _ => {
                     // Decode failed — mark pool as STALE
-                    states[pool_idx].write().is_stale = true;
+                    states[pool_idx].rcu(|old| { let mut s = (**old).clone(); s.is_stale = true; s });
                     results[pool_idx] = Err(eyre::eyre!(
                         "[{}] Multicall3 slot0/liquidity decode failed (execution reverted?)",
                         pools[pool_idx].name
@@ -835,7 +842,7 @@ pub async fn sync_tick_bitmap<P: Provider + Sync>(
 ) -> Result<()> {
     let start = Instant::now();
 
-    let current_tick = pool_state.read().tick;
+    let current_tick = pool_state.load().tick;
     let tick_spacing = pool_config.tick_spacing.max(1);
 
     // Tarama aralığı: current_tick ± (scan_range * tick_spacing)
@@ -947,8 +954,11 @@ pub async fn sync_tick_bitmap<P: Provider + Sync>(
 
     // State'e yaz
     {
-        let mut state = pool_state.write();
-        state.tick_bitmap = Some(bitmap_data);
+        pool_state.rcu(|old| {
+            let mut s = (**old).clone();
+            s.tick_bitmap = Some(bitmap_data.clone());
+            s
+        });
     }
 
     Ok(())
@@ -968,8 +978,12 @@ pub async fn cache_pool_bytecode<P: Provider + Sync>(
         .await
         .map_err(|e| eyre::eyre!("[{}] Bytecode read error: {}", pool_config.name, e))?;
 
-    let mut state = pool_state.write();
-    state.bytecode = Some(code.to_vec());
+    let code_vec = code.to_vec();
+    pool_state.rcu(|old| {
+        let mut s = (**old).clone();
+        s.bytecode = Some(code_vec.clone());
+        s
+    });
 
     Ok(())
 }
@@ -1044,8 +1058,8 @@ pub async fn sync_all_pools<P: Provider + Sync>(
                 final_results[i] = Ok(());
             } else {
                 // v10.0: Eski veri KULLANILMAZ — havuzu STALE olarak işaretle
-                let staleness = state.read().staleness_ms();
-                state.write().is_stale = true;
+                let staleness = state.load().staleness_ms();
+                state.rcu(|old| { let mut s = (**old).clone(); s.is_stale = true; s });
                 eprintln!(
                     "     \u{1f6a8} [{}] Sync completely failed — marked as STALE (data age: {}ms)",
                     config.name, staleness,
@@ -1410,21 +1424,25 @@ pub async fn optimistic_refresh_pool<P: Provider + Sync>(
 
     // Mevcut state ile karşılaştır — fiyat değişmişse güncelle
     let price_changed = {
-        let state = pool_state.read();
+        let state = pool_state.load();
         (state.eth_price_usd - eth_price).abs() > 0.001 // >$0.001 fark
     };
 
     if price_changed {
-        let mut state = pool_state.write();
-        state.sqrt_price_x96 = U256::from(sqrt_price_x96);
-        state.sqrt_price_f64 = sqrt_price_f64;
-        state.tick = tick;
-        state.liquidity = liquidity;
-        state.liquidity_f64 = liquidity_f64;
-        state.eth_price_usd = eth_price;
-        state.last_block = current_block;
-        state.last_update = Instant::now();
-        state.is_stale = false; // Optimistic refresh — veri taze
+        let sqrt_price_x96_val = U256::from(sqrt_price_x96);
+        pool_state.rcu(|old| {
+            let mut s = (**old).clone();
+            s.sqrt_price_x96 = sqrt_price_x96_val;
+            s.sqrt_price_f64 = sqrt_price_f64;
+            s.tick = tick;
+            s.liquidity = liquidity;
+            s.liquidity_f64 = liquidity_f64;
+            s.eth_price_usd = eth_price;
+            s.last_block = current_block;
+            s.last_update = Instant::now();
+            s.is_stale = false;
+            s
+        });
         Ok(true)
     } else {
         Ok(false)
@@ -1463,6 +1481,24 @@ const SWAP_EVENT_TOPIC: [u8; 32] = [
     0xe6, 0x23, 0x5f, 0x29, 0x17, 0x49, 0x24, 0xf9,
     0x28, 0xcc, 0x2a, 0xc8, 0x18, 0xeb, 0x64, 0xfe,
     0xd8, 0x00, 0x4e, 0x11, 0x5f, 0xbc, 0xca, 0x67,
+];
+
+/// Uniswap V3 / Aerodrome Mint event topic0
+/// keccak256("Mint(address,address,int24,int24,uint128,uint256,uint256)")
+const MINT_EVENT_TOPIC: [u8; 32] = [
+    0x7a, 0x53, 0x08, 0x0b, 0xa4, 0x14, 0x15, 0x8b,
+    0xe7, 0xec, 0x69, 0xb9, 0x87, 0xb5, 0xfb, 0x7d,
+    0x07, 0xde, 0xe1, 0x01, 0xfe, 0x85, 0x48, 0x8f,
+    0x08, 0x53, 0xae, 0x16, 0x23, 0x9d, 0x0b, 0xde,
+];
+
+/// Uniswap V3 / Aerodrome Burn event topic0
+/// keccak256("Burn(address,int24,int24,uint128,uint256,uint256)")
+const BURN_EVENT_TOPIC: [u8; 32] = [
+    0x0c, 0x39, 0x6c, 0xd9, 0x89, 0xa3, 0x9f, 0x44,
+    0x59, 0xb5, 0xfa, 0x1a, 0xed, 0x6a, 0x9a, 0x8d,
+    0xcd, 0xbc, 0x45, 0x90, 0x8a, 0xcf, 0xd6, 0x7e,
+    0x02, 0x8c, 0xd5, 0x68, 0xda, 0x98, 0x98, 0x2c,
 ];
 
 /// Swap event log verisinden havuz durumunu çıkar ve güncelle.
@@ -1527,100 +1563,225 @@ pub fn process_swap_event_log(
 
     // State güncelle
     {
-        let mut state = states[pool_idx].write();
-        state.sqrt_price_x96 = sqrt_price_x96;
-        state.sqrt_price_f64 = sqrt_price_f64;
-        state.tick = tick;
-        state.liquidity = liquidity;
-        state.liquidity_f64 = liquidity_f64;
-        state.eth_price_usd = eth_price;
-        state.last_block = log_block_number;
-        state.last_update = Instant::now();
-        state.is_initialized = true;
-        state.is_stale = false; // Event-driven güncelleme — veri taze
+        states[pool_idx].rcu(|old| {
+            let mut s = (**old).clone();
+            s.sqrt_price_x96 = sqrt_price_x96;
+            s.sqrt_price_f64 = sqrt_price_f64;
+            s.tick = tick;
+            s.liquidity = liquidity;
+            s.liquidity_f64 = liquidity_f64;
+            s.eth_price_usd = eth_price;
+            s.last_block = log_block_number;
+            s.last_update = Instant::now();
+            s.is_initialized = true;
+            s.is_stale = false;
+            s
+        });
     }
 
     Ok(true)
 }
 
-/// Event-driven Swap dinleyici başlat.
+/// Mint event log verisinden tick bitmap ve likidite güncellemesi yap.
 ///
-/// Havuz adreslerindeki Swap eventlerini WebSocket/IPC üzerinden dinler.
-/// Her Swap eventi geldiğinde havuz state'ini anlık günceller.
-/// Polling'e göre avantaj: Sıfır gecikme, ek RPC çağrısı yok.
-///
-/// # Parametreler
-/// - `rpc_url`: WebSocket/IPC RPC adresi
-/// - `pools`: İzlenen havuz yapılandırmaları
-/// - `states`: Paylaşımlı havuz durumları
+/// Mint Event Layout:
+///   Topics: [0] = Mint topic, [1] = owner (address), [2] = tickLower (int24), [3] = tickUpper (int24)
+///   Log Data: [0..32] sender (address), [32..64] amount (uint128), [64..96] amount0, [96..128] amount1
 ///
 /// # Dönüş
-/// Bu fonksiyon sonsuz döngüde çalışır. Bağlantı koparsa Err döner.
-pub async fn start_swap_event_listener<P: Provider + Sync>(
+/// Ok(true) → durum güncellendi, Ok(false) → güncelleme gerekmedi
+pub fn process_mint_event_log(
+    log_data: &[u8],
+    log_topics: &[alloy::primitives::B256],
+    log_address: Address,
+    log_block_number: u64,
+    pools: &[PoolConfig],
+    states: &[SharedPoolState],
+) -> Result<bool> {
+    let pool_idx = match pools.iter().position(|p| p.address == log_address) {
+        Some(idx) => idx,
+        None => return Ok(false),
+    };
+
+    // Topics: [2] = tickLower, [3] = tickUpper (int24, sign-extended to int256)
+    if log_topics.len() < 4 || log_data.len() < 64 {
+        return Ok(false);
+    }
+
+    let tick_lower = i32::from_be_bytes(log_topics[2].0[28..32].try_into().unwrap_or([0u8; 4]));
+    let tick_upper = i32::from_be_bytes(log_topics[3].0[28..32].try_into().unwrap_or([0u8; 4]));
+
+    // amount (uint128) — log data offset 32..64, son 16 byte
+    let amount = u128::from_be_bytes(log_data[48..64].try_into().unwrap_or([0u8; 16]));
+    if amount == 0 {
+        return Ok(false);
+    }
+
+    let tick_spacing = pools[pool_idx].tick_spacing;
+
+    states[pool_idx].rcu(|old| {
+        let mut s = (**old).clone();
+        // Tick bitmap güncelle
+        if let Some(ref mut bitmap) = s.tick_bitmap {
+            bitmap.update_from_mint(tick_lower, tick_upper, amount, tick_spacing);
+            bitmap.snapshot_block = log_block_number;
+        }
+        // Mevcut tick aralıktaysa aktif likiditeyi artır
+        if s.tick >= tick_lower && s.tick < tick_upper {
+            s.liquidity = s.liquidity.saturating_add(amount);
+            s.liquidity_f64 = s.liquidity as f64;
+        }
+        s.last_block = log_block_number;
+        s.last_update = Instant::now();
+        s
+    });
+
+    Ok(true)
+}
+
+/// Burn event log verisinden tick bitmap ve likidite güncellemesi yap (Mint'in tersi).
+///
+/// Burn Event Layout:
+///   Topics: [0] = Burn topic, [1] = owner (address), [2] = tickLower (int24), [3] = tickUpper (int24)
+///   Log Data: [0..32] amount (uint128), [32..64] amount0, [64..96] amount1
+///
+/// # Dönüş
+/// Ok(true) → durum güncellendi, Ok(false) → güncelleme gerekmedi
+pub fn process_burn_event_log(
+    log_data: &[u8],
+    log_topics: &[alloy::primitives::B256],
+    log_address: Address,
+    log_block_number: u64,
+    pools: &[PoolConfig],
+    states: &[SharedPoolState],
+) -> Result<bool> {
+    let pool_idx = match pools.iter().position(|p| p.address == log_address) {
+        Some(idx) => idx,
+        None => return Ok(false),
+    };
+
+    // Topics: [2] = tickLower, [3] = tickUpper
+    if log_topics.len() < 4 || log_data.len() < 32 {
+        return Ok(false);
+    }
+
+    let tick_lower = i32::from_be_bytes(log_topics[2].0[28..32].try_into().unwrap_or([0u8; 4]));
+    let tick_upper = i32::from_be_bytes(log_topics[3].0[28..32].try_into().unwrap_or([0u8; 4]));
+
+    // amount (uint128) — log data offset 0..32, son 16 byte
+    let amount = u128::from_be_bytes(log_data[16..32].try_into().unwrap_or([0u8; 16]));
+    if amount == 0 {
+        return Ok(false);
+    }
+
+    let tick_spacing = pools[pool_idx].tick_spacing;
+
+    states[pool_idx].rcu(|old| {
+        let mut s = (**old).clone();
+        // Tick bitmap güncelle (Mint'in tersi)
+        if let Some(ref mut bitmap) = s.tick_bitmap {
+            bitmap.update_from_burn(tick_lower, tick_upper, amount, tick_spacing);
+            bitmap.snapshot_block = log_block_number;
+        }
+        // Mevcut tick aralıktaysa aktif likiditeyi azalt
+        if s.tick >= tick_lower && s.tick < tick_upper {
+            s.liquidity = s.liquidity.saturating_sub(amount);
+            s.liquidity_f64 = s.liquidity as f64;
+        }
+        s.last_block = log_block_number;
+        s.last_update = Instant::now();
+        s
+    });
+
+    Ok(true)
+}
+/// Event-driven havuz dinleyici başlat (Swap + Mint + Burn).
+///
+/// Havuz adreslerindeki Swap, Mint ve Burn eventlerini WebSocket/IPC üzerinden dinler.
+/// Her event geldiğinde havuz state'ini ve tick bitmap'ini anlık günceller.
+pub async fn start_pool_event_listener<P: Provider + Sync>(
     provider: &P,
     pools: &[PoolConfig],
     states: &[SharedPoolState],
 ) -> Result<()> {
     use alloy::rpc::types::Filter;
 
-    // Havuz adreslerini filtre olarak ayarla
     let pool_addresses: Vec<Address> = pools.iter().map(|p| p.address).collect();
 
-    // Swap event topic0
     let swap_topic = alloy::primitives::B256::from(SWAP_EVENT_TOPIC);
+    let mint_topic = alloy::primitives::B256::from(MINT_EVENT_TOPIC);
+    let burn_topic = alloy::primitives::B256::from(BURN_EVENT_TOPIC);
 
-    // Log filtresi: Sadece izlenen havuzlardan gelen Swap eventleri
     let filter = Filter::new()
         .address(pool_addresses)
-        .event_signature(swap_topic);
+        .event_signature(vec![swap_topic, mint_topic, burn_topic]);
 
-    // Log subscription başlat
     let sub = provider.subscribe_logs(&filter).await
-        .map_err(|e| eyre::eyre!("Swap event subscription error: {}", e))?;
+        .map_err(|e| eyre::eyre!("Pool event subscription error: {}", e))?;
     let mut stream = sub.into_stream();
 
     println!(
-        "  \u{26a1} Event-driven Swap listener active ({} pools)", pools.len()
+        "  \u{26a1} Event-driven pool listener active ({} pools, Swap+Mint+Burn)", pools.len()
     );
 
     while let Some(log) = stream.next().await {
-        // Log adresini al (Deref through inner)
         let log_address = log.inner.address;
-
-        // Blok numarasını al
         let block_number = log.block_number.unwrap_or(0);
-
-        // Swap event log verisini işle
         let log_data: &[u8] = log.inner.data.data.as_ref();
+        let topics = log.inner.data.topics();
 
-        match process_swap_event_log(
-            log_data,
-            log_address,
-            block_number,
-            pools,
-            states,
-        ) {
-            Ok(true) => {
-                // State güncellendi — havuz bilgisini logla
-                if let Some(idx) = pools.iter().position(|p| p.address == log_address) {
-                    let state = states[idx].read();
-                    eprintln!(
-                        "     ⚡ [Event] {} → {:.2}$ | Tick: {} | Block: #{}",
-                        pools[idx].name,
-                        state.eth_price_usd,
-                        state.tick,
-                        block_number,
-                    );
+        if topics.is_empty() {
+            continue;
+        }
+
+        let topic0 = topics[0];
+
+        if topic0 == swap_topic {
+            match process_swap_event_log(log_data, log_address, block_number, pools, states) {
+                Ok(true) => {
+                    if let Some(idx) = pools.iter().position(|p| p.address == log_address) {
+                        let state = states[idx].load();
+                        eprintln!(
+                            "     \u{26a1} [Event] {} → {:.2}$ | Tick: {} | Block: #{}",
+                            pools[idx].name, state.eth_price_usd, state.tick, block_number,
+                        );
+                    }
                 }
+                Ok(false) => {}
+                Err(e) => eprintln!("     \u{26a0}\u{fe0f} [Event] Swap log error: {}", e),
             }
-            Ok(false) => {} // Güncelleme gerekmedi
-            Err(e) => {
-                eprintln!("     ⚠️ [Event] Swap log processing error: {}", e);
+        } else if topic0 == mint_topic {
+            let b256_topics: Vec<alloy::primitives::B256> = topics.iter().copied().collect();
+            match process_mint_event_log(log_data, &b256_topics, log_address, block_number, pools, states) {
+                Ok(true) => {
+                    if let Some(idx) = pools.iter().position(|p| p.address == log_address) {
+                        eprintln!(
+                            "     \u{1f7e2} [Event] Mint @ {} | Block: #{}",
+                            pools[idx].name, block_number,
+                        );
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => eprintln!("     \u{26a0}\u{fe0f} [Event] Mint log error: {}", e),
+            }
+        } else if topic0 == burn_topic {
+            let b256_topics: Vec<alloy::primitives::B256> = topics.iter().copied().collect();
+            match process_burn_event_log(log_data, &b256_topics, log_address, block_number, pools, states) {
+                Ok(true) => {
+                    if let Some(idx) = pools.iter().position(|p| p.address == log_address) {
+                        eprintln!(
+                            "     \u{1f534} [Event] Burn @ {} | Block: #{}",
+                            pools[idx].name, block_number,
+                        );
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => eprintln!("     \u{26a0}\u{fe0f} [Event] Burn log error: {}", e),
             }
         }
     }
 
-    Err(eyre::eyre!("Swap event stream closed"))
+    Err(eyre::eyre!("Pool event stream closed"))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1645,13 +1806,13 @@ pub async fn start_swap_event_listener<P: Provider + Sync>(
 mod rpc_failover_tests {
     use alloy::primitives::U256;
     use std::sync::Arc;
-    use parking_lot::RwLock;
+    use arc_swap::ArcSwap;
     use std::time::{Duration, Instant};
     use crate::types::*;
 
 
     fn make_active_state(price: f64, liq: u128, block: u64) -> SharedPoolState {
-        Arc::new(RwLock::new(PoolState {
+        Arc::new(ArcSwap::from_pointee(PoolState {
             sqrt_price_x96: U256::from(1u64) << 96,
             sqrt_price_f64: 1.0,
             tick: 0,
@@ -1668,123 +1829,95 @@ mod rpc_failover_tests {
         }))
     }
 
-    /// RPC bağlantı kopması simülasyonu: Havuz state yazma paniklememeli.
-    ///
-    /// Senaryo: WSS soketi kapanır → sync_pool_state RPC hatası alır
-    /// → state güncellenmez → staleness_ms artar → is_active() hâlâ true
-    /// ama veri bayat → check_arbitrage_opportunity reddeder.
-    ///
-    /// Bu test, tüm akışın panik olmadan çalıştığını kanıtlar.
     #[test]
     fn test_rpc_failover_without_panic() {
-        // ── 1. Başlangıç: Aktif state ──────────────────────────
         let state = make_active_state(2500.0, 10_000_000_000_000_000_000, 100);
 
-        // State aktif ve taze
         {
-            let s = state.read();
+            let s = state.load();
             assert!(s.is_active(), "Başlangıçta state aktif olmalı");
             assert!(s.staleness_ms() < 100, "Başlangıçta veri taze olmalı");
         }
 
-        // ── 2. RPC kopması simülasyonu ────────────────────────────
-        // sync_pool_state çağrıldığında RPC hatası alınır (burada simüle ediyoruz).
-        // State güncellenmez → son bilinen değerde kalır.
-        // Bu noktada panik olmamalı.
-
-        // Bayatlık simülasyonu: last_update'i 6 saniye geriye çek
-        {
-            let mut s = state.write();
+        // Bayatlık simülasyonu
+        state.rcu(|old| {
+            let mut s = (**old).clone();
             s.last_update = Instant::now() - Duration::from_secs(6);
-        }
+            s
+        });
 
-        // ── 3. Doğrulama: State bayat ama panic yok ─────────────
         {
-            let s = state.read();
+            let s = state.load();
             assert!(s.is_active(), "State hâlâ aktif (eski veriler geçerli)");
             assert!(
                 s.staleness_ms() >= 5000,
                 "Veri bayat olmalı (>5s): {}ms",
                 s.staleness_ms()
             );
-            // Fiyat ve likidite son bilinen değerde korunmuş
             assert_eq!(s.eth_price_usd, 2500.0, "Fiyat son bilinen değerde kalmalı");
             assert_eq!(s.liquidity, 10_000_000_000_000_000_000, "Likidite korunmalı");
         }
 
-        // ── 4. Yeniden bağlantı sonrası kurtarma ────────────────
-        // sync_pool_state yeni RPC ile başarılı olur → state güncellenir
-        {
-            let mut s = state.write();
+        // Kurtarma
+        state.rcu(|old| {
+            let mut s = (**old).clone();
             s.last_update = Instant::now();
             s.last_block = 105;
             s.eth_price_usd = 2510.0;
-        }
+            s
+        });
 
         {
-            let s = state.read();
+            let s = state.load();
             assert!(s.is_active(), "Kurtarma sonrası state aktif olmalı");
-            assert!(
-                s.staleness_ms() < 100,
-                "Kurtarma sonrası veri taze olmalı"
-            );
+            assert!(s.staleness_ms() < 100, "Kurtarma sonrası veri taze olmalı");
             assert_eq!(s.eth_price_usd, 2510.0, "Kurtarma sonrası fiyat güncel");
             assert_eq!(s.last_block, 105, "Kurtarma sonrası blok güncel");
         }
     }
 
-    /// Ardışık RPC hataları: State bayatlaşır, is_active() hâlâ true ama
-    /// staleness eşiği aşıldığında bot fırsat aramayı durdurur.
     #[test]
     fn test_rpc_consecutive_failures_staleness_protection() {
         let state = make_active_state(2500.0, 10_000_000_000_000_000_000, 100);
 
-        // 3 ardışık "RPC hatası" — state güncellenmez
-        for i in 1..=3 {
-            // Her "hatada" 2 saniye geçiyor
-            {
-                let mut s = state.write();
+        for i in 1..=3u64 {
+            state.rcu(|old| {
+                let mut s = (**old).clone();
                 s.last_update = Instant::now() - Duration::from_secs(2 * i);
-            }
+                s
+            });
 
-            let s = state.read();
-            // is_active hâlâ true (panik yok, state bozulmadı)
+            let s = state.load();
             assert!(s.is_active(), "Hata #{}: is_active hâlâ true", i);
         }
 
-        // 6 saniye sonra staleness eşiğini aştı
-        let s = state.read();
+        let s = state.load();
         assert!(
             s.staleness_ms() >= 5000,
             "3 ardışık hatadan sonra veri bayat olmalı"
         );
     }
 
-    /// Sıfır state koruması: Hiç güncelleme gelmezse state varsayılan değerlerde.
-    /// Bu da panik yapmaz — is_active() false döner.
     #[test]
     fn test_rpc_never_connected_no_panic() {
-        let state: SharedPoolState = Arc::new(RwLock::new(PoolState::default()));
+        let state: SharedPoolState = Arc::new(ArcSwap::from_pointee(PoolState::default()));
 
-        let s = state.read();
+        let s = state.load();
         assert!(
             !s.is_active(),
             "Hiç bağlantı kurulmadıysa state aktif olmamalı"
         );
         assert_eq!(s.eth_price_usd, 0.0, "Fiyat 0 (varsayılan)");
         assert_eq!(s.liquidity, 0, "Likidite 0 (varsayılan)");
-        // Panik yok — güvenli varsayılan değerler
     }
 
-    /// SharedPoolState RwLock eş zamanlı erişim — panik yok.
-    /// Birden fazla okuyucu aynı anda erişebilir.
     #[test]
     fn test_rpc_failover_concurrent_access_no_panic() {
         let state = make_active_state(2500.0, 10_000_000_000_000_000_000, 100);
 
-        // Eş zamanlı okuma (parking_lot RwLock birden fazla reader kabul eder)
-        let s1 = state.read();
-        let s2 = state.read();
+        // ArcSwap ile eş zamanlı okuma — lock-free
+        let s1 = state.load();
+        let s2 = state.load();
 
         assert_eq!(s1.eth_price_usd, s2.eth_price_usd, "Eş zamanlı okuma tutarlı");
         assert_eq!(s1.liquidity, s2.liquidity, "Likidite değerleri tutarlı");
@@ -1793,12 +1926,13 @@ mod rpc_failover_tests {
         drop(s2);
 
         // Yazma sonrası okuma
-        {
-            let mut s = state.write();
+        state.rcu(|old| {
+            let mut s = (**old).clone();
             s.eth_price_usd = 2600.0;
-        }
+            s
+        });
 
-        let s = state.read();
+        let s = state.load();
         assert_eq!(s.eth_price_usd, 2600.0, "Yazma sonrası okuma doğru");
     }
 

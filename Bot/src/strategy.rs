@@ -65,8 +65,8 @@ pub fn check_arbitrage_opportunity(
     }
 
     // Read lock — çok kısa süreli
-    let state_a = states[0].read().clone();
-    let state_b = states[1].read().clone();
+    let state_a = states[0].load_full().as_ref().clone();
+    let state_b = states[1].load_full().as_ref().clone();
 
     // v10.0: Hard-Abort — Stale Data Guard (is_fresh = is_active + staleness eşiği)
     // is_active(): is_initialized && !is_stale && eth_price>0 && liquidity>0
@@ -425,8 +425,8 @@ pub async fn evaluate_and_execute<P: Provider + Sync>(
     // kar�� savunmas�zd�r. ��lem g�nderilmeden �nce havuz verilerinin
     // max_staleness_ms e�i�ini a�mad��� do�rulan�r.
     {
-        let state_a_guard = states[0].read();
-        let state_b_guard = states[1].read();
+        let state_a_guard = states[0].load();
+        let state_b_guard = states[1].load();
         if !state_a_guard.is_fresh(config.max_staleness_ms) || !state_b_guard.is_fresh(config.max_staleness_ms) {
             let staleness_a = state_a_guard.staleness_ms();
             let staleness_b = state_b_guard.staleness_ms();
@@ -482,7 +482,7 @@ pub async fn evaluate_and_execute<P: Provider + Sync>(
         );
 
         // v9.0: Deadline block hesapla (v11.0: minimum +3 tolerans)
-        let current_block = states[0].read().last_block;
+        let current_block = states[0].load().last_block;
         let deadline_block = current_block as u32 + config.deadline_blocks.max(3);
 
         let calldata = crate::simulator::encode_compact_calldata(
@@ -610,7 +610,7 @@ pub async fn evaluate_and_execute<P: Provider + Sync>(
             );
 
         // v11.0: Deadline block hesapla (minimum +3 tolerans)
-        let current_block = states[0].read().last_block;
+        let current_block = states[0].load().last_block;
         let deadline_block = current_block as u32 + config.deadline_blocks.max(3);
 
         // v21.0: Bribe hesab� MevExecutor::compute_dynamic_bribe'a devredildi.
@@ -627,8 +627,8 @@ pub async fn evaluate_and_execute<P: Provider + Sync>(
         // compute_exact_directional_profit kullan�l�r.
         // Bu fonksiyon do�rudan owedToken cinsinden k�r d�nd�r�r.
         let exact_min_profit = {
-            let pool_a_state = states[0].read();
-            let pool_b_state = states[1].read();
+            let pool_a_state = states[0].load();
+            let pool_b_state = states[1].load();
             let pool_a_fee_pips = pools[0].fee_bps * 100;
             let pool_b_fee_pips = pools[1].fee_bps * 100;
 
@@ -662,8 +662,8 @@ pub async fn evaluate_and_execute<P: Provider + Sync>(
 
         // v24.0: Desimal-duyarl� dinamik slippage
         let slippage_bps = {
-            let buy_state = states[opportunity.buy_pool_idx].read();
-            let sell_state = states[opportunity.sell_pool_idx].read();
+            let buy_state = states[opportunity.buy_pool_idx].load();
+            let sell_state = states[opportunity.sell_pool_idx].load();
             determine_slippage_factor_bps(
                 buy_state.liquidity,
                 sell_state.liquidity,
@@ -1162,7 +1162,7 @@ pub fn check_multi_hop_opportunities(
         // v10.0: Hard-abort — stale veya is_stale=true olan havuz varsa rota atlanır
         let all_active = route.hops.iter().all(|hop| {
             if hop.pool_idx < states.len() {
-                let state = states[hop.pool_idx].read();
+                let state = states[hop.pool_idx].load();
                 state.is_active() && state.staleness_ms() <= config.max_staleness_ms
             } else {
                 false
@@ -1174,7 +1174,7 @@ pub fn check_multi_hop_opportunities(
 
         // Havuz durumlar�n� ve yap�land�rmalar�n� topla
         let pool_states: Vec<crate::types::PoolState> = route.hops.iter().map(|hop| {
-            states[hop.pool_idx].read().clone()
+            states[hop.pool_idx].load_full().as_ref().clone()
         }).collect();
         let pool_configs: Vec<&PoolConfig> = route.hops.iter().map(|hop| {
             &pools[hop.pool_idx]
@@ -1303,7 +1303,7 @@ pub async fn evaluate_and_execute_multi_hop<P: Provider + Sync>(
     // Veri tazeliği kontrolü — tüm hop havuzları is_fresh() ile
     for &pool_idx in &opportunity.pool_indices {
         if pool_idx >= states.len() { return None; }
-        let state = states[pool_idx].read();
+        let state = states[pool_idx].load();
         if !state.is_fresh(config.max_staleness_ms) {
             eprintln!(
                 "     \u{1f6d1} [Multi-Hop FreshnessGate] Pool #{} stale/outdated: {}ms (threshold={}ms)",
@@ -1324,7 +1324,7 @@ pub async fn evaluate_and_execute_multi_hop<P: Provider + Sync>(
 
     // Exact profit do�rulamas�
     let pool_states_ex: Vec<crate::types::PoolState> = opportunity.pool_indices.iter()
-        .map(|&i| states[i].read().clone()).collect();
+        .map(|&i| states[i].load_full().as_ref().clone()).collect();
     let pool_configs_ex: Vec<&PoolConfig> = opportunity.pool_indices.iter()
         .map(|&i| &pools[i]).collect();
     let state_refs_ex: Vec<&crate::types::PoolState> = pool_states_ex.iter().collect();
@@ -1338,12 +1338,12 @@ pub async fn evaluate_and_execute_multi_hop<P: Provider + Sync>(
     }
 
     // Deadline block
-    let current_block = states[opportunity.pool_indices[0]].read().last_block;
+    let current_block = states[opportunity.pool_indices[0]].load().last_block;
     let deadline_block = current_block as u32 + config.deadline_blocks.max(3);
 
     // Dinamik slippage-adjusted minProfit
     let min_liq = opportunity.pool_indices.iter()
-        .map(|&i| states[i].read().liquidity)
+        .map(|&i| states[i].load().liquidity)
         .min().unwrap_or(0);
     let slippage_bps = if min_liq >= 10u128.pow(15) {
         9950u64
@@ -1483,7 +1483,7 @@ mod gas_spike_tests {
     use super::*;
     use alloy::primitives::{address, Address};
     use std::sync::Arc;
-    use parking_lot::RwLock;
+    use arc_swap::ArcSwap;
     use std::time::Instant;
 
     const POOL_A_ADDR: Address = address!("d0b53D9277642d899DF5C87A3966A349A798F224");
@@ -1523,6 +1523,9 @@ mod gas_spike_tests {
             private_rpc_url: None,
             rpc_wss_url_extra: Vec::new(),
             max_pool_fee_bps: 200, // Test: y�ksek tavan � gas spike testleri fee filtresinden etkilenmesin
+            min_tvl_usd: 1_000_000.0,
+            min_volume_24h_usd: 500_000.0,
+            max_tracked_pools: 4,
         }
     }
 
@@ -1566,7 +1569,7 @@ mod gas_spike_tests {
         let tick = (price_ratio.ln() / 0.000_099_995_000_33_f64).floor() as i32;
         // v7.0: U256 sqrtPriceX96 art�k exact tick-bazl� hesaplan�r
         let sqrt_price_x96_u256 = math::exact::get_sqrt_ratio_at_tick(tick);
-        Arc::new(RwLock::new(PoolState {
+        Arc::new(ArcSwap::from_pointee(PoolState {
             sqrt_price_x96: sqrt_price_x96_u256,
             sqrt_price_f64,
             tick,

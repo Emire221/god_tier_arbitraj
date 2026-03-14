@@ -265,7 +265,7 @@ impl SimulationEngine {
             if self.bytecode_cache.iter().any(|(addr, _)| *addr == config.address) {
                 continue;
             }
-            let state = state_lock.read();
+            let state = state_lock.load();
             if let Some(ref code) = state.bytecode {
                 self.bytecode_cache.push((config.address, code.clone()));
             }
@@ -305,7 +305,7 @@ impl SimulationEngine {
 
         // v20.0: StorageLayout şablonu ile DEX-bağımsız storage injection
         for (config, state_lock) in pools.iter().zip(states.iter()) {
-            let state = state_lock.read();
+            let state = state_lock.load();
             let addr = to_revm_addr(config.address);
             let layout = StorageLayout::for_dex(config.dex);
 
@@ -328,7 +328,7 @@ impl SimulationEngine {
 
         // ── Havuz Kontratlarını Yükle ──────────────────────────────
         for (config, state_lock) in pools.iter().zip(states.iter()) {
-            let state = state_lock.read();
+            let state = state_lock.load();
             let addr = to_revm_addr(config.address);
 
             // Bytecode
@@ -502,8 +502,8 @@ impl SimulationEngine {
         amount_weth: f64,
     ) -> SimulationResult {
         // Temel doğrulamalar
-        let buy_state = states[buy_pool_idx].read();
-        let sell_state = states[sell_pool_idx].read();
+        let buy_state = states[buy_pool_idx].load();
+        let sell_state = states[sell_pool_idx].load();
 
         // 1. Havuzlar aktif mi?
         if !buy_state.is_active() || !sell_state.is_active() {
@@ -1042,7 +1042,7 @@ mod sequencer_reorg_tests {
     use super::*;
     use alloy::primitives::{Address, U256, address};
     use std::sync::Arc;
-    use parking_lot::RwLock;
+    use arc_swap::ArcSwap;
     use std::time::{Instant, Duration};
     use crate::types::*;
 
@@ -1088,7 +1088,7 @@ mod sequencer_reorg_tests {
         let q96_f64: f64 = 2.0_f64.powi(96);
         let sqrt_price_f64 = price_ratio.sqrt() * q96_f64;
 
-        Arc::new(RwLock::new(PoolState {
+        Arc::new(ArcSwap::from_pointee(PoolState {
             sqrt_price_x96: sqrt_price_x96_u256,
             sqrt_price_f64: sqrt_price_f64,
             tick,
@@ -1124,7 +1124,7 @@ mod sequencer_reorg_tests {
         let tick_b = (price_ratio_b.ln() / 1.0001_f64.ln()).floor() as i32;
         let sqrt_price_x96_b = crate::math::exact::get_sqrt_ratio_at_tick(tick_b);
         let q96_f = 2.0_f64.powi(96);
-        let state_b = Arc::new(RwLock::new(PoolState {
+        let state_b = Arc::new(ArcSwap::from_pointee(PoolState {
             sqrt_price_x96: sqrt_price_x96_b,
             sqrt_price_f64: price_ratio_b.sqrt() * q96_f,
             tick: tick_b,
@@ -1166,7 +1166,7 @@ mod sequencer_reorg_tests {
         let state_a = make_active_state(2500.0, 10_000_000_000_000_000_000, 100);
 
         // Reorg sonrası havuz B: fiyat sıfırlandı (dropped TX)
-        let state_b = Arc::new(RwLock::new(PoolState {
+        let state_b = Arc::new(ArcSwap::from_pointee(PoolState {
             sqrt_price_x96: U256::ZERO,
             sqrt_price_f64: 0.0,
             tick: 0,
@@ -1207,7 +1207,7 @@ mod sequencer_reorg_tests {
             let t = (pr.ln() / 1.0001_f64.ln()).floor() as i32;
             let sqpx96 = crate::math::exact::get_sqrt_ratio_at_tick(t);
             let qf = 2.0_f64.powi(96);
-            Arc::new(RwLock::new(PoolState {
+            Arc::new(ArcSwap::from_pointee(PoolState {
                 sqrt_price_x96: sqpx96,
                 sqrt_price_f64: pr.sqrt() * qf,
                 tick: t,

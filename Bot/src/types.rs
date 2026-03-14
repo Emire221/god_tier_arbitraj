@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::RwLock;
+use arc_swap::ArcSwap;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Token Whitelist — Güvenli Token Listesi (Base Network)
@@ -243,6 +243,61 @@ impl TickBitmapData {
     pub fn initialized_tick_count(&self) -> usize {
         self.ticks.len()
     }
+
+    /// Mint event'inden in-memory güncelleme.
+    /// tickLower sınırında liquidityNet += amount, tickUpper'da -= amount.
+    pub fn update_from_mint(&mut self, tick_lower: i32, tick_upper: i32, amount: u128, tick_spacing: i32) {
+        self.update_tick_boundary(tick_lower, amount as i128, tick_spacing);
+        self.update_tick_boundary(tick_upper, -(amount as i128), tick_spacing);
+    }
+
+    /// Burn event'inden in-memory güncelleme (Mint'in tersi).
+    pub fn update_from_burn(&mut self, tick_lower: i32, tick_upper: i32, amount: u128, tick_spacing: i32) {
+        self.update_tick_boundary(tick_lower, -(amount as i128), tick_spacing);
+        self.update_tick_boundary(tick_upper, amount as i128, tick_spacing);
+    }
+
+    /// Tek bir tick sınırının likidite bilgisini güncelle.
+    /// liquidityGross sıfıra düşerse tick uninitialized olur ve bitmap'ten temizlenir.
+    fn update_tick_boundary(&mut self, tick: i32, liquidity_net_delta: i128, tick_spacing: i32) {
+        let entry = self.ticks.entry(tick).or_insert(TickInfo {
+            liquidity_gross: 0,
+            liquidity_net: 0,
+            initialized: false,
+        });
+
+        let abs_delta = liquidity_net_delta.unsigned_abs();
+        if liquidity_net_delta > 0 {
+            entry.liquidity_gross = entry.liquidity_gross.saturating_add(abs_delta);
+        } else {
+            entry.liquidity_gross = entry.liquidity_gross.saturating_sub(abs_delta);
+        }
+        entry.liquidity_net = entry.liquidity_net.saturating_add(liquidity_net_delta);
+
+        let was_initialized = entry.initialized;
+        let new_initialized = entry.liquidity_gross > 0;
+        entry.initialized = new_initialized;
+
+        // Bitmap bit'i sadece initialized durumu değiştiğinde flip edilir
+        if was_initialized != new_initialized {
+            self.flip_bitmap_bit(tick, tick_spacing);
+        }
+
+        // Artık initialized değilse tick'i hafızadan sil
+        if !new_initialized {
+            self.ticks.remove(&tick);
+        }
+    }
+
+    /// Bitmap'te belirli bir tick'in bit'ini XOR ile flip et.
+    fn flip_bitmap_bit(&mut self, tick: i32, tick_spacing: i32) {
+        let compressed = tick / tick_spacing;
+        let word_pos = (compressed >> 8) as i16;
+        let bit_pos = (compressed & 0xFF) as u8;
+        let mask = U256::from(1u64) << bit_pos;
+        let word = self.words.entry(word_pos).or_insert(U256::ZERO);
+        *word ^= mask;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -345,8 +400,8 @@ impl PoolState {
     }
 }
 
-/// Thread-safe havuz durumu
-pub type SharedPoolState = Arc<RwLock<PoolState>>;
+/// Thread-safe havuz durumu (Lock-free: ArcSwap ile atomik pointer swap)
+pub type SharedPoolState = Arc<ArcSwap<PoolState>>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Dinamik Atomik Nonce Yöneticisi
@@ -554,11 +609,19 @@ pub struct BotConfig {
     pub rpc_wss_url_extra: Vec<String>,
     /// v21.0: Maksimum havuz komisyon tavanı (basis points)
     /// Bu değerin üzerindeki fee'ye sahip havuzlar strateji değerlendirmesinde atlanır.
-    /// Varsayılan: 30 bps (%0.30). .env'den MAX_POOL_FEE_BPS ile ayarlanabilir.
-    /// v21.0: 100→30 düşürüldü — shadow mode analizleri yüksek fee'li
-    /// havuzların kârsız olduğunu gösterdi. Düşük fee (%0.01, %0.05) havuzlara odaklanılır.
+    /// Varsayılan: 5 bps (%0.05). .env'den MAX_POOL_FEE_BPS ile ayarlanabilir.
     pub max_pool_fee_bps: u32,
+    /// Minimum TVL eşiği (USD) — keşif motorunda kullanılır
+    pub min_tvl_usd: f64,
+    /// Minimum 24 saatlik işlem hacmi eşiği (USD)
+    pub min_volume_24h_usd: f64,
+    /// Maksimum takip edilen havuz sayısı
+    pub max_tracked_pools: usize,
 }
+
+/// Hard-limit fee tier sabiti (basis points). Bu değer üzerindeki havuzlar
+/// takibe alınmaz. %0.05 = 5 bps.
+pub const MAX_FEE_TIER_BPS: u32 = 5;
 
 impl BotConfig {
     /// .env dosyasından yapılandırmayı oku
@@ -739,9 +802,15 @@ impl BotConfig {
                 extras
             },
             max_pool_fee_bps: std::env::var("MAX_POOL_FEE_BPS")
-                .unwrap_or_else(|_| "10".into())
+                .unwrap_or_else(|_| MAX_FEE_TIER_BPS.to_string())
                 .parse::<u32>()
-                .unwrap_or(10),
+                .unwrap_or(MAX_FEE_TIER_BPS),
+            min_tvl_usd: Self::parse_env_f64("MIN_TVL_USD", 1_000_000.0),
+            min_volume_24h_usd: Self::parse_env_f64("MIN_VOLUME_24H_USD", 500_000.0),
+            max_tracked_pools: std::env::var("MAX_TRACKED_POOLS")
+                .unwrap_or_else(|_| "4".into())
+                .parse::<usize>()
+                .unwrap_or(4),
         })
     }
 

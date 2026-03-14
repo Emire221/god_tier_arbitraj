@@ -137,7 +137,7 @@ impl LiquidityGraph {
         for (idx, pool) in pools.iter().enumerate() {
             // Havuz aktif mi kontrol et
             if idx < states.len() {
-                let state = states[idx].read();
+                let state = states[idx].load();
                 if !state.is_active() {
                     continue;
                 }
@@ -148,7 +148,7 @@ impl LiquidityGraph {
 
             // Likidite tahmini (WETH cinsinden)
             let liq_estimate = if idx < states.len() {
-                let state = states[idx].read();
+                let state = states[idx].load();
                 // Kaba likidite tahmini: liquidity / 10^18
                 state.liquidity_f64 / 1e18
             } else {
@@ -385,7 +385,7 @@ mod tests {
     use super::*;
     use crate::types::PoolState;
     use std::sync::Arc;
-    use parking_lot::RwLock;
+    use arc_swap::ArcSwap;
     use std::time::Instant;
 
     fn weth() -> Address {
@@ -427,7 +427,7 @@ mod tests {
     }
 
     fn make_active_state() -> SharedPoolState {
-        Arc::new(RwLock::new(PoolState {
+        Arc::new(ArcSwap::from_pointee(PoolState {
             sqrt_price_x96: alloy::primitives::U256::from(1u64) << 96,
             sqrt_price_f64: 1.0,
             tick: 0,

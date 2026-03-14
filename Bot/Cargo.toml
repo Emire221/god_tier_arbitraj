@@ -43,6 +43,9 @@ colored = "2"
 # ── Hızlı Kilit Mekanizması (Çoklu Thread Erişimi) ──
 parking_lot = "0.12"
 
+# ── Lock-Free Atomik Pointer Swap (Hot-Path State) ──
+arc-swap = "1"
+
 # ── Hex Literal (Derleme Zamanı Byte Dizileri) ──
 hex-literal = "0.4"
 

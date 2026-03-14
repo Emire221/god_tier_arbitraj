@@ -44,6 +44,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use parking_lot::RwLock;
+use arc_swap::ArcSwap;
 use tokio_util::sync::CancellationToken;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -148,7 +149,7 @@ fn print_pool_header(pools: &[PoolConfig], states: &[SharedPoolState]) {
     for (i, p) in pools.iter().enumerate() {
         let icon = if i == 0 { "🔵" } else { "🟣" };
         let fee_display = if i < states.len() {
-            states[i].read().live_fee_bps
+            states[i].load().live_fee_bps
                 .map(|b| b as f64 / 100.0)
                 .unwrap_or(p.fee_bps as f64 / 100.0)
         } else {
@@ -176,7 +177,7 @@ fn print_block_update(
 ) {
     let mut pool_info = String::new();
     for (i, (config, state_lock)) in pools.iter().zip(states.iter()).enumerate() {
-        let state = state_lock.read();
+        let state = state_lock.load();
         if state.is_active() {
             if i > 0 {
                 pool_info.push_str(" | ");
@@ -212,8 +213,8 @@ fn print_spread_info(pools: &[PoolConfig], states: &[SharedPoolState]) {
         return;
     }
 
-    let state_a = states[0].read();
-    let state_b = states[1].read();
+    let state_a = states[0].load();
+    let state_b = states[1].load();
 
     if !state_a.is_active() || !state_b.is_active() {
         return;
@@ -282,14 +283,14 @@ fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools
     for combo in pair_combos {
         if combo.pool_a_idx < pools.len() && combo.pool_b_idx < pools.len() {
             let fee_a = if combo.pool_a_idx < states.len() {
-                states[combo.pool_a_idx].read().live_fee_bps
+                states[combo.pool_a_idx].load().live_fee_bps
                     .map(|b| b as f64 / 10_000.0)
                     .unwrap_or(pools[combo.pool_a_idx].fee_fraction)
             } else {
                 pools[combo.pool_a_idx].fee_fraction
             };
             let fee_b = if combo.pool_b_idx < states.len() {
-                states[combo.pool_b_idx].read().live_fee_bps
+                states[combo.pool_b_idx].load().live_fee_bps
                     .map(|b| b as f64 / 10_000.0)
                     .unwrap_or(pools[combo.pool_b_idx].fee_fraction)
             } else {
@@ -321,7 +322,7 @@ fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools
     println!("  {}  TickBitmap Sync       : {} times", "│".yellow(), stats.tick_bitmap_syncs);
 
     for (i, state_lock) in states.iter().enumerate() {
-        let state = state_lock.read();
+        let state = state_lock.load();
         if state.is_active() {
             let bitmap_info = if let Some(ref bm) = state.tick_bitmap {
                 format!(" | Bitmap: {} tick", bm.ticks.len())
@@ -737,7 +738,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
 
     // ══════════════ PAYLAŞIMLI DURUM ══════════════
     let mut states: Vec<SharedPoolState> = pools.iter()
-        .map(|_| Arc::new(RwLock::new(PoolState::default())))
+        .map(|_| Arc::new(ArcSwap::from_pointee(PoolState::default())))
         .collect();
 
     // ══════════════ İLK SENKRONİZASYON ══════════════
@@ -803,7 +804,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     for (i, result) in sync_results.iter().enumerate() {
         match result {
             Ok(_) => {
-                let state = states[i].read();
+                let state = states[i].load();
                 let fee_info = match state.live_fee_bps {
                     Some(bps) => format!("Fee: {}bps ({:.2}%)", bps, bps as f64 / 100.0),
                     None => format!("Fee: N/A (config: {}bps)", pools[i].fee_bps),
@@ -833,7 +834,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     for (i, result) in bitmap_results.iter().enumerate() {
         match result {
             Ok(_) => {
-                let state = states[i].read();
+                let state = states[i].load();
                 if let Some(ref bm) = state.tick_bitmap {
                     println!(
                         "  {}   {} → {} inicialize tick, {} word | {}ms",
@@ -1069,7 +1070,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                     let ws = WsConnect::new(&rpc_url_ev);
                     match ProviderBuilder::default().connect_ws(ws).await {
                         Ok(ws_provider) => {
-                            match state_sync::start_swap_event_listener(
+                            match state_sync::start_pool_event_listener(
                                 &ws_provider,
                                 &pools_ev,
                                 &states_ev,
@@ -1095,11 +1096,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
 
     // ══════════════ KEŞİF MOTORU v25.0 (Otonom Keşif) ══════════════
     // On-Chain Factory Listener + Multi-API Aggregator + Skorlama + GC
-    let discovery_config = DiscoveryConfig::from_bot_config(
-        &config.rpc_wss_url,
-        config.max_pool_fee_bps,
-        config.weth_address,
-    );
+    let discovery_config = DiscoveryConfig::from_bot_config(&config);
     let discovery_registry = Arc::new(RwLock::new(LivePoolRegistry::new(pools)));
     {
         let engine = DiscoveryEngine::new(discovery_registry.clone(), discovery_config.clone());
@@ -1158,45 +1155,36 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         let block_base_fee = block_header.base_fee_per_gas
             .unwrap_or(0) as u64;
 
-        // ── 1. DURUM SENKRONİZASYONU + L1 FEE + TİCKBİTMAP (PARALEL) ────
-        // v27.1: Üç bağımsız I/O işlemi tek tokio::join! ile paralel çalışır.
-        // Eski: sync_pools → L1_fee → ... → TickBitmap (sıralı, 600ms+ ekleniyor)
-        // Yeni: sync_pools ∥ L1_fee ∥ TickBitmap (paralel, toplam ≈ max(tek RTT))
-        //
-        // TickBitmap periyodik güncelleme (her N blokta) artık ayrı bir adım değil,
-        // state sync ile eşzamanlı çalışır → blok döngüsü 500-600ms kısalır.
-        let bitmap_needs_refresh = block_number.saturating_sub(last_bitmap_block)
-            >= config.tick_bitmap_max_age_blocks;
+        // ── 1. L1 FEE + SAFETY NET (EVENT-DRIVEN MİMARİ) ────────────────
+        // v31.0: State artık event-driven güncellenir (Swap + Mint + Burn).
+        // Per-block Multicall3 sync kaldırıldı → RPC yükü %95 azaldı.
+        // Her 50 blokta hafif doğrulama sync'i yapılır (chain reorg koruması).
+        const SAFETY_NET_INTERVAL: u64 = 50;
+        let needs_safety_sync = block_number.saturating_sub(last_bitmap_block) >= SAFETY_NET_INTERVAL;
 
-        let bitmap_future = async {
-            if bitmap_needs_refresh {
-                let bm_start = Instant::now();
-                let results = sync_all_tick_bitmaps(
-                    &provider, pools, &states, block_number, config.tick_bitmap_range,
-                ).await;
-                Some((results, bm_start.elapsed()))
+        let safety_future = async {
+            if needs_safety_sync {
+                let results = sync_all_pools(&provider, pools, &states, block_number).await;
+                Some(results)
             } else {
                 None
             }
         };
 
-        let (sync_results, l1_data_fee_wei, bitmap_result) = tokio::join!(
-            sync_all_pools(&provider, pools, &states, block_number),
+        let (safety_result, l1_data_fee_wei) = tokio::join!(
+            safety_future,
             estimate_l1_data_fee(&provider),
-            bitmap_future,
         );
 
-        // TickBitmap sonuçlarını işle
-        if let Some((bm_results, bm_elapsed)) = bitmap_result {
-            let bm_ms = bm_elapsed.as_millis();
-            let bm_ok = bm_results.iter().filter(|r| r.is_ok()).count();
-            if bm_ok > 0 {
-                println!(
-                    "     {} TickBitmap updated ({}/{} pools, {}ms) [PARALLEL]",
-                    "🗺️".cyan(), bm_ok, pools.len(), bm_ms,
+        // Safety net sonuçlarını işle
+        if let Some(sync_results) = safety_result {
+            let ok_count = sync_results.iter().filter(|r| r.is_ok()).count();
+            if ok_count > 0 {
+                eprintln!(
+                    "     {} Safety net sync ({}/{} pools) [Block #{}]",
+                    "🔄", ok_count, pools.len(), block_number,
                 );
             }
-            stats.tick_bitmap_syncs += 1;
             last_bitmap_block = block_number;
         }
 
@@ -1227,14 +1215,20 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             );
         }
 
-        let all_synced = sync_results.iter().all(|r| r.is_ok());
+        // Event-driven: Havuzlar event listener tarafından sürekli güncel tutuluyor.
+        // Stale kontrolü her blokta yapılır — event kaçırılmışsa safety net yakalar.
+        let all_synced = states.iter().all(|s| {
+            let st = s.load();
+            st.is_initialized && !st.is_stale
+        });
 
-        // Hata raporlama
-        for (i, result) in sync_results.iter().enumerate() {
-            if let Err(e) = result {
+        // Stale havuzları raporla
+        for (i, state) in states.iter().enumerate() {
+            let st = state.load();
+            if st.is_stale && i < pools.len() {
                 println!(
-                    "  {} [Block #{}] {} sync error: {}",
-                    "⚠️".yellow(), block_number, pools[i].name, e
+                    "  {} [Block #{}] {} stale (event-driven, last update: {}ms ago)",
+                    "⚠️".yellow(), block_number, pools[i].name, st.staleness_ms()
                 );
             }
         }
@@ -1263,6 +1257,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         // [Adım 3] Bekleyen havuzları canlı sisteme enjekte et
         let hot_reload_count = discovery_engine::apply_pending_updates(
             &discovery_registry, pools, &mut states, pair_combos,
+            config.max_tracked_pools,
         );
         if hot_reload_count > 0 {
             // v29.0: Bytecode + State sync + TickBitmap sync ARKA PLANDA çalışır
@@ -1288,7 +1283,12 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                 for (i, result) in bytecode_results {
                     if let Ok(code) = result {
                         if !code.is_empty() {
-                            bg_states[i].write().bytecode = Some(code.to_vec());
+                            let code_vec = code.to_vec();
+                            bg_states[i].rcu(|old| {
+                                let mut s = (**old).clone();
+                                s.bytecode = Some(code_vec.clone());
+                                s
+                            });
                         }
                     }
                 }
@@ -1353,7 +1353,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
 
         // [Adım 4] Çöp Toplayıcı — soğuk havuzları temizle
         let _gc_deactivated = discovery_engine::run_garbage_collector(
-            &discovery_registry, pools, block_number, &discovery_config,
+            &discovery_registry, pools, &states, block_number, &discovery_config,
         );
 
         // [Adım 5] Skor güncelleme (her ~10 dakikada bir)
@@ -1384,8 +1384,8 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         // Önceki sürümde bu istatistikler sadece evaluate_and_execute()
         // içinde güncelleniyordu — NR kârsız bulursa hiç çağrılmıyordu.
         for combo in pair_combos.iter() {
-            let sa = states[combo.pool_a_idx].read();
-            let sb = states[combo.pool_b_idx].read();
+            let sa = states[combo.pool_a_idx].load();
+            let sb = states[combo.pool_b_idx].load();
             if sa.is_active() && sb.is_active() {
                 let spread = (sa.eth_price_usd - sb.eth_price_usd).abs();
                 let min_p = sa.eth_price_usd.min(sb.eth_price_usd);
@@ -1530,7 +1530,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                     // Exact U256 profit doğrulaması
                     let amount_wei = crate::math::exact::f64_to_u256_wei(best.optimal_amount_weth);
                     let pool_states_ex: Vec<crate::types::PoolState> = best.pool_indices.iter()
-                        .map(|&i| states[i].read().clone()).collect();
+                        .map(|&i| states[i].load_full().as_ref().clone()).collect();
                     let pool_configs_ex: Vec<&crate::types::PoolConfig> = best.pool_indices.iter()
                         .map(|&i| &pools[i]).collect();
                     let state_refs_ex: Vec<&crate::types::PoolState> = pool_states_ex.iter().collect();
@@ -1667,7 +1667,7 @@ async fn pending_tx_listener(
             pool_addresses,
         ) {
             // Etkilenen havuzun durumunu anlık oku (optimistic refresh)
-            let current_block = states[0].read().last_block;
+            let current_block = states[0].load().last_block;
             match state_sync::optimistic_refresh_pool(
                 &provider,
                 &pools[pool_idx],
@@ -1676,7 +1676,7 @@ async fn pending_tx_listener(
             ).await {
                 Ok(true) => {
                     // Fiyat değişti — havuz güncellendi
-                    let state = states[pool_idx].read();
+                    let state = states[pool_idx].load();
                     println!(
                         "     {} [Pending TX] {} optimistic update: {:.6} Q",
                         "🔮".magenta(),

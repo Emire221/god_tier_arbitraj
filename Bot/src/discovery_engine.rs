@@ -15,6 +15,7 @@ use alloy::rpc::types::Filter;
 use eyre::Result;
 use futures_util::StreamExt;
 use parking_lot::RwLock;
+use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -56,7 +57,6 @@ const GECKO_TERMINAL_API: &str = "https://api.geckoterminal.com/api/v2";
 const BASE_WETH: Address = address!("4200000000000000000000000000000000000006");
 
 /// Varsayılan yapılandırma değerleri
-const DEFAULT_MAX_ACTIVE_POOLS: usize = 50;
 const DEFAULT_COOLDOWN_BLOCKS: u64 = 500;
 const DEFAULT_SCORE_INTERVAL_BLOCKS: u64 = 300; // ~10 dakika (Base ~2s blok)
 const DEFAULT_API_POLL_INTERVAL_SECS: u64 = 300; // 5 dakika
@@ -117,21 +117,19 @@ pub struct DiscoveryConfig {
 impl DiscoveryConfig {
     /// BotConfig'ten discovery yapılandırması oluştur
     pub fn from_bot_config(
-        wss_url: &str,
-        max_fee_bps: u32,
-        weth_address: Address,
+        bot_config: &crate::types::BotConfig,
     ) -> Self {
         Self {
-            max_active_pools: DEFAULT_MAX_ACTIVE_POOLS,
+            max_active_pools: bot_config.max_tracked_pools,
             cooldown_blocks: DEFAULT_COOLDOWN_BLOCKS,
             score_interval_blocks: DEFAULT_SCORE_INTERVAL_BLOCKS,
             api_poll_interval_secs: DEFAULT_API_POLL_INTERVAL_SECS,
             gc_interval_blocks: DEFAULT_GC_INTERVAL_BLOCKS,
-            min_liquidity_usd: 50_000.0,
-            min_volume_24h_usd: 10_000.0,
-            max_fee_bps,
-            wss_url: wss_url.to_string(),
-            weth_address,
+            min_liquidity_usd: bot_config.min_tvl_usd,
+            min_volume_24h_usd: bot_config.min_volume_24h_usd,
+            max_fee_bps: bot_config.max_pool_fee_bps,
+            wss_url: bot_config.rpc_wss_url.clone(),
+            weth_address: bot_config.weth_address,
         }
     }
 }
@@ -314,6 +312,7 @@ impl LivePoolRegistry {
     pub fn garbage_collect(
         &mut self,
         pools: &[PoolConfig],
+        states: &[SharedPoolState],
         current_block: u64,
         cooldown_blocks: u64,
         max_active: usize,
@@ -325,7 +324,16 @@ impl LivePoolRegistry {
                 continue;
             }
 
-            let should_deactivate = if let Some(activity) = self.activity.get(&idx) {
+            // Likidite sıfıra düşmüş havuzları da deaktif et
+            let zero_liquidity = if idx < states.len() {
+                states[idx].load().liquidity == 0
+            } else {
+                false
+            };
+
+            let should_deactivate = if zero_liquidity {
+                true
+            } else if let Some(activity) = self.activity.get(&idx) {
                 // Son N blok boyunca swap gözlemlenmemiş
                 let blocks_since_swap = current_block.saturating_sub(activity.last_swap_block);
                 let no_swaps = blocks_since_swap > cooldown_blocks;
@@ -450,7 +458,7 @@ impl LivePoolRegistry {
             }
 
             pools.push(pool);
-            states.push(Arc::new(RwLock::new(PoolState::default())));
+            states.push(Arc::new(ArcSwap::from_pointee(PoolState::default())));
             self.active_flags.push(true);
             woken += 1;
         }
@@ -1260,6 +1268,7 @@ fn parse_gecko_terminal_pools(
 
 /// Bekleyen havuzları aktif listeye ekle ve gerekli pair_combo'ları oluştur.
 /// Ana döngü tarafından her blokta çağrılır.
+/// max_tracked_pools limiti aşılmışsa yeni havuz eklenmez.
 ///
 /// Dönüş: Eklenen yeni havuz sayısı
 pub fn apply_pending_updates(
@@ -1267,6 +1276,7 @@ pub fn apply_pending_updates(
     pools: &mut Vec<PoolConfig>,
     states: &mut Vec<SharedPoolState>,
     pair_combos: &mut Vec<PairCombo>,
+    max_tracked_pools: usize,
 ) -> usize {
     let pending = {
         let mut reg = registry.write();
@@ -1280,6 +1290,15 @@ pub fn apply_pending_updates(
     let mut added = 0;
 
     for pending_pool in pending {
+        // MAX_TRACKED_POOLS limiti kontrolü
+        if pools.len() >= max_tracked_pools {
+            eprintln!(
+                "  \u{26a0}\u{fe0f} MAX_TRACKED_POOLS ({}) reached, skipping remaining pending pools",
+                max_tracked_pools
+            );
+            break;
+        }
+
         let new_addr = pending_pool.config.address;
 
         // Mevcut havuzlarda zaten var mı?
@@ -1306,7 +1325,7 @@ pub fn apply_pending_updates(
         }
 
         pools.push(new_pool);
-        states.push(Arc::new(RwLock::new(PoolState::default())));
+        states.push(Arc::new(ArcSwap::from_pointee(PoolState::default())));
 
         {
             let mut reg = registry.write();
@@ -1338,6 +1357,7 @@ pub fn apply_pending_updates(
 pub fn run_garbage_collector(
     registry: &Arc<RwLock<LivePoolRegistry>>,
     pools: &[PoolConfig],
+    states: &[SharedPoolState],
     current_block: u64,
     config: &DiscoveryConfig,
 ) -> Vec<usize> {
@@ -1350,6 +1370,7 @@ pub fn run_garbage_collector(
 
     let deactivated = reg.garbage_collect(
         pools,
+        states,
         current_block,
         config.cooldown_blocks,
         config.max_active_pools,
@@ -1425,8 +1446,8 @@ pub fn record_spread_observation(
     pool_b_idx: usize,
     states: &[SharedPoolState],
 ) {
-    let sa = states[pool_a_idx].read();
-    let sb = states[pool_b_idx].read();
+    let sa = states[pool_a_idx].load();
+    let sb = states[pool_b_idx].load();
 
     if !sa.is_active() || !sb.is_active() {
         return;

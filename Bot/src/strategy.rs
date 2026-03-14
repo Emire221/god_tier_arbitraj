@@ -227,56 +227,43 @@ pub fn check_arbitrage_opportunity(
         }
     }
 
-    // ��� v19.0: O(1) PreFilter � NR'ye girmeden h�zl� eleme ���
-    // Spread'in fee + gas + bribe maliyetlerini kurtar�p kurtaramayaca��n�
-    // mikrosaniyede kontrol eder. v27.0: probe_amount art�k havuzun ger�ek
-    // likiditesine (effective_cap) g�re s�n�rland�r�l�r.
-    {
-        // Dinamik gas cost (PreFilter i�in) � L2 + L1 + %20 g�venlik marj�
-        let gas_estimate: u64 = last_simulated_gas.unwrap_or(200_000);
-        let prefilter_gas_cost_weth = if block_base_fee > 0 {
-            let l2 = (gas_estimate as f64 * block_base_fee as f64) / 1e18;
-            // v19.0: %20 g�venlik marj� (gas tahminindeki belirsizlik)
-            ((l2 + l1_data_fee_weth) * 1.20).max(0.00002)
-        } else {
-            ((config.gas_cost_fallback_weth + l1_data_fee_weth) * 1.20).max(0.00002)
-        };
+    // OPT-I: Gas cost tek sefer hesapla — PreFilter ve NR ayni degeri kullanir.
+    // OPT-H: Guvenlik marji %20 -> %10 (Base L2'de gas spike nadir).
+    let gas_estimate: u64 = last_simulated_gas.unwrap_or(200_000);
+    let dynamic_gas_cost_weth = if block_base_fee > 0 {
+        let l2 = (gas_estimate as f64 * block_base_fee as f64) / 1e18;
+        ((l2 + l1_data_fee_weth) * 1.10).max(0.00002)
+    } else {
+        ((config.gas_cost_fallback_weth + l1_data_fee_weth) * 1.10).max(0.00002)
+    };
 
+    // PreFilter
+    {
         let pre_filter = math::PreFilter {
             fee_a: state_a.live_fee_bps.map(|b| b as f64 / 10_000.0).unwrap_or(pools[0].fee_fraction),
             fee_b: state_b.live_fee_bps.map(|b| b as f64 / 10_000.0).unwrap_or(pools[1].fee_fraction),
-            // v19.0: Gas + bribe maliyeti (bribe = k�r�n %25'i, en k�t� senaryo)
-            estimated_gas_cost_weth: prefilter_gas_cost_weth,
+            estimated_gas_cost_weth: dynamic_gas_cost_weth,
             min_profit_weth: config.min_net_profit_weth,
             flash_loan_fee_rate: config.flash_loan_fee_bps / 10_000.0,
-            // v26.0: PreFilter bribe � config de�eri + %10 konservatif marj.
-            // Eski v22.0: .max(0.50) � config %25 iken %50 zorluyor, ge�erli
-            // tight-spread f�rsatlar�n� haks�z yere reddediyordu.
-            // Yeni: config.bribe_pct * 1.10 � %25 config � %27.5 PreFilter.
-            // Gas maliyetinde zaten %20 g�venlik marj� var (�stte).
-            bribe_pct: config.bribe_pct * 1.10,
+            bribe_pct: config.bribe_pct * 1.05,
         };
 
-        // v27.0: Ger�ek havuz derinli�ine g�re s�n�rland�r�lm�� probe miktar�
-        // Eski: config.max_trade_size_weth * 0.5 (statik, havuz derinli�ini yok say�yordu)
-        // Yeni: min(max_trade * 0.5, effective_cap) � s�� havuzlarda sahte k�r tahmini �nlenir
         let probe_amount = f64::min(config.max_trade_size_weth * 0.5, effective_cap);
 
         match pre_filter.check(price_a, price_b, probe_amount) {
             math::PreFilterResult::Unprofitable { reason } => {
                 eprintln!(
-                    "     \u{23ed}\u{fe0f} [PreFilter] Spread {:.4}% � {:?} | fee_total={:.3}% | gas={:.8} WETH | probe={:.4} WETH",
+                    "     \u{23ed}\u{fe0f} [PreFilter] Spread {:.4}% | {:?} | gas={:.8} WETH | probe={:.4} WETH",
                     spread_pct,
                     reason,
-                    (pre_filter.fee_a + pre_filter.fee_b + config.flash_loan_fee_bps / 10_000.0) * 100.0,
-                    prefilter_gas_cost_weth,
+                    dynamic_gas_cost_weth,
                     probe_amount,
                 );
                 return None;
             }
             math::PreFilterResult::Profitable { estimated_profit_weth, spread_ratio } => {
                 eprintln!(
-                    "     \u{2705} [PreFilter] PASSED | spread_ratio={:.6} | est_profit={:.8} WETH | probe={:.4} WETH — proceeding to NR",
+                    "     \u{2705} [PreFilter] PASSED | spread_ratio={:.6} | est_profit={:.8} WETH | probe={:.4} WETH",
                     spread_ratio,
                     estimated_profit_weth,
                     probe_amount,
@@ -285,25 +272,7 @@ pub fn check_arbitrage_opportunity(
         }
     }
 
-    // ��� Dinamik Gas Cost (v19.0) ���������������������������������
-    // Form�l: total_gas = L2_execution_fee + L1_data_fee + g�venlik marj�
-    //   L2: gas_cost_weth = (gas_estimate * base_fee) / 1e18
-    //   L1: l1_data_fee_wei (GasPriceOracle.getL1Fee() sonucu)
-    //
-    // OP Stack a�lar�nda (Base) as�l maliyet L1 data fee'dir.
-    // L2 execution fee genelde �ok d���kt�r (~0.001 Gwei base_fee).
-    // L1 data fee'yi hesaba katmamak botun zarar�na i�lem yapmas�na yol a�ar.
-    // v19.0: %20 g�venlik marj� eklendi � gas spike'lar�nda zarara girmemek i�in.
-    let dynamic_gas_cost_weth = if block_base_fee > 0 {
-        let gas_estimate: u64 = last_simulated_gas.unwrap_or(200_000);
-        let l2_gas_cost_weth = (gas_estimate as f64 * block_base_fee as f64) / 1e18;
-        // Toplam: (L2 execution + L1 data fee) � 1.20 g�venlik marj�
-        ((l2_gas_cost_weth + l1_data_fee_weth) * 1.20).max(0.00002)
-    } else {
-        ((config.gas_cost_fallback_weth + l1_data_fee_weth) * 1.20).max(0.00002)
-    };
-
-    // Gas cost'u quote cinsine �evir (NR i�in)
+    // Gas cost'u quote cinsine cevir (NR icin)
     let dynamic_gas_cost_quote = dynamic_gas_cost_weth * avg_price_in_quote;
 
     // ��� Newton-Raphson Optimal Miktar Hesaplama ������������������
@@ -1187,9 +1156,9 @@ pub fn check_multi_hop_opportunities(
         let multi_hop_gas: u64 = 310_000 + (route.hop_count() as u64 - 2) * 130_000;
         let dynamic_gas_cost_weth = if block_base_fee > 0 {
             let l2 = (multi_hop_gas as f64 * block_base_fee as f64) / 1e18;
-            ((l2 + l1_data_fee_weth) * 1.20).max(0.00002)
+            ((l2 + l1_data_fee_weth) * 1.10).max(0.00002)
         } else {
-            ((config.gas_cost_fallback_weth + l1_data_fee_weth) * 1.20).max(0.00002)
+            ((config.gas_cost_fallback_weth + l1_data_fee_weth) * 1.10).max(0.00002)
         };
 
         // Ortalama ETH fiyat� (ilk havuzdan)

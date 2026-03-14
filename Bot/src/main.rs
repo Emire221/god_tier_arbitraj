@@ -41,11 +41,17 @@ use eyre::Result;
 use chrono::Local;
 use colored::*;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use parking_lot::RwLock;
 use arc_swap::ArcSwap;
 use tokio_util::sync::CancellationToken;
+
+// ── OPT-4: L1 Data Fee arka plan cache'i ──
+// OP Stack'te L1 fee ~12 saniyede bir değişir (L1 blok süresi).
+// Her 2 saniyede (Base blok) RPC sorgusu yapmak yerine, arka planda 12s'de bir güncelle.
+static GLOBAL_L1_FEE: AtomicU64 = AtomicU64::new(500_000_000_000_000); // 0.0005 ETH fallback
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Terminal Çıktı Yardımcıları
@@ -208,45 +214,6 @@ fn print_block_update(
     json_logger::log_block(block_number, sync_ms, pools.len());
 }
 
-fn print_spread_info(pools: &[PoolConfig], states: &[SharedPoolState]) {
-    if states.len() < 2 {
-        return;
-    }
-
-    let state_a = states[0].load();
-    let state_b = states[1].load();
-
-    if !state_a.is_active() || !state_b.is_active() {
-        return;
-    }
-
-    let spread = (state_a.eth_price_usd - state_b.eth_price_usd).abs();
-    let min_price = state_a.eth_price_usd.min(state_b.eth_price_usd);
-    let spread_pct = if min_price > 0.0 {
-        (spread / min_price) * 100.0
-    } else {
-        0.0
-    };
-
-    if spread_pct > 0.001 {
-        let direction = if state_a.eth_price_usd < state_b.eth_price_usd {
-            format!("{} → {}", pools[0].name, pools[1].name)
-        } else {
-            format!("{} → {}", pools[1].name, pools[0].name)
-        };
-
-        if spread_pct > 0.05 {
-            println!(
-                "     {} Spread: {:.4}% ({:.6}Q) | {} BUY→SELL",
-                "📊".yellow(), spread_pct, spread, direction,
-            );
-        } else {
-            println!(
-                "     📊 Spread: {:.4}% ({:.6}Q) | {}", spread_pct, spread, direction,
-            );
-        }
-    }
-}
 
 fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools: &[PoolConfig], pair_combos: &[pool_discovery::PairCombo]) {
     println!();
@@ -528,7 +495,7 @@ async fn main() -> Result<()> {
         pool_discovery::cli_discover_pools().await?;
         pool_discovery::load_matched_pools()?
     };
-    let (pools_initial, pair_combos_initial) = pool_discovery::build_runtime(&matched_cfg)?;
+    let (pools_initial, pair_combos_initial) = pool_discovery::build_runtime(&matched_cfg, config.max_tracked_pools)?;
     // v25.0: Havuz listeleri artık mutable — hot-reload için
     let mut pools = pools_initial;
     let mut pair_combos = pair_combos_initial;
@@ -1094,6 +1061,38 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         });
     }
 
+    // ══════════════ L1 FEE ARKA PLAN GÖREVİ (OPT-4) ══════════════
+    // OP Stack L1 data fee ~12 saniyede bir değişir (L1 blok süresi).
+    // Her Base bloğunda RPC sorgulamak yerine, 12s'de bir arka planda güncelle.
+    // Ana döngü AtomicU64'ten lock-free okur → sıfır RPC latency hot path'te.
+    {
+        let initial_l1_fee = estimate_l1_data_fee(&provider).await;
+        GLOBAL_L1_FEE.store(initial_l1_fee as u64, Ordering::Relaxed);
+        eprintln!(
+            "  {} L1 Data Fee cached: {} wei ({:.8} ETH) — background refresh every 12s",
+            "⛽".cyan(), initial_l1_fee, initial_l1_fee as f64 / 1e18
+        );
+
+        let provider_l1 = provider.clone();
+        let token_l1 = cancel_token.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(12));
+            interval.tick().await; // skip first immediate tick
+            loop {
+                tokio::select! {
+                    _ = token_l1.cancelled() => {
+                        eprintln!("  🔌 L1 Fee background task graceful shutdown");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        let fee = estimate_l1_data_fee(&provider_l1).await;
+                        GLOBAL_L1_FEE.store(fee as u64, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+    }
+
     // ══════════════ KEŞİF MOTORU v25.0 (Otonom Keşif) ══════════════
     // On-Chain Factory Listener + Multi-API Aggregator + Skorlama + GC
     let discovery_config = DiscoveryConfig::from_bot_config(&config);
@@ -1171,10 +1170,9 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             }
         };
 
-        let (safety_result, l1_data_fee_wei) = tokio::join!(
-            safety_future,
-            estimate_l1_data_fee(&provider),
-        );
+        // OPT-4: Safety net async + L1 fee from AtomicU64 cache
+        let safety_result = safety_future.await;
+        let l1_data_fee_wei = GLOBAL_L1_FEE.load(Ordering::Relaxed) as u128;
 
         // Safety net sonuçlarını işle
         if let Some(sync_results) = safety_result {
@@ -1371,26 +1369,33 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         // ── 1.5. TİCKBİTMAP — Artık §1'de paralel çalışıyor (v27.1) ──
 
         // ── 2. BLOK + SPREAD BİLGİSİ ───────────────────────
+        // OPT-5: Üç ayrı pair_combos iterasyonu birleştirildi.
+        // print_spread_info + istatistik güncelleme tek pass'ta yapılır.
+        // PoolConfig clone yerine referans kullanılır.
         print_block_update(block_number, pools, &states, sync_ms);
-        for combo in pair_combos.iter() {
-            let pp = [pools[combo.pool_a_idx].clone(), pools[combo.pool_b_idx].clone()];
-            let ps = [states[combo.pool_a_idx].clone(), states[combo.pool_b_idx].clone()];
-            print_spread_info(&pp, &ps);
-        }
-
-        // ── 2.5. SPREAD İSTATİSTİK GÜNCELLEMESİ (Her blokta) ────────
-        // v15.0 FIX: max_spread ve total_opportunities güncelleme
-        // fırsat değerlendirmesinden BAĞIMSIZ olarak her blokta çalışır.
-        // Önceki sürümde bu istatistikler sadece evaluate_and_execute()
-        // içinde güncelleniyordu — NR kârsız bulursa hiç çağrılmıyordu.
         for combo in pair_combos.iter() {
             let sa = states[combo.pool_a_idx].load();
             let sb = states[combo.pool_b_idx].load();
+
+            // Spread bilgisi yazdır (referansla, clone yok)
             if sa.is_active() && sb.is_active() {
                 let spread = (sa.eth_price_usd - sb.eth_price_usd).abs();
                 let min_p = sa.eth_price_usd.min(sb.eth_price_usd);
                 if min_p > 0.0 {
                     let spread_pct = (spread / min_p) * 100.0;
+                    let direction = if sa.eth_price_usd < sb.eth_price_usd {
+                        format!("{} \u{2192} {}", pools[combo.pool_a_idx].name, pools[combo.pool_b_idx].name)
+                    } else {
+                        format!("{} \u{2192} {}", pools[combo.pool_b_idx].name, pools[combo.pool_a_idx].name)
+                    };
+                    if spread_pct > 0.001 {
+                        println!(
+                            "     Spread: {:.4}% ({:.6}Q) | {} BUY\u{2192}SELL",
+                            spread_pct, spread, direction,
+                        );
+                    }
+
+                    // İstatistik güncelleme
                     if spread_pct > stats.max_spread_pct {
                         stats.max_spread_pct = spread_pct;
                     }
@@ -1410,22 +1415,30 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         const PIPELINE_BUDGET_MS: u128 = 1500; // Base L2 ~2s blok, %75 bütçe
 
         if all_synced && pipeline_elapsed_ms <= PIPELINE_BUDGET_MS {
+            // OPT-6: Discovery registry aktif snapshot — tek seferde al, combo loop'ta RwLock yok
+            let active_snapshot: Vec<bool> = {
+                let reg = discovery_registry.read();
+                (0..pools.len()).map(|i| reg.is_active(i)).collect()
+            };
+
+            // OPT-3: İki fazlı arbitraj taraması — tüm combo'ları tara, EN İYİ fırsatı seç
+            // Eski: Sıralı tarama, ilk kârlı fırsat bulununca simulate+execute (suboptimal)
+            // Yeni: Tüm combo'lar değerlendirilir, en yüksek kârlı fırsat seçilir
+            let mut opportunities: Vec<(usize, ArbitrageOpportunity, [PoolConfig; 2], [SharedPoolState; 2])> = Vec::new();
+
             for (combo_idx, combo) in pair_combos.iter().enumerate() {
-                // v25.0: GC tarafından deaktive edilmiş havuzları atla
-                {
-                    let reg = discovery_registry.read();
-                    if !reg.is_active(combo.pool_a_idx) || !reg.is_active(combo.pool_b_idx) {
-                        continue;
-                    }
+                // OPT-6: Snapshot'tan aktiflik kontrolü (RwLock yok)
+                if combo.pool_a_idx >= active_snapshot.len() || combo.pool_b_idx >= active_snapshot.len() {
+                    continue;
+                }
+                if !active_snapshot[combo.pool_a_idx] || !active_snapshot[combo.pool_b_idx] {
+                    continue;
                 }
 
-                // ── v11.0: Cool-down Blacklist kontrolü ──────────────
-                // Bu çift blacklist'te mi? (current_block + 100 blok engeli)
+                // v11.0: Cool-down Blacklist kontrolü
                 if let Some(&until_block) = pair_cooldown.get(&combo_idx) {
                     if block_number < until_block {
-                        // Hâlâ cool-down'da — bu çifti atla, diğerlerine devam et
                         if block_number % 25 == 0 {
-                            // Her 25 blokta bir hatırlatma logu
                             eprintln!(
                                 "     \u{26d4} [Blacklist] {} \u{2192} blocked until block #{} (remaining: {} blocks)", combo.pair_name, until_block,
                                 until_block.saturating_sub(block_number),
@@ -1433,7 +1446,6 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                         }
                         continue;
                     } else {
-                        // Cool-down süresi doldu — çifti yeniden aktif et
                         pair_cooldown.remove(&combo_idx);
                         pair_failures.remove(&combo_idx);
                         eprintln!(
@@ -1445,45 +1457,55 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                 let pp = [pools[combo.pool_a_idx].clone(), pools[combo.pool_b_idx].clone()];
                 let ps = [states[combo.pool_a_idx].clone(), states[combo.pool_b_idx].clone()];
                 if let Some(opportunity) = check_arbitrage_opportunity(&pp, &ps, config, block_base_fee, last_simulated_gas, l1_data_fee_wei) {
-                    // ── 4. DEĞERLENDİR + SİMÜLE + YÜRÜT ────────────────
-                    if let Some(gas) = evaluate_and_execute(
-                        &provider,
-                        config,
-                        &pp,
-                        &ps,
-                        &opportunity,
-                        &sim_engine,
-                        &mut stats,
-                        &nonce_manager,
-                        block_timestamp,
-                        block_base_fee,
-                        sync_ms as f64,
-                        l1_data_fee_wei,
-                        &mev_executor,
-                    ).await {
-                        last_simulated_gas = Some(gas);
-                        // Başarılı simülasyon — bu çift için hata sayacını sıfırla
-                        pair_failures.remove(&combo_idx);
-                    } else {
-                        // evaluate_and_execute None döndü → simülasyon başarısız
-                        // Per-pair ardışık hata sayacını artır
-                        let failures = pair_failures.entry(combo_idx).or_insert(0);
-                        *failures += 1;
+                    opportunities.push((combo_idx, opportunity, pp, ps));
+                }
+            }
 
-                        if *failures >= config.circuit_breaker_threshold {
-                            // Bu çifti 100 blok boyunca blacklist'e al
-                            let cooldown_until = block_number + 100;
-                            pair_cooldown.insert(combo_idx, cooldown_until);
-                            eprintln!(
-                                "\n  \u{1f6d1} CIRCUIT BREAKER: {} {} consecutive failures — blacklisted until block #{} (~{}s)",
-                                combo.pair_name,
-                                failures,
-                                cooldown_until,
-                                100 * 2, // Base L2 ~2s blok süresi
-                            );
-                            // Global stats'ı da güncelle
-                            stats.consecutive_failures = 0;
-                        }
+            // Faz 2: En yüksek kârlı fırsatı seç, sadece onu simulate+execute et
+            let opp_count = opportunities.len();
+            if let Some((best_idx, best_opp, best_pp, best_ps)) = opportunities.into_iter()
+                .max_by(|a, b| a.1.expected_profit_weth.partial_cmp(&b.1.expected_profit_weth).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                if opp_count > 1 {
+                    eprintln!(
+                        "     \u{1f3af} [BestPick] Selected {} (profit={:.8} WETH) from {} candidates",
+                        pair_combos[best_idx].pair_name, best_opp.expected_profit_weth, opp_count,
+                    );
+                }
+
+                // ── 4. DEĞERLENDİR + SİMÜLE + YÜRÜT ────────────────
+                if let Some(gas) = evaluate_and_execute(
+                    &provider,
+                    config,
+                    &best_pp,
+                    &best_ps,
+                    &best_opp,
+                    &sim_engine,
+                    &mut stats,
+                    &nonce_manager,
+                    block_timestamp,
+                    block_base_fee,
+                    sync_ms as f64,
+                    l1_data_fee_wei,
+                    &mev_executor,
+                ).await {
+                    last_simulated_gas = Some(gas);
+                    pair_failures.remove(&best_idx);
+                } else {
+                    let failures = pair_failures.entry(best_idx).or_insert(0);
+                    *failures += 1;
+
+                    if *failures >= config.circuit_breaker_threshold {
+                        let cooldown_until = block_number + 100;
+                        pair_cooldown.insert(best_idx, cooldown_until);
+                        eprintln!(
+                            "\n  \u{1f6d1} CIRCUIT BREAKER: {} {} consecutive failures — blacklisted until block #{} (~{}s)",
+                            pair_combos[best_idx].pair_name,
+                            failures,
+                            cooldown_until,
+                            100 * 2,
+                        );
+                        stats.consecutive_failures = 0;
                     }
                 }
             }

@@ -2,7 +2,7 @@
 //  MATH v7.0 — U256 Exact-Math Stabilizasyon + Multi-Tick CL Swap Motoru
 //
 //  v7.0 Yenilikler (Faz 1 — Stabilizasyon):
-//  ✓ compute_arbitrage_profit_with_bitmap → U256 exact::compute_exact_swap
+//  ✓ compute_arbitrage_profit_presorted → U256 exact::compute_exact_swap_presorted
 //  ✓ find_optimal_amount_with_bitmap → U256 liq cap (max_safe_swap_amount_u256)
 //  ✓ swap_weth_to_usdc_exact / swap_usdc_to_weth_exact — U256 public API
 //  ✓ max_safe_swap_amount → U256 delegasyonu
@@ -226,9 +226,11 @@ pub fn compute_eth_price(
     price_from_sqrt
 }
 
-/// Bu sayede off-chain hesaplama, on-chain sonuçla wei bazında eşleşir.
+
+/// OPT-1: Pre-sorted tick'lerle arbitraj kâr hesaplaması.
+/// `compute_arbitrage_profit_with_bitmap` ile aynı mantık, ama tick sıralama sıfır maliyetli.
 #[allow(clippy::too_many_arguments)]
-pub fn compute_arbitrage_profit_with_bitmap(
+pub fn compute_arbitrage_profit_presorted(
     amount_in_weth: f64,
     sell_pool: &PoolState,
     sell_fee_fraction: f64,
@@ -238,19 +240,14 @@ pub fn compute_arbitrage_profit_with_bitmap(
     flash_loan_fee_bps: f64,
     eth_price_usd: f64,
     sell_token0_is_weth: bool,
-    _sell_tick_spacing: i32,
-    _buy_tick_spacing: i32,
-    sell_bitmap: Option<&TickBitmapData>,
-    buy_bitmap: Option<&TickBitmapData>,
     buy_token0_is_weth: bool,
+    sell_sorted: &[(i32, i128, alloy::primitives::U256)],
+    buy_sorted: &[(i32, i128, alloy::primitives::U256)],
 ) -> f64 {
     if amount_in_weth <= 0.0 {
         return f64::NEG_INFINITY;
     }
 
-    // ═══ U256 EXACT MATH — On-Chain Deterministik Kesinlik ═══
-
-    // f64 → U256 wei dönüşümü
     let amount_in_wei = alloy::primitives::U256::from(
         crate::types::safe_f64_to_u128(amount_in_weth * 1e18)
     );
@@ -258,52 +255,45 @@ pub fn compute_arbitrage_profit_with_bitmap(
         return f64::NEG_INFINITY;
     }
 
-    // Fee fraction → pips (1e6 bazında: 0.0005 → 500)
     let sell_fee_pips = exact::fee_fraction_to_pips(sell_fee_fraction);
     let buy_fee_pips = exact::fee_fraction_to_pips(buy_fee_fraction);
 
-    // 1. WETH'i pahalı havuzda sat → USDC al (exact U256 swap)
-    // v20.0: Her havuzun kendi token0_is_weth değeri kullanılır
     let sell_zero_for_one = sell_token0_is_weth;
-    let sell_result = exact::compute_exact_swap(
+    let sell_result = exact::compute_exact_swap_presorted(
         sell_pool.sqrt_price_x96,
         sell_pool.liquidity,
         sell_pool.tick,
         amount_in_wei,
         sell_zero_for_one,
         sell_fee_pips,
-        sell_bitmap,
+        sell_sorted,
     );
 
     if sell_result.amount_out.is_zero() {
         return f64::NEG_INFINITY;
     }
 
-    // 2. USDC → WETH geri al (exact U256 swap)
-    // v20.0: buy pool'un kendi token sıralaması kullanılır
     let buy_zero_for_one = !buy_token0_is_weth;
-    let buy_result = exact::compute_exact_swap(
+    let buy_result = exact::compute_exact_swap_presorted(
         buy_pool.sqrt_price_x96,
         buy_pool.liquidity,
         buy_pool.tick,
         sell_result.amount_out,
         buy_zero_for_one,
         buy_fee_pips,
-        buy_bitmap,
+        buy_sorted,
     );
 
     if buy_result.amount_out.is_zero() {
         return f64::NEG_INFINITY;
     }
 
-    // 3. Flash loan geri ödeme (U256 hassasiyetinde)
     let flash_loan_fee_rate = flash_loan_fee_bps / 10_000.0;
     let flash_loan_fee_wei = alloy::primitives::U256::from(
         crate::types::safe_f64_to_u128(amount_in_weth * flash_loan_fee_rate * 1e18)
     );
     let repay_amount = amount_in_wei + flash_loan_fee_wei;
 
-    // 4. Net kâr → USD (optimizer için f64'e geri dönüş)
     if buy_result.amount_out > repay_amount {
         let profit_wei = buy_result.amount_out - repay_amount;
         let profit_weth = exact::u256_to_f64(profit_wei) / 1e18;
@@ -319,8 +309,11 @@ pub fn compute_arbitrage_profit_with_bitmap(
 // Newton-Raphson Türev Hesaplayıcı
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// OPT-1+2: Pre-sorted tick'lerle türev hesaplayıcı.
+/// OPT-D: Forward difference türev — iterasyon başına 1 swap hesabı (central difference'ın yarısı).
+/// Secant method zaten f(x) ve f(x_{n-1}) cache'liyor, forward difference yeterli hassasiyet sağlar.
 #[allow(clippy::too_many_arguments)]
-fn profit_derivative(
+fn profit_derivative_presorted(
     amount_in_weth: f64,
     sell_pool: &PoolState,
     sell_fee: f64,
@@ -330,75 +323,26 @@ fn profit_derivative(
     flash_loan_fee_bps: f64,
     eth_price_usd: f64,
     sell_token0_is_weth: bool,
-    sell_ts: i32,
-    buy_ts: i32,
-    sell_bitmap: Option<&TickBitmapData>,
-    buy_bitmap: Option<&TickBitmapData>,
     buy_token0_is_weth: bool,
+    sell_sorted: &[(i32, i128, alloy::primitives::U256)],
+    buy_sorted: &[(i32, i128, alloy::primitives::U256)],
+    f_at_x: f64,
 ) -> f64 {
     let h = (amount_in_weth * 1e-7).max(1e-10);
 
-    let f_plus = compute_arbitrage_profit_with_bitmap(
+    let f_plus = compute_arbitrage_profit_presorted(
         amount_in_weth + h,
         sell_pool, sell_fee, buy_pool, buy_fee,
         gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-        sell_token0_is_weth, sell_ts, buy_ts,
-        sell_bitmap, buy_bitmap,
-        buy_token0_is_weth,
-    );
-    let f_minus = compute_arbitrage_profit_with_bitmap(
-        amount_in_weth - h,
-        sell_pool, sell_fee, buy_pool, buy_fee,
-        gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-        sell_token0_is_weth, sell_ts, buy_ts,
-        sell_bitmap, buy_bitmap,
-        buy_token0_is_weth,
+        sell_token0_is_weth, buy_token0_is_weth,
+        sell_sorted, buy_sorted,
     );
 
-    (f_plus - f_minus) / (2.0 * h)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn profit_second_derivative(
-    amount_in_weth: f64,
-    sell_pool: &PoolState,
-    sell_fee: f64,
-    buy_pool: &PoolState,
-    buy_fee: f64,
-    gas_cost_usd: f64,
-    flash_loan_fee_bps: f64,
-    eth_price_usd: f64,
-    sell_token0_is_weth: bool,
-    sell_ts: i32,
-    buy_ts: i32,
-    sell_bitmap: Option<&TickBitmapData>,
-    buy_bitmap: Option<&TickBitmapData>,
-    buy_token0_is_weth: bool,
-) -> f64 {
-    let h = (amount_in_weth * 1e-5).max(1e-8);
-
-    let fp_plus = profit_derivative(
-        amount_in_weth + h,
-        sell_pool, sell_fee, buy_pool, buy_fee,
-        gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-        sell_token0_is_weth, sell_ts, buy_ts,
-        sell_bitmap, buy_bitmap,
-        buy_token0_is_weth,
-    );
-    let fp_minus = profit_derivative(
-        amount_in_weth - h,
-        sell_pool, sell_fee, buy_pool, buy_fee,
-        gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-        sell_token0_is_weth, sell_ts, buy_ts,
-        sell_bitmap, buy_bitmap,
-        buy_token0_is_weth,
-    );
-
-    (fp_plus - fp_minus) / (2.0 * h)
+    (f_plus - f_at_x) / h
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Newton-Raphson Optimizasyonu — TickBitmap-Aware
+// Secant Method Optimizasyonu — TickBitmap-Aware (OPT-2)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Newton-Raphson sonucu
@@ -423,8 +367,8 @@ pub fn find_optimal_amount_with_bitmap(
     eth_price_usd: f64,
     max_amount_weth: f64,
     sell_token0_is_weth: bool,
-    sell_tick_spacing: i32,
-    buy_tick_spacing: i32,
+    _sell_tick_spacing: i32,
+    _buy_tick_spacing: i32,
     sell_bitmap: Option<&TickBitmapData>,
     buy_bitmap: Option<&TickBitmapData>,
     buy_token0_is_weth: bool,
@@ -433,52 +377,10 @@ pub fn find_optimal_amount_with_bitmap(
     let tolerance = 1e-8;
     let min_amount = 0.0001;
 
-    // ── Hard Liquidity Cap (v11.0 + v20.0 decimal normalization) ─
-    // v20.0: Her havuzun kendi token0_is_weth değeri kullanılır.
-    // Farklı token sıralamasına sahip havuzlardan (ör: WETH/USDC vs USDC/WETH)
-    // doğru yönde likidite kapasitesi hesaplanır.
-    let hard_cap_sell = exact::hard_liquidity_cap_weth(
-        sell_pool.sqrt_price_x96,
-        sell_pool.liquidity,
-        sell_pool.tick,
-        sell_token0_is_weth,
-        sell_bitmap,
-        sell_tick_spacing,
-    );
-    let hard_cap_buy = exact::hard_liquidity_cap_weth(
-        buy_pool.sqrt_price_x96,
-        buy_pool.liquidity,
-        buy_pool.tick,
-        buy_token0_is_weth,
-        buy_bitmap,
-        buy_tick_spacing,
-    );
-
-    // Eski single-tick cap (geriye uyumluluk + karşılaştırma)
-    let liq_cap_sell = exact::max_safe_swap_amount_u256(
-        sell_pool.sqrt_price_x96, sell_pool.liquidity, sell_token0_is_weth,
-        sell_pool.tick, sell_tick_spacing,
-    );
-    let liq_cap_buy = exact::max_safe_swap_amount_u256(
-        buy_pool.sqrt_price_x96, buy_pool.liquidity, buy_token0_is_weth,
-        buy_pool.tick, buy_tick_spacing,
-    );
-
-    // v16.0: Hard cap ve single-tick cap'in minimumunu al.
-    // Eski: `* 2.0` çarpanı single-tick kapasiteyi yapay olarak şişiriyor
-    // ve NR'nin havuzda olmayan likiditeyi hedeflemesine yol açıyordu.
-    // Yeni: Her iki metriğin minimumunu al, %99.9 güvenlik marjı zaten
-    // hard_liquidity_cap_weth içinde uygulanıyor.
-    let sell_cap = hard_cap_sell.min(liq_cap_sell.max(0.001)).max(0.001);
-    let buy_cap = hard_cap_buy.min(liq_cap_buy.max(0.001)).max(0.001);
-    let effective_max = max_amount_weth
-        .min(sell_cap)
-        .min(buy_cap);
-
-    eprintln!(
-        "     \u{1f4ca} [Liquidity Cap] sell_hard={:.4} buy_hard={:.4} sell_single={:.4} buy_single={:.4} → effective_max={:.4} WETH",
-        hard_cap_sell, hard_cap_buy, liq_cap_sell, liq_cap_buy, effective_max,
-    );
+    // OPT-7: Redundant cap hesaplamaları kaldırıldı.
+    // Caller (strategy.rs) zaten effective_cap hesaplayıp max_amount_weth olarak geçiriyor.
+    // max_amount_weth = effective_cap.min(config.max_trade_size_weth)
+    let effective_max = max_amount_weth;
 
     if effective_max <= min_amount {
         return OptimalAmountResult {
@@ -489,30 +391,69 @@ pub fn find_optimal_amount_with_bitmap(
         };
     }
 
-    // ── AŞAMA 1: Hibrit Kaba Tarama ──────────────────────────────
-    // v22.0: 40 → 25 adım. Quadratic spacing küçük miktarlarda daha yoğun
-    // tarama yapar, büyük miktarlarda seyrekleşir. 25 adım yeterli çözünürlük
-    // sağlar, 15 iterasyon (~0.5ms) tasarruf eder.
+    // OPT-1: Tick'leri BİR KEZ sırala — NR döngüsü boyunca yeniden sıralama yok.
+    // sell pool: zeroForOne (WETH satış yönü) → descending ticks
+    // buy pool: oneForZero (!buy_token0_is_weth = buy_zero_for_one) → direction-specific ticks
+    let sell_ticks = match sell_bitmap {
+        Some(bm) => exact::SortedTicks::from_bitmap(bm, sell_pool.tick),
+        None => exact::SortedTicks::empty(),
+    };
+    let buy_ticks = match buy_bitmap {
+        Some(bm) => exact::SortedTicks::from_bitmap(bm, buy_pool.tick),
+        None => exact::SortedTicks::empty(),
+    };
+
+    let sell_zero_for_one = sell_token0_is_weth;
+    let buy_zero_for_one = !buy_token0_is_weth;
+    let sell_sorted = sell_ticks.get_ordered(sell_zero_for_one);
+    let buy_sorted = buy_ticks.get_ordered(buy_zero_for_one);
+
+    // ── AŞAMA 1: Adaptif 2-Fazlı Kaba Tarama (OPT-E) ──────────────
+    // Faz 1: 8 kaba adım ile bölgeyi tara
+    // Faz 2: En iyi bölge etrafında 8 ince adım
     let mut best_amount = 0.0;
     let mut best_profit = f64::NEG_INFINITY;
-    let scan_steps = 25;
+    let coarse_steps = 8;
 
-    for i in 1..=scan_steps {
-        let fraction = i as f64 / scan_steps as f64;
+    for i in 1..=coarse_steps {
+        let fraction = i as f64 / coarse_steps as f64;
         let amount = min_amount + (effective_max - min_amount) * fraction * fraction;
 
-        let profit = compute_arbitrage_profit_with_bitmap(
+        let profit = compute_arbitrage_profit_presorted(
             amount,
             sell_pool, sell_fee, buy_pool, buy_fee,
             gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-            sell_token0_is_weth, sell_tick_spacing, buy_tick_spacing,
-            sell_bitmap, buy_bitmap,
-            buy_token0_is_weth,
+            sell_token0_is_weth, buy_token0_is_weth,
+            sell_sorted, buy_sorted,
         );
 
         if profit > best_profit {
             best_profit = profit;
             best_amount = amount;
+        }
+    }
+
+    // Faz 2: En iyi bölge ±%25 etrafında 8 ince adım
+    if best_amount > 0.0 {
+        let fine_lo = (best_amount * 0.75).max(min_amount);
+        let fine_hi = (best_amount * 1.25).min(effective_max);
+        let fine_steps = 8;
+
+        for i in 0..=fine_steps {
+            let amount = fine_lo + (fine_hi - fine_lo) * (i as f64 / fine_steps as f64);
+
+            let profit = compute_arbitrage_profit_presorted(
+                amount,
+                sell_pool, sell_fee, buy_pool, buy_fee,
+                gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+                sell_token0_is_weth, buy_token0_is_weth,
+                sell_sorted, buy_sorted,
+            );
+
+            if profit > best_profit {
+                best_profit = profit;
+                best_amount = amount;
+            }
         }
     }
 
@@ -525,37 +466,54 @@ pub fn find_optimal_amount_with_bitmap(
         };
     }
 
-    // ── AŞAMA 2: Newton-Raphson İnce Ayar ────────────────────────
+    // ── AŞAMA 2: Secant Method İnce Ayar (OPT-2 + OPT-D) ────────────
+    // Forward difference + secant: iterasyon başına sadece 1 swap hesabı.
+    // f'(x_{n-1}) önceki iterasyondan cache'lenir.
+    let mut x_prev = (best_amount * 0.9).max(min_amount);
+    let f_at_x_prev = compute_arbitrage_profit_presorted(
+        x_prev, sell_pool, sell_fee, buy_pool, buy_fee,
+        gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+        sell_token0_is_weth, buy_token0_is_weth,
+        sell_sorted, buy_sorted,
+    );
+    let mut fp_prev = profit_derivative_presorted(
+        x_prev, sell_pool, sell_fee, buy_pool, buy_fee,
+        gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+        sell_token0_is_weth, buy_token0_is_weth,
+        sell_sorted, buy_sorted,
+        f_at_x_prev,
+    );
     let mut x = best_amount;
     let mut converged = false;
     let mut final_iterations: u32 = 0;
+    let mut current_profit = best_profit;
 
     for i in 0..max_iterations {
         final_iterations = i + 1;
 
-        let f_prime = profit_derivative(
+        let fp = profit_derivative_presorted(
             x, sell_pool, sell_fee, buy_pool, buy_fee,
             gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-            sell_token0_is_weth, sell_tick_spacing, buy_tick_spacing,
-            sell_bitmap, buy_bitmap,
-            buy_token0_is_weth,
+            sell_token0_is_weth, buy_token0_is_weth,
+            sell_sorted, buy_sorted,
+            current_profit,
         );
 
-        let f_double_prime = profit_second_derivative(
-            x, sell_pool, sell_fee, buy_pool, buy_fee,
-            gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-            sell_token0_is_weth, sell_tick_spacing, buy_tick_spacing,
-            sell_bitmap, buy_bitmap,
-            buy_token0_is_weth,
-        );
-
-        if f_double_prime.abs() < 1e-20 {
+        // f'(x) ≈ 0 → optimum bulundu
+        if fp.abs() < tolerance * eth_price_usd.max(1.0) {
+            converged = true;
             break;
         }
 
-        let step = f_prime / f_double_prime;
+        let denom = fp - fp_prev;
+        if denom.abs() < 1e-20 {
+            break; // Secant method bölme hatası — en iyi tahminle dur
+        }
+
+        let step = fp * (x - x_prev) / denom;
         let mut x_new = x - step;
 
+        // Güvenlik: çok büyük adımları sınırla
         if (x_new - x).abs() > effective_max * 0.5 {
             x_new = x - step * 0.25;
         }
@@ -568,22 +526,27 @@ pub fn find_optimal_amount_with_bitmap(
             break;
         }
 
+        x_prev = x;
+        fp_prev = fp;
         x = x_new;
+
+        // Yeni x'teki profit'i hesapla (bir sonraki iterasyonun forward diff'i için)
+        current_profit = compute_arbitrage_profit_presorted(
+            x, sell_pool, sell_fee, buy_pool, buy_fee,
+            gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
+            sell_token0_is_weth, buy_token0_is_weth,
+            sell_sorted, buy_sorted,
+        );
     }
 
-    // v16.0: NR yakınsama sonrası nihai güvenlik tavanı.
-    // NR iterasyonları sırasında clamp uygulanıyor ama yakınsama sonrası
-    // son bir kez daha effective_max ile sınırla — havuz kapasitesinin
-    // %99.9'unu (slippage payı) ASLA aşamaz.
     x = x.clamp(min_amount, effective_max);
 
-    let final_profit = compute_arbitrage_profit_with_bitmap(
-        x, sell_pool, sell_fee, buy_pool, buy_fee,
-        gas_cost_usd, flash_loan_fee_bps, eth_price_usd,
-        sell_token0_is_weth, sell_tick_spacing, buy_tick_spacing,
-        sell_bitmap, buy_bitmap,
-        buy_token0_is_weth,
-    );
+    // Son profit: eğer x loop'ta değişmediyse current_profit kullan
+    let final_profit = if (x - best_amount).abs() < 1e-15 {
+        best_profit
+    } else {
+        current_profit
+    };
 
     OptimalAmountResult {
         optimal_amount: x,
@@ -1115,12 +1078,22 @@ pub mod exact {
     const Q96: U256 = U256::from_limbs([0, 0x1_0000_0000, 0, 0]); // 2^96
 
     /// MAX_SQRT_RATIO (UniV3 TickMath sınırı — 1461446703485210103287273052203988822378723970342)
+    #[cfg(test)]
     const MAX_SQRT_RATIO: U256 = U256::from_limbs([
         0x5D951D5263988D26, 0xEFD1FC6A50648849, 0x00000000FFFD8963, 0
     ]);
 
     /// MIN_SQRT_RATIO (UniV3 TickMath sınırı)
+    #[cfg(test)]
     const MIN_SQRT_RATIO: U256 = U256::from_limbs([4295128739, 0, 0, 0]);
+
+    /// Precomputed MIN_SQRT_RATIO + 1 (swap limit boundary)
+    const MIN_SQRT_RATIO_PLUS_1: U256 = U256::from_limbs([4295128740, 0, 0, 0]);
+
+    /// Precomputed MAX_SQRT_RATIO - 1 (swap limit boundary)
+    const MAX_SQRT_RATIO_MINUS_1: U256 = U256::from_limbs([
+        0x5D951D5263988D25, 0xEFD1FC6A50648849, 0x00000000FFFD8963, 0
+    ]);
 
     // ── FullMath — U256 Tam Çarpma / Bölme ──────────────────────────────────
 
@@ -1258,7 +1231,7 @@ pub mod exact {
 
         if add {
             // sqrtPriceNext = numerator1 * sqrtP / (numerator1 + amount * sqrtP)
-            let product = mul_div(amount, sqrt_price_x96, U256::from(1u64));
+            let product = amount.checked_mul(sqrt_price_x96).unwrap_or(U256::MAX);
             let denominator = numerator1 + product;
             if denominator >= numerator1 {
                 return mul_div_rounding_up(numerator1, sqrt_price_x96, denominator);
@@ -1267,7 +1240,7 @@ pub mod exact {
             div_rounding_up(numerator1, numerator1 / sqrt_price_x96 + amount)
         } else {
             // sqrtPriceNext = numerator1 * sqrtP / (numerator1 - amount * sqrtP)
-            let product = mul_div(amount, sqrt_price_x96, U256::from(1u64));
+            let product = amount.checked_mul(sqrt_price_x96).unwrap_or(U256::MAX);
             if numerator1 <= product {
                 return U256::ZERO; // Yetersiz likidite
             }
@@ -1457,6 +1430,148 @@ pub mod exact {
         pub tick_crossings: u32,
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // OPT-1: Pre-sorted tick cache — eliminating 650+ redundant sorts per opportunity
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Pre-sorted tick verileri. TickBitmapData'dan BİR KEZ oluşturulur,
+    /// NR döngüsü boyunca referans olarak geçirilir.
+    pub struct SortedTicks {
+        /// oneForZero (token1→token0) yönü: current_tick'ten büyük tickler, artan sırada
+        /// (tick, liquidity_net, precomputed_sqrtPriceX96)
+        pub ascending: Vec<(i32, i128, U256)>,
+        /// zeroForOne (token0→token1) yönü: current_tick'ten küçük/eşit tickler, azalan sırada
+        pub descending: Vec<(i32, i128, U256)>,
+    }
+
+    impl SortedTicks {
+        /// TickBitmapData'dan pre-sorted tick vektörleri oluştur (1 kez sort + sqrtPrice ön-hesaplama).
+        pub fn from_bitmap(bitmap: &crate::types::TickBitmapData, current_tick: i32) -> Self {
+            let mut descending: Vec<(i32, i128, U256)> = Vec::new();
+            let mut ascending: Vec<(i32, i128, U256)> = Vec::new();
+
+            for (&t, info) in bitmap.ticks.iter() {
+                if !info.initialized {
+                    continue;
+                }
+                let sqrt_price = get_sqrt_ratio_at_tick(t);
+                if t <= current_tick {
+                    descending.push((t, info.liquidity_net, sqrt_price));
+                } else {
+                    ascending.push((t, info.liquidity_net, sqrt_price));
+                }
+            }
+
+            descending.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+            ascending.sort_unstable_by_key(|(t, _, _)| *t);
+
+            SortedTicks { ascending, descending }
+        }
+
+        /// Swap yönüne göre sıralı tick slice'ı döndür (O(1)).
+        #[inline]
+        pub fn get_ordered(&self, zero_for_one: bool) -> &[(i32, i128, U256)] {
+            if zero_for_one { &self.descending } else { &self.ascending }
+        }
+
+        /// Boş SortedTicks (bitmap yokken kullanılır).
+        pub fn empty() -> Self {
+            SortedTicks { ascending: Vec::new(), descending: Vec::new() }
+        }
+    }
+
+    /// compute_exact_swap'ın pre-sorted tick varyantı.
+    /// Tick sıralama + sqrtPrice hesaplama maliyeti sıfır — her ikisi de SortedTicks'te ön-hesaplanmış.
+    pub fn compute_exact_swap_presorted(
+        sqrt_price_x96: U256,
+        liquidity: u128,
+        _current_tick: i32,
+        amount_in: U256,
+        zero_for_one: bool,
+        fee_pips: u32,
+        sorted_ticks: &[(i32, i128, U256)],
+    ) -> ExactSwapResult {
+        if amount_in.is_zero() || liquidity == 0 || sqrt_price_x96.is_zero() {
+            return ExactSwapResult {
+                amount_out: U256::ZERO,
+                amount_in_consumed: U256::ZERO,
+                final_sqrt_price_x96: sqrt_price_x96,
+                final_liquidity: liquidity,
+                tick_crossings: 0,
+            };
+        }
+
+        let mut state_sqrt_price = sqrt_price_x96;
+        let mut state_liquidity = liquidity;
+        let mut amount_remaining = amount_in;
+        let mut total_amount_out = U256::ZERO;
+        let mut total_amount_in = U256::ZERO;
+        let mut crossings: u32 = 0;
+        let max_crossings: u32 = 50;
+
+        // Ana swap döngüsü — pre-sorted tick'ler boyunca ilerle (sqrtPrice ön-hesaplanmış)
+        for &(_next_tick, liquidity_net, sqrt_price_target) in sorted_ticks {
+            if amount_remaining.is_zero() || crossings >= max_crossings {
+                break;
+            }
+
+            let step = compute_swap_step(
+                state_sqrt_price,
+                sqrt_price_target,
+                state_liquidity,
+                amount_remaining,
+                fee_pips,
+            );
+
+            total_amount_out += step.amount_out;
+            let consumed = step.amount_in + step.fee_amount;
+            total_amount_in += consumed;
+            if amount_remaining >= consumed {
+                amount_remaining -= consumed;
+            } else {
+                amount_remaining = U256::ZERO;
+            }
+            state_sqrt_price = step.sqrt_ratio_next;
+
+            if step.sqrt_ratio_next == sqrt_price_target && !amount_remaining.is_zero() {
+                if zero_for_one {
+                    if state_liquidity as i128 >= liquidity_net {
+                        state_liquidity = (state_liquidity as i128 - liquidity_net) as u128;
+                    } else {
+                        state_liquidity = 0;
+                    }
+                } else {
+                    let new_liq = state_liquidity as i128 + liquidity_net;
+                    state_liquidity = if new_liq > 0 { new_liq as u128 } else { 0 };
+                }
+                crossings += 1;
+            }
+        }
+
+        // Kalan girdi varsa mevcut likiditede son bir adım daha
+        if !amount_remaining.is_zero() && state_liquidity > 0 {
+            let final_target = if zero_for_one { MIN_SQRT_RATIO_PLUS_1 } else { MAX_SQRT_RATIO_MINUS_1 };
+            let step = compute_swap_step(
+                state_sqrt_price,
+                final_target,
+                state_liquidity,
+                amount_remaining,
+                fee_pips,
+            );
+            total_amount_out += step.amount_out;
+            total_amount_in += step.amount_in + step.fee_amount;
+            state_sqrt_price = step.sqrt_ratio_next;
+        }
+
+        ExactSwapResult {
+            amount_out: total_amount_out,
+            amount_in_consumed: total_amount_in,
+            final_sqrt_price_x96: state_sqrt_price,
+            final_liquidity: state_liquidity,
+            tick_crossings: crossings,
+        }
+    }
+
     /// Exact V3/CL swap simülasyonu — U256 hassasiyetinde, wei-bazında eşleşme.
     ///
     /// Bu fonksiyon Uniswap V3'ün on-chain `swap()` fonksiyonunun
@@ -1495,7 +1610,6 @@ pub mod exact {
 
         let mut state_sqrt_price = sqrt_price_x96;
         let mut state_liquidity = liquidity;
-        let mut state_tick = current_tick;
         let mut amount_remaining = amount_in;
         let mut total_amount_out = U256::ZERO;
         let mut total_amount_in = U256::ZERO;
@@ -1510,10 +1624,10 @@ pub mod exact {
                 .collect();
 
             if zero_for_one {
-                ticks.retain(|(t, _)| *t <= state_tick);
+                ticks.retain(|(t, _)| *t <= current_tick);
                 ticks.sort_by(|a, b| b.0.cmp(&a.0));
             } else {
-                ticks.retain(|(t, _)| *t > state_tick);
+                ticks.retain(|(t, _)| *t > current_tick);
                 ticks.sort_by_key(|(t, _)| *t);
             }
             ticks
@@ -1562,15 +1676,13 @@ pub mod exact {
                     let new_liq = state_liquidity as i128 + liquidity_net;
                     state_liquidity = if new_liq > 0 { new_liq as u128 } else { 0 };
                 }
-                state_tick = if zero_for_one { next_tick - 1 } else { next_tick };
-                let _ = state_tick; // tick crossing sırasında güncellenir
                 crossings += 1;
             }
         }
 
         // Kalan girdi varsa mevcut likiditede son bir adım daha
         if !amount_remaining.is_zero() && state_liquidity > 0 {
-            let final_target = if zero_for_one { MIN_SQRT_RATIO + U256::from(1) } else { MAX_SQRT_RATIO - U256::from(1) };
+            let final_target = if zero_for_one { MIN_SQRT_RATIO_PLUS_1 } else { MAX_SQRT_RATIO_MINUS_1 };
             let step = compute_swap_step(
                 state_sqrt_price,
                 final_target,

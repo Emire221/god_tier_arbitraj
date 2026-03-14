@@ -175,6 +175,8 @@ pub struct MatchedPoolEntry {
     pub fee_bps: u32,
     pub tick_spacing: i32,
     pub liquidity_usd: f64,
+    #[serde(default)]
+    pub volume_24h: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -569,19 +571,20 @@ fn off_chain_filter(pools: Vec<DiscoveredPool>) -> Vec<DiscoveredPool> {
         .filter(|p| p.liquidity_usd >= 50_000.0)
         // Minimum 24h hacim: $10K
         .filter(|p| p.volume_24h >= 10_000.0)
-        // Maksimum fee: %0.05
-        .filter(|p| p.fee_tier.is_none_or(|fee| fee <= 0.05))
+        // Maksimum fee: %1.0 (100 bps — .env MAX_POOL_FEE_BPS ile uyumlu)
+        .filter(|p| p.fee_tier.is_none_or(|fee| fee <= 0.01))
         .collect();
 
-    // Fee'ye göre artan sırala, eşit fee'de en yüksek hacmi tercih et
+    // Hacme göre azalan sırala (en yüksek hacimli havuzlar önce),
+    // eşit hacimde en düşük fee'li havuzu tercih et
     filtered.sort_by(|a, b| {
-        let fee_a = a.fee_tier.unwrap_or(f64::MAX);
-        let fee_b = b.fee_tier.unwrap_or(f64::MAX);
-        fee_a.partial_cmp(&fee_b)
+        b.volume_24h
+            .partial_cmp(&a.volume_24h)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| {
-                b.volume_24h
-                    .partial_cmp(&a.volume_24h)
+                let fee_a = a.fee_tier.unwrap_or(f64::MAX);
+                let fee_b = b.fee_tier.unwrap_or(f64::MAX);
+                fee_a.partial_cmp(&fee_b)
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
     });
@@ -760,12 +763,13 @@ fn match_arbitrage_pairs(pools: &[DiscoveredPool]) -> Vec<MatchedPair> {
 
     for ((token0_addr, token1_addr), group) in &groups {
         // Her DEX+Fee çifti ayrı bir slot — Fee Tier Isolation
+        // Aynı slot'ta en yüksek hacimli (volume) havuzu tercih et
         let mut dex_best: HashMap<String, &DiscoveredPool> = HashMap::new();
         for pool in group {
             let fee_bps = fee_tier_to_bps(pool.fee_tier);
             let dex_key = format!("{}_{}", pool.dex.to_lowercase(), fee_bps);
             match dex_best.get(&dex_key) {
-                Some(existing) if existing.liquidity_usd >= pool.liquidity_usd => {}
+                Some(existing) if existing.volume_24h >= pool.volume_24h => {}
                 _ => { dex_best.insert(dex_key, pool); }
             }
         }
@@ -776,14 +780,14 @@ fn match_arbitrage_pairs(pools: &[DiscoveredPool]) -> Vec<MatchedPair> {
         }
 
         let mut selected: Vec<&DiscoveredPool> = dex_best.into_values().collect();
-        // En düşük fee'li havuzu öne al
+        // En yüksek hacimli havuzu öne al, eşit hacimde düşük fee
         selected.sort_by(|a, b| {
-            let fee_a = a.fee_tier.unwrap_or(f64::MAX);
-            let fee_b = b.fee_tier.unwrap_or(f64::MAX);
-            fee_a.partial_cmp(&fee_b)
+            b.volume_24h.partial_cmp(&a.volume_24h)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| {
-                    b.liquidity_usd.partial_cmp(&a.liquidity_usd)
+                    let fee_a = a.fee_tier.unwrap_or(f64::MAX);
+                    let fee_b = b.fee_tier.unwrap_or(f64::MAX);
+                    fee_a.partial_cmp(&fee_b)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
         });
@@ -826,16 +830,21 @@ fn match_arbitrage_pairs(pools: &[DiscoveredPool]) -> Vec<MatchedPair> {
                     fee_bps,
                     tick_spacing: infer_tick_spacing(&p.dex, fee_bps),
                     liquidity_usd: p.liquidity_usd,
+                    volume_24h: p.volume_24h,
                 }
             }).collect(),
         });
     }
 
-    // Toplam likiditeye göre sırala (azalan)
+    // Kompozit skor: hacim × likidite (en kârlı ve en aktif çiftler önce)
     matched.sort_by(|a, b| {
+        let vol_a: f64 = a.pools.iter().map(|p| p.volume_24h).sum();
+        let vol_b: f64 = b.pools.iter().map(|p| p.volume_24h).sum();
         let liq_a: f64 = a.pools.iter().map(|p| p.liquidity_usd).sum();
         let liq_b: f64 = b.pools.iter().map(|p| p.liquidity_usd).sum();
-        liq_b.partial_cmp(&liq_a).unwrap_or(std::cmp::Ordering::Equal)
+        let score_a = vol_a * liq_a;
+        let score_b = vol_b * liq_b;
+        score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
     });
 
     matched
@@ -917,20 +926,25 @@ pub async fn cli_discover_pools() -> Result<()> {
     println!("{}", "  ╠═══════════════════════════════════════════════════════════════════╣".cyan().bold());
 
     for (i, pair) in matched_pairs.iter().enumerate() {
+        let total_vol: f64 = pair.pools.iter().map(|p| p.volume_24h).sum();
+        let total_liq: f64 = pair.pools.iter().map(|p| p.liquidity_usd).sum();
         println!(
-            "  {}  #{} {} ({} pools)",
+            "  {}  #{} {} ({} pools) | Vol24h: ${:.0}K | Liq: ${:.0}K",
             "║".cyan(), i + 1,
             pair.pair_name.white().bold(),
             pair.pools.len(),
+            total_vol / 1000.0,
+            total_liq / 1000.0,
         );
         for pool in &pair.pools {
             let fee_str = format!("{:.2}%", pool.fee_bps as f64 / 100.0);
             println!(
-                "  {}    → {} | Fee: {} | Liq: ${:.0}K | {}",
+                "  {}    → {} | Fee: {} | Liq: ${:.0}K | Vol: ${:.0}K | {}",
                 "║".cyan(),
                 pool.dex_id.white(),
                 fee_str,
                 pool.liquidity_usd / 1000.0,
+                pool.volume_24h / 1000.0,
                 pool.address.dimmed(),
             );
         }
@@ -1015,12 +1029,22 @@ pub fn load_core_pools() -> Option<MatchedPoolsConfig> {
 /// matched_pools.json'dan runtime yapıları oluştur:
 ///   - `Vec<PoolConfig>`: Tüm unique havuzların düz listesi (state_sync için)
 ///   - `Vec<PairCombo>`: Her arbitraj çifti için havuz indeks çiftleri
-pub fn build_runtime(config: &MatchedPoolsConfig) -> Result<(Vec<PoolConfig>, Vec<PairCombo>)> {
+///   - `max_pools`: Maksimum havuz sayısı (en kaliteli havuzlar seçilir)
+pub fn build_runtime(config: &MatchedPoolsConfig, max_pools: usize) -> Result<(Vec<PoolConfig>, Vec<PairCombo>)> {
     let mut all_pools: Vec<PoolConfig> = Vec::new();
     let mut pair_combos: Vec<PairCombo> = Vec::new();
     let mut address_to_idx: HashMap<String, usize> = HashMap::new();
 
     for pair in &config.matched_pairs {
+        // MAX_TRACKED_POOLS limitine ulaştıysa dur
+        if all_pools.len() >= max_pools {
+            eprintln!(
+                "  🏆 [Quality Ranking] Top {} pools selected (remaining pairs skipped)",
+                max_pools
+            );
+            break;
+        }
+
         let quote_token_address = pair.quote_token.address.parse::<Address>()
             .map_err(|e| eyre::eyre!("Invalid quote token address '{}': {}", pair.quote_token.address, e))?;
         let base_token_address = pair.base_token.address.parse::<Address>()
@@ -1029,6 +1053,11 @@ pub fn build_runtime(config: &MatchedPoolsConfig) -> Result<(Vec<PoolConfig>, Ve
         let mut pair_indices: Vec<usize> = Vec::new();
 
         for pool_entry in &pair.pools {
+            // Havuz limitini kontrol et
+            if all_pools.len() >= max_pools && !address_to_idx.contains_key(&pool_entry.address.to_lowercase()) {
+                break;
+            }
+
             let addr_lower = pool_entry.address.to_lowercase();
 
             let idx = if let Some(&existing_idx) = address_to_idx.get(&addr_lower) {
@@ -1081,6 +1110,11 @@ pub fn build_runtime(config: &MatchedPoolsConfig) -> Result<(Vec<PoolConfig>, Ve
     if all_pools.is_empty() {
         return Err(eyre::eyre!("no valid pools found in matched_pools.json"));
     }
+
+    eprintln!(
+        "  🎯 [Runtime] {} pools, {} combos loaded (max: {})",
+        all_pools.len(), pair_combos.len(), max_pools
+    );
 
     Ok((all_pools, pair_combos))
 }

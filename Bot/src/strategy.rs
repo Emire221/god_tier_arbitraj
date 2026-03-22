@@ -381,6 +381,8 @@ pub async fn evaluate_and_execute<P: Provider + Sync>(
     block_latency_ms: f64,
     _l1_data_fee_wei: u128,
     mev_executor: &Arc<crate::executor::MevExecutor>,
+    telegram_sender: &Option<crate::telegram::TelegramSender>,
+    tg_counters: &mut crate::telegram::TelemetryCounters,
 ) -> Option<u64> {
     let _buy_pool = &pools[opportunity.buy_pool_idx];
     let _sell_pool = &pools[opportunity.sell_pool_idx];
@@ -500,8 +502,9 @@ pub async fn evaluate_and_execute<P: Provider + Sync>(
     // Sim�lasyon ba�ar�s�z � i�lemi atla
     if !sim_result.success {
         stats.failed_simulations += 1;
-        // v10.0: Circuit breaker � ard���k ba�ar�s�zl�k sayac�n� art�r
+        // v10.0: Circuit breaker
         stats.consecutive_failures += 1;
+        tg_counters.reverts += 1;
         print_simulation_failure(opportunity, &sim_result, pools);
         return None;
     }
@@ -655,6 +658,22 @@ pub async fn evaluate_and_execute<P: Provider + Sync>(
         let nm_clone = Arc::clone(nonce_manager);
 
         stats.executed_trades += 1;
+
+        // v32.0: Telegram — Alfa Bildirimi (başarılı arbitraj)
+        let gas_cost_weth = simulated_gas_used as f64 * block_base_fee as f64 / 1e18;
+        if let Some(ref tg) = telegram_sender {
+            tg.send(crate::telegram::TelegramMessage::AlphaSuccess {
+                buy_pool: pools[opportunity.buy_pool_idx].name.clone(),
+                sell_pool: pools[opportunity.sell_pool_idx].name.clone(),
+                gross_profit_weth: opportunity.expected_profit_weth,
+                gas_cost_weth,
+                net_profit_weth: opportunity.expected_profit_weth - gas_cost_weth,
+                latency_ms: block_latency_ms,
+                tx_hash: format!("nonce:{}", nonce_manager.current().saturating_sub(1)),
+            });
+        }
+        tg_counters.successful_trades += 1;
+        tg_counters.net_period_profit_weth += opportunity.expected_profit_weth - gas_cost_weth;
 
         let pool_a_addr = pools[0].address;
         let pool_b_addr = pools[1].address;
@@ -1274,6 +1293,8 @@ pub async fn evaluate_and_execute_multi_hop<P: Provider + Sync>(
     _block_latency_ms: f64,
     _l1_data_fee_wei: u128,
     mev_executor: &Arc<crate::executor::MevExecutor>,
+    telegram_sender: &Option<crate::telegram::TelegramSender>,
+    tg_counters: &mut crate::telegram::TelemetryCounters,
 ) -> Option<u64> {
     // Sıfır/NaN koruması
     if opportunity.optimal_amount_weth <= 0.0
@@ -1375,6 +1396,7 @@ pub async fn evaluate_and_execute_multi_hop<P: Provider + Sync>(
     if !revm_result.success {
         stats.failed_simulations += 1;
         stats.consecutive_failures += 1;
+        tg_counters.reverts += 1;
         eprintln!(
             "     ?? [Multi-Hop] REVM Simulation FAILED: {}",
             revm_result.error.as_deref().unwrap_or("Unknown"),
@@ -1425,6 +1447,22 @@ pub async fn evaluate_and_execute_multi_hop<P: Provider + Sync>(
         let nm_clone = Arc::clone(nonce_manager);
 
         stats.executed_trades += 1;
+
+        // v32.0: Telegram — Multi-hop Alfa Bildirimi
+        let gas_cost_weth_mh = simulated_gas_used as f64 * block_base_fee as f64 / 1e18;
+        if let Some(ref tg) = telegram_sender {
+            tg.send(crate::telegram::TelegramMessage::AlphaSuccess {
+                buy_pool: format!("Multi-Hop {}", opportunity.label),
+                sell_pool: format!("{}-hop", opportunity.hop_count),
+                gross_profit_weth: opportunity.expected_profit_weth,
+                gas_cost_weth: gas_cost_weth_mh,
+                net_profit_weth: opportunity.expected_profit_weth - gas_cost_weth_mh,
+                latency_ms: _block_latency_ms,
+                tx_hash: format!("nonce:{}", nonce_manager.current().saturating_sub(1)),
+            });
+        }
+        tg_counters.successful_trades += 1;
+        tg_counters.net_period_profit_weth += opportunity.expected_profit_weth - gas_cost_weth_mh;
 
         let sim_gas = simulated_gas_used;
         let expected_profit = opportunity.expected_profit_weth;
@@ -1509,6 +1547,11 @@ mod gas_spike_tests {
             min_tvl_usd: 1_000_000.0,
             min_volume_24h_usd: 500_000.0,
             max_tracked_pools: 4,
+            telegram_bot_token: None,
+            telegram_chat_id: None,
+            telegram_enabled: false,
+            telegram_shift_interval_secs: 21600,
+            telegram_balance_warn_eth: 0.05,
         }
     }
 

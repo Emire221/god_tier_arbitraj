@@ -620,6 +620,19 @@ pub struct BotConfig {
     pub min_volume_24h_usd: f64,
     /// Maksimum takip edilen havuz sayısı
     pub max_tracked_pools: usize,
+
+    // ── v32.0: Telegram Telemetri (Katman 11) ──────────────
+
+    /// Telegram Bot Token (@BotFather'dan alınan)
+    pub telegram_bot_token: Option<String>,
+    /// Telegram Chat ID (bildirim hedefi)
+    pub telegram_chat_id: Option<String>,
+    /// Telegram bildirimi aktif mi?
+    pub telegram_enabled: bool,
+    /// Vardiya raporu aralığı (saniye, default: 21600 = 6 saat)
+    pub telegram_shift_interval_secs: u64,
+    /// Doomsday bakiye eşiği (ETH, default: 0.05)
+    pub telegram_balance_warn_eth: f64,
 }
 
 /// Hard-limit fee tier sabiti (basis points). Bu değer üzerindeki havuzlar
@@ -817,6 +830,23 @@ impl BotConfig {
                 .unwrap_or_else(|_| "4".into())
                 .parse::<usize>()
                 .unwrap_or(4),
+            // ── v32.0: Telegram Telemetri ──
+            telegram_bot_token: std::env::var("TELEGRAM_BOT_TOKEN")
+                .ok()
+                .filter(|t| !t.is_empty()),
+            telegram_chat_id: std::env::var("TELEGRAM_CHAT_ID")
+                .ok()
+                .filter(|c| !c.is_empty()),
+            telegram_enabled: std::env::var("TELEGRAM_ENABLED")
+                .unwrap_or_else(|_| "false".into())
+                .to_lowercase()
+                .parse::<bool>()
+                .unwrap_or(false),
+            telegram_shift_interval_secs: std::env::var("TELEGRAM_SHIFT_INTERVAL_SECS")
+                .unwrap_or_else(|_| "21600".into())
+                .parse::<u64>()
+                .unwrap_or(21600),
+            telegram_balance_warn_eth: Self::parse_env_f64("TELEGRAM_BALANCE_WARN_ETH", 0.05),
         })
     }
 
@@ -886,6 +916,8 @@ pub struct ArbitrageStats {
     pub shadow_sim_fail: u64,
     /// v23.0 (Y-1): Gölge modunda kümülatif potansiyel kâr (WETH)
     pub shadow_cumulative_profit: f64,
+    /// v32.0: Son vardiya raporu gönderim zamanı
+    pub last_shift_report: Instant,
 }
 
 impl ArbitrageStats {
@@ -910,6 +942,7 @@ impl ArbitrageStats {
             shadow_sim_success: 0,
             shadow_sim_fail: 0,
             shadow_cumulative_profit: 0.0,
+            last_shift_report: Instant::now(),
         }
     }
 

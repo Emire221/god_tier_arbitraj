@@ -26,6 +26,7 @@ mod discovery_engine;
 mod route_engine;
 mod json_logger;
 mod dust_sweeper;
+mod telegram;
 
 use types::*;
 use state_sync::*;
@@ -382,6 +383,13 @@ CIRCUIT_BREAKER_THRESHOLD=3
 
 # ─── Admin (optional) ───
 ADMIN_ADDRESS=
+
+# ─── Telegram Bildirimleri (Katman 11) ───
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+TELEGRAM_ENABLED=false
+TELEGRAM_SHIFT_INTERVAL_SECS=21600
+TELEGRAM_BALANCE_WARN_ETH=0.05
 "#;
 
     match std::fs::write(".env", template) {
@@ -553,6 +561,38 @@ async fn main() -> Result<()> {
     // Banner göster
     print_banner(&config);
 
+    // ═══ v32.0: TELEGRAM TELEMETRİ SERVİSİ (Katman 11) ═══
+    let telegram_sender: Option<telegram::TelegramSender> = if config.telegram_enabled {
+        if let (Some(ref token), Some(ref chat_id)) = (&config.telegram_bot_token, &config.telegram_chat_id) {
+            let tg_config = telegram::TelegramConfig {
+                bot_token: token.clone(),
+                chat_id: chat_id.clone(),
+                enabled: true,
+                shift_report_secs: config.telegram_shift_interval_secs,
+                balance_warn_eth: config.telegram_balance_warn_eth,
+            };
+            // CancellationToken kullanmıyoruz çünkü sender main() scope'unda yaşamalı
+            // (reconnect döngüsü boyunca aktif kalmalı)
+            let tg_cancel = tokio_util::sync::CancellationToken::new();
+            let sender = telegram::spawn_telegram_service(tg_config, tg_cancel);
+            println!(
+                "  {} Telegram Telemetry: {} (Chat: {})",
+                "📡".green(),
+                "ACTIVE".green().bold(),
+                chat_id,
+            );
+            Some(sender)
+        } else {
+            eprintln!(
+                "  {} Telegram enabled but TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing",
+                "⚠️".yellow(),
+            );
+            None
+        }
+    } else {
+        None
+    };
+
     // Yeniden bağlanma döngüsü
     let mut retry_count: u32 = 0;
 
@@ -564,27 +604,50 @@ async fn main() -> Result<()> {
             );
         }
 
-        match run_bot(&config, &mut pools, &mut pair_combos).await {
+        match run_bot(&config, &mut pools, &mut pair_combos, &telegram_sender).await {
             Ok(_) => {
                 println!(
                     "\n  {} Connection lost. Reconnecting...",
                     "⚠️".yellow()
                 );
+                // v32.0: Telegram — bağlantı kopma bildirimi
+                if let Some(ref tg) = telegram_sender {
+                    tg.send(telegram::TelegramMessage::ConnectionLost {
+                        error: "WSS stream closed".to_string(),
+                        retry_count,
+                    });
+                }
             }
             Err(e) => {
                 // CancellationToken .cancel() eski listener'ları temizler.
                 // run_bot döndüğünde token scope'u biter, yeni döngüde
                 // yeni token üretilir.
+                let err_msg = format!("{:#}", e);
                 println!(
-                    "\n  {} Error: {:#}",
-                    "❌".red(), e
+                    "\n  {} Error: {}",
+                    "❌".red(), &err_msg
                 );
+                // v32.0: Telegram — hata bildirimi
+                if let Some(ref tg) = telegram_sender {
+                    tg.send(telegram::TelegramMessage::ConnectionLost {
+                        error: err_msg,
+                        retry_count,
+                    });
+                }
             }
         }
 
         retry_count += 1;
 
         if config.max_retries > 0 && retry_count >= config.max_retries {
+            // v32.0: Telegram — bot kapanıyor bildirimi
+            if let Some(ref tg) = telegram_sender {
+                tg.send(telegram::TelegramMessage::MaxRetriesExceeded {
+                    max_retries: config.max_retries,
+                });
+                // Mesajın gönderilmesi için kısa bekleme
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
             println!(
                 "  {} Maximum retries ({}) exceeded. Bot shutting down.",
                 "🛑".red(), config.max_retries
@@ -618,7 +681,7 @@ async fn main() -> Result<()> {
 // BOT MOTORU — Blok Dinle → State Sync → Fırsat Tara → Simüle → Yürüt
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &mut Vec<pool_discovery::PairCombo>) -> Result<()> {
+async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &mut Vec<pool_discovery::PairCombo>, telegram_sender: &Option<telegram::TelegramSender>) -> Result<()> {
     // ══════════════ CANCELLATION TOKEN (v11.0: Zombi Thread Önleme) ══════════════
     // Her run_bot çağrısında yeni bir CancellationToken üretilir.
     // Arka plan listener'larına (pending_tx, swap_event) paslanır.
@@ -973,6 +1036,16 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     println!("{}", "  ════════════════════════════════════════════════════════════════".green());
     println!();
 
+    // v32.0: Telegram — sistem başlatıldı bildirimi
+    if let Some(ref tg) = telegram_sender {
+        let mode_str = if config.execution_enabled() { "LIVE" } else if config.shadow_mode() { "SHADOW" } else { "OBSERVE" };
+        tg.send(telegram::TelegramMessage::SystemStartup {
+            pool_count: pools.len(),
+            transport: active_transport.to_string(),
+            mode: mode_str.to_string(),
+        });
+    }
+
     // ══════════════ PENDING TX DİNLEYİCİ (FAZ 4) ══════════════
     // Base L2 sequencer'daki bekleyen swap TX'lerini arka planda dinle
     // ve etkilenen havuzların durumlarını iyimser (optimistic) olarak güncelle.
@@ -1112,6 +1185,9 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     // ana ticaret döngüsünü BLOKLAMAZ. Tamamlandığında REVM base_db rebuild edilir.
     let mut hot_reload_task: Option<tokio::task::JoinHandle<()>> = None;
 
+    // v32.0: Telegram Telemetri sayıçları (vardiya raporu için)
+    let mut tg_counters = telegram::TelemetryCounters::new();
+
     // ══════════════ ANA DÖNGÜ — BLOK BAZLI + WSS HEARTBEAT ══════════════
     // v10.1: WSS bağlantı sağlığı kontrolü (Heartbeat)
     // 15 saniye içinde yeni blok gelmezse bağlantı kopmuş sayılır
@@ -1206,6 +1282,16 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                 config.latency_spike_threshold_ms,
                 stats.latency_spikes,
             );
+            // v32.0: Telegram — gecikme spike bildirimi (her 5. spike'ta)
+            if stats.latency_spikes % 5 == 1 {
+                if let Some(ref tg) = telegram_sender {
+                    tg.send(telegram::TelegramMessage::HighLatency {
+                        latency_ms: sync_ms as f64,
+                        threshold_ms: config.latency_spike_threshold_ms,
+                        block_number,
+                    });
+                }
+            }
         }
 
         // Event-driven: Havuzlar event listener tarafından sürekli güncel tutuluyor.
@@ -1537,6 +1623,8 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                     sync_ms as f64,
                     l1_data_fee_wei,
                     &mev_executor,
+                    telegram_sender,
+                    &mut tg_counters,
                 ).await {
                     last_simulated_gas = Some(gas);
                     pair_failures.remove(&best_idx);
@@ -1555,6 +1643,14 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                             100 * 2,
                         );
                         stats.consecutive_failures = 0;
+                        // v32.0: Telegram — circuit breaker bildirimi
+                        if let Some(ref tg) = telegram_sender {
+                            tg.send(telegram::TelegramMessage::CircuitBreakerTripped {
+                                pair_name: pair_combos[best_idx].pair_name.clone(),
+                                consecutive_failures: *failures,
+                                cooldown_blocks: 100,
+                            });
+                        }
                     }
                 }
             }
@@ -1648,6 +1744,8 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                         sync_ms as f64,
                         l1_data_fee_wei,
                         &mev_executor,
+                        telegram_sender,
+                        &mut tg_counters,
                     ).await {
                         last_simulated_gas = Some(gas);
                     }
@@ -1662,6 +1760,37 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             print_stats_summary(&stats, &states, pools, pair_combos);
             // Keşif motoru istatistikleri
             discovery_engine::print_discovery_stats(&discovery_registry, pools);
+        }
+
+        // ── v32.0: TELEGRAM VARDIYA RAPORU WATCHDOG ────────────
+        // Telemetri sayaclarini guncelle
+        tg_counters.scanned_opportunities = stats.total_opportunities;
+        tg_counters.attempted_trades = stats.failed_simulations + stats.executed_trades;
+
+        if stats.last_shift_report.elapsed() >= Duration::from_secs(config.telegram_shift_interval_secs) {
+            if let Some(ref tg) = telegram_sender {
+                let period_secs = stats.last_shift_report.elapsed().as_secs();
+                let label = if period_secs >= 21600 { "Son 6 Saat".to_string() }
+                    else if period_secs >= 3600 { format!("Son {} Saat", period_secs / 3600) }
+                    else { format!("Son {} Dakika", period_secs / 60) };
+                tg.send(telegram::TelegramMessage::ShiftReport {
+                    period_label: label,
+                    scanned_opportunities: tg_counters.scanned_opportunities,
+                    attempted_trades: tg_counters.attempted_trades,
+                    successful_trades: stats.executed_trades,
+                    reverts: tg_counters.reverts,
+                    revert_gas_cost_weth: tg_counters.revert_gas_cost_weth,
+                    net_period_profit_weth: tg_counters.net_period_profit_weth,
+                    wallet_balance_eth: 0.0, // Bakiye RPC sorgusu gerektirir, sonraki versiyonda
+                    uptime: stats.uptime_str(),
+                });
+                eprintln!(
+                    "  📡 [Telegram] Shift report sent (period: {}s)",
+                    period_secs,
+                );
+            }
+            stats.last_shift_report = std::time::Instant::now();
+            tg_counters.reset();
         }
 
         // ── 6. PERİYODİK NONCE SENKRONİZASYONU (v10.0) ──────
@@ -1679,6 +1808,13 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                                 "  {} Nonce mismatch detected: local={} chain={} → correcting",
                                 "🔄".yellow(), local_nonce, onchain_nonce
                             );
+                            // v32.0: Telegram — nonce kayması bildirimi
+                            if let Some(ref tg) = telegram_sender {
+                                tg.send(telegram::TelegramMessage::NonceDrift {
+                                    local_nonce,
+                                    chain_nonce: onchain_nonce,
+                                });
+                            }
                             nonce_manager.force_set(onchain_nonce);
                         }
                     }

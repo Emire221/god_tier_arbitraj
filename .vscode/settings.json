@@ -1,0 +1,76 @@
+{
+    "editor.formatOnSave": true,
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true,
+    "editor.rulers": [
+        100
+    ],
+    "editor.wordWrap": "off",
+    "files.trimTrailingWhitespace": true,
+    "files.insertFinalNewline": true,
+    "files.eol": "\n",
+    "files.exclude": {
+        "**/target": true,
+        "**/out": true,
+        "**/cache": true,
+        "**/.git": true,
+        "**/node_modules": true
+    },
+    "files.watcherExclude": {
+        "**/target/**": true,
+        "**/out/**": true,
+        "**/cache/**": true
+    },
+    "rust-analyzer.cargo.buildScripts.enable": true,
+    "rust-analyzer.procMacro.enable": true,
+    "rust-analyzer.checkOnSave.command": "clippy",
+    "rust-analyzer.checkOnSave.extraArgs": [
+        "--",
+        "-D",
+        "warnings"
+    ],
+    "rust-analyzer.cargo.features": "all",
+    "rust-analyzer.diagnostics.experimental.enable": true,
+    "rust-analyzer.inlayHints.parameterHints.enable": true,
+    "rust-analyzer.inlayHints.typeHints.enable": true,
+    "[rust]": {
+        "editor.defaultFormatter": "rust-lang.rust-analyzer",
+        "editor.formatOnSave": true,
+        "editor.tabSize": 4
+    },
+    "solidity.packageDefaultDependenciesContractsDirectory": "src",
+    "solidity.packageDefaultDependenciesDirectory": "lib",
+    "solidity.compileUsingRemoteVersion": "v0.8.27",
+    "solidity.formatter": "forge",
+    "[solidity]": {
+        "editor.defaultFormatter": "JuanBlanco.solidity",
+        "editor.formatOnSave": true,
+        "editor.tabSize": 4
+    },
+    "github.copilot.enable": {
+        "*": true,
+        "rust": true,
+        "solidity": true,
+        "markdown": true,
+        "toml": true,
+        "json": true
+    },
+    "github.copilot.editor.enableAutoCompletions": true,
+    "terminal.integrated.defaultProfile.windows": "PowerShell",
+    "terminal.integrated.scrollback": 10000,
+    "terminal.integrated.enablePersistentSessions": true,
+    "search.exclude": {
+        "**/target": true,
+        "**/out": true,
+        "**/cache": true,
+        "**/lib": true,
+        "**/*.lock": true
+    },
+    "git.autofetch": true,
+    "git.confirmSync": false,
+    "git.enableSmartCommit": true,
+    "task.autoDetect": "on",
+    "task.problemMatchers.neverPrompt": {
+        "rust": true
+    }
+}

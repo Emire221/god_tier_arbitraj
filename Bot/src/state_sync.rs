@@ -32,9 +32,9 @@ use alloy::providers::Provider;
 use alloy::sol;
 use alloy::sol_types::SolCall;
 use eyre::Result;
+use futures_util::future::join_all;
 use futures_util::StreamExt;
 use std::time::Instant;
-use futures_util::future::join_all;
 
 use crate::math::compute_eth_price;
 use crate::math::exact::u256_to_f64;
@@ -263,14 +263,19 @@ pub async fn sync_pool_state<P: Provider + Sync>(
         match tokio::time::timeout(
             std::time::Duration::from_millis(SYNC_TIMEOUT_MS),
             sync_pool_state_inner(provider, pool_config, pool_state, block_number),
-        ).await {
+        )
+        .await
+        {
             Ok(Ok(())) => return Ok(()),
             Ok(Err(e)) => {
                 // RPC hatası (timeout değil) — yeniden deneme
                 if attempt < SYNC_MAX_RETRIES {
                     eprintln!(
                         "  \u{26a1} [{}] Sync error (attempt {}/{}): {}",
-                        pool_config.name, attempt + 1, SYNC_MAX_RETRIES + 1, e
+                        pool_config.name,
+                        attempt + 1,
+                        SYNC_MAX_RETRIES + 1,
+                        e
                     );
                 }
                 last_err = Some(e);
@@ -280,13 +285,16 @@ pub async fn sync_pool_state<P: Provider + Sync>(
                 if attempt < SYNC_MAX_RETRIES {
                     eprintln!(
                         "  \u{26a1} [{}] Sync timeout ({}ms, attempt {}/{})",
-                        pool_config.name, SYNC_TIMEOUT_MS,
-                        attempt + 1, SYNC_MAX_RETRIES + 1,
+                        pool_config.name,
+                        SYNC_TIMEOUT_MS,
+                        attempt + 1,
+                        SYNC_MAX_RETRIES + 1,
                     );
                 }
                 last_err = Some(eyre::eyre!(
                     "[{}] sync_pool_state timeout ({}ms)",
-                    pool_config.name, SYNC_TIMEOUT_MS
+                    pool_config.name,
+                    SYNC_TIMEOUT_MS
                 ));
             }
         }
@@ -308,13 +316,15 @@ async fn sync_pool_state_inner<P: Provider + Sync>(
             let slot0_call = pool.slot0();
             let liq_call = pool.liquidity();
             let fee_call = pool.fee();
-            let (slot0_result, liq_result, fee_result) = tokio::join!(
-                slot0_call.call(),
-                liq_call.call(),
-                fee_call.call(),
-            );
-            let slot0 = slot0_result
-                .map_err(|e| eyre::eyre!("[{}] slot0 read error (V3/7-field/uint8): {}", pool_config.name, e))?;
+            let (slot0_result, liq_result, fee_result) =
+                tokio::join!(slot0_call.call(), liq_call.call(), fee_call.call(),);
+            let slot0 = slot0_result.map_err(|e| {
+                eyre::eyre!(
+                    "[{}] slot0 read error (V3/7-field/uint8): {}",
+                    pool_config.name,
+                    e
+                )
+            })?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[{}] liquidity read error: {}", pool_config.name, e))?;
             let fee_bps: Option<u32> = fee_result.ok().map(|f| {
@@ -328,17 +338,17 @@ async fn sync_pool_state_inner<P: Provider + Sync>(
             let slot0_call = pool.slot0();
             let liq_call = pool.liquidity();
             let fee_call = pool.fee();
-            let (slot0_result, liq_result, fee_result) = tokio::join!(
-                slot0_call.call(),
-                liq_call.call(),
-                fee_call.call(),
-            );
-            let slot0 = slot0_result
-                .map_err(|e| eyre::eyre!(
+            let (slot0_result, liq_result, fee_result) =
+                tokio::join!(slot0_call.call(), liq_call.call(), fee_call.call(),);
+            let slot0 = slot0_result.map_err(|e| {
+                eyre::eyre!(
                     "[{}] slot0 read error (PCS-V3/7-field/uint32): {}\n\
                     → Is the pool address a valid PancakeSwap V3 Pool? Check: {}",
-                    pool_config.name, e, pool_config.address
-                ))?;
+                    pool_config.name,
+                    e,
+                    pool_config.address
+                )
+            })?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[{}] liquidity read error: {}", pool_config.name, e))?;
             let fee_bps: Option<u32> = fee_result.ok().map(|f| {
@@ -352,17 +362,17 @@ async fn sync_pool_state_inner<P: Provider + Sync>(
             let slot0_call = pool.slot0();
             let liq_call = pool.liquidity();
             let fee_call = pool.fee();
-            let (slot0_result, liq_result, fee_result) = tokio::join!(
-                slot0_call.call(),
-                liq_call.call(),
-                fee_call.call(),
-            );
-            let slot0 = slot0_result
-                .map_err(|e| eyre::eyre!(
+            let (slot0_result, liq_result, fee_result) =
+                tokio::join!(slot0_call.call(), liq_call.call(), fee_call.call(),);
+            let slot0 = slot0_result.map_err(|e| {
+                eyre::eyre!(
                     "[{}] slot0 read error (Aero/6-field): {}\n\
                     → Is the pool address a valid Aerodrome CLPool? Check: {}",
-                    pool_config.name, e, pool_config.address
-                ))?;
+                    pool_config.name,
+                    e,
+                    pool_config.address
+                )
+            })?;
             let liq = liq_result
                 .map_err(|e| eyre::eyre!("[{}] liquidity read error: {}", pool_config.name, e))?;
             let fee_bps: Option<u32> = fee_result.ok().map(|f| {
@@ -554,15 +564,22 @@ pub async fn sync_all_pools_multicall<P: Provider + Sync>(
         let mc_result = match tokio::time::timeout(
             std::time::Duration::from_millis(SYNC_TIMEOUT_MS),
             multicall.aggregate3(calls).call(),
-        ).await {
+        )
+        .await
+        {
             Ok(Ok(res)) => res,
             Ok(Err(e)) => {
                 // Multicall3 çağrısı başarısız — tüm chunk'ı stale işaretle
                 for i in chunk_start..chunk_end {
-                    states[i].rcu(|old| { let mut s = (**old).clone(); s.is_stale = true; s });
+                    states[i].rcu(|old| {
+                        let mut s = (**old).clone();
+                        s.is_stale = true;
+                        s
+                    });
                     results[i] = Err(eyre::eyre!(
                         "[{}] Multicall3 batch sync error: {}",
-                        pools[i].name, e
+                        pools[i].name,
+                        e
                     ));
                 }
                 continue;
@@ -570,10 +587,15 @@ pub async fn sync_all_pools_multicall<P: Provider + Sync>(
             Err(_elapsed) => {
                 // Timeout — tüm chunk'ı stale işaretle
                 for i in chunk_start..chunk_end {
-                    states[i].rcu(|old| { let mut s = (**old).clone(); s.is_stale = true; s });
+                    states[i].rcu(|old| {
+                        let mut s = (**old).clone();
+                        s.is_stale = true;
+                        s
+                    });
                     results[i] = Err(eyre::eyre!(
                         "[{}] Multicall3 sync timeout ({}ms)",
-                        pools[i].name, SYNC_TIMEOUT_MS
+                        pools[i].name,
+                        SYNC_TIMEOUT_MS
                     ));
                 }
                 eprintln!(
@@ -664,7 +686,11 @@ pub async fn sync_all_pools_multicall<P: Provider + Sync>(
                 }
                 _ => {
                     // Decode failed — mark pool as STALE
-                    states[pool_idx].rcu(|old| { let mut s = (**old).clone(); s.is_stale = true; s });
+                    states[pool_idx].rcu(|old| {
+                        let mut s = (**old).clone();
+                        s.is_stale = true;
+                        s
+                    });
                     results[pool_idx] = Err(eyre::eyre!(
                         "[{}] Multicall3 slot0/liquidity decode failed (execution reverted?)",
                         pools[pool_idx].name
@@ -689,10 +715,7 @@ pub async fn sync_all_pools_multicall<P: Provider + Sync>(
 ///
 /// # Dönüş
 /// Geçersiz havuz indeksleri (silinmesi gereken havuzlar)
-pub async fn validate_pools<P: Provider + Sync>(
-    provider: &P,
-    pools: &[PoolConfig],
-) -> Vec<usize> {
+pub async fn validate_pools<P: Provider + Sync>(provider: &P, pools: &[PoolConfig]) -> Vec<usize> {
     let pool_count = pools.len();
     if pool_count == 0 {
         return vec![];
@@ -722,7 +745,9 @@ pub async fn validate_pools<P: Provider + Sync>(
     let mc_results = match tokio::time::timeout(
         std::time::Duration::from_millis(10_000), // Başlangıç — daha uzun timeout
         multicall.aggregate3(calls).call(),
-    ).await {
+    )
+    .await
+    {
         Ok(Ok(res)) => res,
         Ok(Err(e)) => {
             eprintln!(
@@ -880,16 +905,14 @@ pub async fn sync_tick_bitmap<P: Provider + Sync>(
 
         // Multicall3 ile tek eth_call
         let multicall = IMulticall3::new(MULTICALL3_ADDRESS, provider);
-        let results = multicall
-            .aggregate3(calls)
-            .call()
-            .await
-            .map_err(|e| eyre::eyre!("[{}] Multicall3 tickBitmap error: {}", pool_config.name, e))?;
+        let results = multicall.aggregate3(calls).call().await.map_err(|e| {
+            eyre::eyre!("[{}] Multicall3 tickBitmap error: {}", pool_config.name, e)
+        })?;
 
         // Sonuçları çözümle
         for (i, result) in results.iter().enumerate() {
             if result.success && result.returnData.len() >= 32 {
-                let word = U256::from_be_slice(&result.returnData[result.returnData.len()-32..]);
+                let word = U256::from_be_slice(&result.returnData[result.returnData.len() - 32..]);
                 let word_pos = word_positions[i];
                 if word != U256::ZERO {
                     bitmap_data.words.insert(word_pos, word);
@@ -938,11 +961,14 @@ pub async fn sync_tick_bitmap<P: Provider + Sync>(
                     decode_ticks_result(&result.returnData)
                 {
                     if initialized {
-                        bitmap_data.ticks.insert(all_initialized_ticks[i], TickInfo {
-                            liquidity_gross: liq_gross,
-                            liquidity_net: liq_net,
-                            initialized: true,
-                        });
+                        bitmap_data.ticks.insert(
+                            all_initialized_ticks[i],
+                            TickInfo {
+                                liquidity_gross: liq_gross,
+                                liquidity_net: liq_net,
+                                initialized: true,
+                            },
+                        );
                     }
                 }
             }
@@ -1015,56 +1041,69 @@ pub async fn sync_all_pools<P: Provider + Sync>(
     let mut final_results = multicall_results;
 
     // Multicall3'te başarısız olan havuzların indekslerini topla
-    let failed_indices: Vec<usize> = final_results.iter().enumerate()
+    let failed_indices: Vec<usize> = final_results
+        .iter()
+        .enumerate()
         .filter(|(_, r)| r.is_err())
         .map(|(i, _)| i)
         .collect();
 
     for i in failed_indices {
-            // Tekil fallback dene
-            let config = pools[i].clone();
-            let state = states[i].clone();
+        // Tekil fallback dene
+        let config = pools[i].clone();
+        let state = states[i].clone();
 
-            let mut fallback_ok = false;
-            for attempt in 0..=FALLBACK_MAX_RETRIES {
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(FALLBACK_TIMEOUT_MS),
-                    sync_pool_state(provider, &config, &state, block_number),
-                ).await {
-                    Ok(Ok(())) => {
-                        fallback_ok = true;
-                        break;
+        let mut fallback_ok = false;
+        for attempt in 0..=FALLBACK_MAX_RETRIES {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(FALLBACK_TIMEOUT_MS),
+                sync_pool_state(provider, &config, &state, block_number),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    fallback_ok = true;
+                    break;
+                }
+                Ok(Err(e)) => {
+                    if attempt < FALLBACK_MAX_RETRIES {
+                        eprintln!(
+                            "     \u{26a1} [{}] Fallback sync error ({}/{}): {}",
+                            config.name,
+                            attempt + 1,
+                            FALLBACK_MAX_RETRIES + 1,
+                            e,
+                        );
                     }
-                    Ok(Err(e)) => {
-                        if attempt < FALLBACK_MAX_RETRIES {
-                            eprintln!(
-                                "     \u{26a1} [{}] Fallback sync error ({}/{}): {}",
-                                config.name, attempt + 1, FALLBACK_MAX_RETRIES + 1, e,
-                            );
-                        }
-                    }
-                    Err(_) => {
-                        if attempt < FALLBACK_MAX_RETRIES {
-                            eprintln!(
-                                "     \u{26a1} [{}] Fallback sync timeout ({}/{})",
-                                config.name, attempt + 1, FALLBACK_MAX_RETRIES + 1,
-                            );
-                        }
+                }
+                Err(_) => {
+                    if attempt < FALLBACK_MAX_RETRIES {
+                        eprintln!(
+                            "     \u{26a1} [{}] Fallback sync timeout ({}/{})",
+                            config.name,
+                            attempt + 1,
+                            FALLBACK_MAX_RETRIES + 1,
+                        );
                     }
                 }
             }
+        }
 
-            if fallback_ok {
-                final_results[i] = Ok(());
-            } else {
-                // v10.0: Eski veri KULLANILMAZ — havuzu STALE olarak işaretle
-                let staleness = state.load().staleness_ms();
-                state.rcu(|old| { let mut s = (**old).clone(); s.is_stale = true; s });
-                eprintln!(
-                    "     \u{1f6a8} [{}] Sync completely failed — marked as STALE (data age: {}ms)",
-                    config.name, staleness,
-                );
-            }
+        if fallback_ok {
+            final_results[i] = Ok(());
+        } else {
+            // v10.0: Eski veri KULLANILMAZ — havuzu STALE olarak işaretle
+            let staleness = state.load().staleness_ms();
+            state.rcu(|old| {
+                let mut s = (**old).clone();
+                s.is_stale = true;
+                s
+            });
+            eprintln!(
+                "     \u{1f6a8} [{}] Sync completely failed — marked as STALE (data age: {}ms)",
+                config.name, staleness,
+            );
+        }
     }
 
     final_results
@@ -1088,21 +1127,29 @@ pub async fn sync_all_tick_bitmaps<P: Provider + Sync>(
 ) -> Vec<Result<()>> {
     const BITMAP_TIMEOUT_MS: u64 = 500;
 
-    let futures: Vec<_> = pools.iter().zip(states.iter())
+    let futures: Vec<_> = pools
+        .iter()
+        .zip(states.iter())
         .map(|(config, state)| {
             let name = config.name.clone();
             async move {
                 match tokio::time::timeout(
                     std::time::Duration::from_millis(BITMAP_TIMEOUT_MS),
                     sync_tick_bitmap(provider, config, state, block_number, scan_range),
-                ).await {
+                )
+                .await
+                {
                     Ok(result) => result,
                     Err(_) => {
                         eprintln!(
                             "     ⚠️ [TickBitmap] {} sync timeout ({}ms) — keeping existing data",
                             name, BITMAP_TIMEOUT_MS,
                         );
-                        Err(eyre::eyre!("[{}] TickBitmap timeout ({}ms)", name, BITMAP_TIMEOUT_MS))
+                        Err(eyre::eyre!(
+                            "[{}] TickBitmap timeout ({}ms)",
+                            name,
+                            BITMAP_TIMEOUT_MS
+                        ))
                     }
                 }
             }
@@ -1126,9 +1173,7 @@ pub async fn sync_all_tick_bitmaps<P: Provider + Sync>(
 ///
 /// # Dönüş
 /// L1 data fee (wei). Hata/timeout durumunda önbellek, yoksa konservatif fallback döner.
-pub async fn estimate_l1_data_fee<P: Provider + Sync>(
-    provider: &P,
-) -> u128 {
+pub async fn estimate_l1_data_fee<P: Provider + Sync>(provider: &P) -> u128 {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const L1_FEE_TIMEOUT_MS: u64 = 1000;
@@ -1142,7 +1187,9 @@ pub async fn estimate_l1_data_fee<P: Provider + Sync>(
     match tokio::time::timeout(
         std::time::Duration::from_millis(L1_FEE_TIMEOUT_MS),
         estimate_l1_data_fee_inner(provider),
-    ).await {
+    )
+    .await
+    {
         Ok(fee) => {
             // Başarılı sorgu — önbelleği güncelle
             if fee > 0 && fee < u64::MAX as u128 {
@@ -1171,37 +1218,31 @@ pub async fn estimate_l1_data_fee<P: Provider + Sync>(
 }
 
 /// estimate_l1_data_fee iç implementasyonu (timeout wrapper'sız)
-async fn estimate_l1_data_fee_inner<P: Provider + Sync>(
-    provider: &P,
-) -> u128 {
+async fn estimate_l1_data_fee_inner<P: Provider + Sync>(provider: &P) -> u128 {
     const FALLBACK_FEE_WEI: u128 = 5_000_000_000_000; // 0.000005 ETH (Base post-EIP-4844)
-    // OPT-G: Gercekci calldata pattern — 134 byte compact calldata.
-    // Gercek calldata'da ~%35 zero byte bulunur (adres leading zeros,
-    // kucuk amount'lar). 0xFF tumu non-zero → L1 fee'yi %20-30 abartir.
-    // Non-zero = 16 gas, zero = 4 gas (EIP-2028).
+                                                      // OPT-G: Gercekci calldata pattern — 134 byte compact calldata.
+                                                      // Gercek calldata'da ~%35 zero byte bulunur (adres leading zeros,
+                                                      // kucuk amount'lar). 0xFF tumu non-zero → L1 fee'yi %20-30 abartir.
+                                                      // Non-zero = 16 gas, zero = 4 gas (EIP-2028).
     let representative_calldata: Vec<u8> = {
         let mut data = vec![0u8; 134];
         // Pool adresleri (20 byte x2 = 40 byte, ~%10 zero)
-        for i in 0..40 {
-            data[i] = if i % 10 == 0 { 0x00 } else { 0xAB };
+        for (i, byte) in data[..40].iter_mut().enumerate() {
+            *byte = if i % 10 == 0 { 0x00 } else { 0xAB };
         }
         // Amount, minProfit (16 byte x2 = 32 byte, ~%50 zero — leading zeros)
-        for i in 40..72 {
-            data[i] = if i < 56 { 0x00 } else { 0xCD };
+        for (i, byte) in data[40..72].iter_mut().enumerate() {
+            *byte = if i < 16 { 0x00 } else { 0xCD };
         }
         // Geri kalan: flags, direction, deadline vb. (cogunluDu non-zero)
-        for i in 72..134 {
-            data[i] = 0xEF;
+        for byte in &mut data[72..134] {
+            *byte = 0xEF;
         }
         data
     };
 
     let oracle = IGasPriceOracle::new(GAS_PRICE_ORACLE_ADDRESS, provider);
-    match oracle
-        .getL1Fee(representative_calldata.into())
-        .call()
-        .await
-    {
+    match oracle.getL1Fee(representative_calldata.into()).call().await {
         Ok(fee) => {
             // U256 → u128 safe conversion
             if fee > alloy::primitives::U256::from(u128::MAX) {
@@ -1236,14 +1277,18 @@ pub async fn cache_all_bytecodes<P: Provider + Sync>(
     pools: &[PoolConfig],
     states: &[SharedPoolState],
 ) -> Vec<Result<()>> {
-    let futures: Vec<_> = pools.iter().zip(states.iter())
+    let futures: Vec<_> = pools
+        .iter()
+        .zip(states.iter())
         .map(|(config, state)| cache_pool_bytecode(provider, config, state))
         .collect();
     join_all(futures).await
 }
 fn encode_tick_bitmap_call(_dex: DexType, word_pos: i16) -> Vec<u8> {
     // tickBitmap(int16) — ABI: selector(4) + int16 padded to 32 bytes
-    let call = IUniswapV3Pool::tickBitmapCall { wordPosition: word_pos };
+    let call = IUniswapV3Pool::tickBitmapCall {
+        wordPosition: word_pos,
+    };
     IUniswapV3Pool::tickBitmapCall::abi_encode(&call)
 }
 
@@ -1254,8 +1299,7 @@ fn encode_ticks_call(_dex: DexType, tick: i32) -> Vec<u8> {
     // ticks(int24) — ABI: selector(4) + int24 padded to 32 bytes
     // Alloy v1.7: int24 = Signed<24, 1> olarak temsil edilir
     use alloy::primitives::Signed;
-    let tick_signed: Signed<24, 1> = Signed::try_from(tick as i64)
-        .unwrap_or(Signed::ZERO);
+    let tick_signed: Signed<24, 1> = Signed::try_from(tick as i64).unwrap_or(Signed::ZERO);
     let call = IUniswapV3Pool::ticksCall { tick: tick_signed };
     IUniswapV3Pool::ticksCall::abi_encode(&call)
 }
@@ -1277,7 +1321,7 @@ fn encode_ticks_call(_dex: DexType, tick: i32) -> Vec<u8> {
 /// ABI decode ticks() raw return data (DEX-agnostik).
 ///
 /// Uniswap V3 ticks() → 8 parametre (256 byte)
-/// PancakeSwap V3 ticks() → 8 parametre (256 byte)  
+/// PancakeSwap V3 ticks() → 8 parametre (256 byte)
 /// Aerodrome ticks() → 10 parametre (320 byte)
 ///
 /// İlk 3 kullanılan alan tüm DEX'lerde aynı offset'tedir:
@@ -1386,42 +1430,51 @@ pub async fn optimistic_refresh_pool<P: Provider + Sync>(
             let pool = IUniswapV3Pool::new(pool_config.address, provider);
             let slot0_call = pool.slot0();
             let liq_call = pool.liquidity();
-            let (slot0_result, liq_result) = tokio::join!(
-                slot0_call.call(),
-                liq_call.call(),
-            );
-            let slot0 = slot0_result
-                .map_err(|e| eyre::eyre!("[OPT:{}] slot0 read error (V3/uint8): {}", pool_config.name, e))?;
-            let liq = liq_result
-                .map_err(|e| eyre::eyre!("[OPT:{}] liquidity read error: {}", pool_config.name, e))?;
+            let (slot0_result, liq_result) = tokio::join!(slot0_call.call(), liq_call.call(),);
+            let slot0 = slot0_result.map_err(|e| {
+                eyre::eyre!(
+                    "[OPT:{}] slot0 read error (V3/uint8): {}",
+                    pool_config.name,
+                    e
+                )
+            })?;
+            let liq = liq_result.map_err(|e| {
+                eyre::eyre!("[OPT:{}] liquidity read error: {}", pool_config.name, e)
+            })?;
             (slot0.sqrtPriceX96, slot0.tick.as_i32(), liq)
         }
         DexType::PancakeSwapV3 => {
             let pool = IPancakeSwapV3Pool::new(pool_config.address, provider);
             let slot0_call = pool.slot0();
             let liq_call = pool.liquidity();
-            let (slot0_result, liq_result) = tokio::join!(
-                slot0_call.call(),
-                liq_call.call(),
-            );
-            let slot0 = slot0_result
-                .map_err(|e| eyre::eyre!("[OPT:{}] slot0 read error (PCS-V3/uint32): {}", pool_config.name, e))?;
-            let liq = liq_result
-                .map_err(|e| eyre::eyre!("[OPT:{}] liquidity read error: {}", pool_config.name, e))?;
+            let (slot0_result, liq_result) = tokio::join!(slot0_call.call(), liq_call.call(),);
+            let slot0 = slot0_result.map_err(|e| {
+                eyre::eyre!(
+                    "[OPT:{}] slot0 read error (PCS-V3/uint32): {}",
+                    pool_config.name,
+                    e
+                )
+            })?;
+            let liq = liq_result.map_err(|e| {
+                eyre::eyre!("[OPT:{}] liquidity read error: {}", pool_config.name, e)
+            })?;
             (slot0.sqrtPriceX96, slot0.tick.as_i32(), liq)
         }
         DexType::Aerodrome => {
             let pool = IAerodromePool::new(pool_config.address, provider);
             let slot0_call = pool.slot0();
             let liq_call = pool.liquidity();
-            let (slot0_result, liq_result) = tokio::join!(
-                slot0_call.call(),
-                liq_call.call(),
-            );
-            let slot0 = slot0_result
-                .map_err(|e| eyre::eyre!("[OPT:{}] slot0 read error (Aero/6-field): {}", pool_config.name, e))?;
-            let liq = liq_result
-                .map_err(|e| eyre::eyre!("[OPT:{}] liquidity read error: {}", pool_config.name, e))?;
+            let (slot0_result, liq_result) = tokio::join!(slot0_call.call(), liq_call.call(),);
+            let slot0 = slot0_result.map_err(|e| {
+                eyre::eyre!(
+                    "[OPT:{}] slot0 read error (Aero/6-field): {}",
+                    pool_config.name,
+                    e
+                )
+            })?;
+            let liq = liq_result.map_err(|e| {
+                eyre::eyre!("[OPT:{}] liquidity read error: {}", pool_config.name, e)
+            })?;
             (slot0.sqrtPriceX96, slot0.tick.as_i32(), liq)
         }
     };
@@ -1492,28 +1545,22 @@ pub async fn optimistic_refresh_pool<P: Provider + Sync>(
 /// Uniswap V3 / Aerodrome Swap event topic0
 /// keccak256("Swap(address,address,int256,int256,uint160,uint128,int24)")
 const SWAP_EVENT_TOPIC: [u8; 32] = [
-    0xc4, 0x20, 0x79, 0xf9, 0x4a, 0x63, 0x50, 0xd7,
-    0xe6, 0x23, 0x5f, 0x29, 0x17, 0x49, 0x24, 0xf9,
-    0x28, 0xcc, 0x2a, 0xc8, 0x18, 0xeb, 0x64, 0xfe,
-    0xd8, 0x00, 0x4e, 0x11, 0x5f, 0xbc, 0xca, 0x67,
+    0xc4, 0x20, 0x79, 0xf9, 0x4a, 0x63, 0x50, 0xd7, 0xe6, 0x23, 0x5f, 0x29, 0x17, 0x49, 0x24, 0xf9,
+    0x28, 0xcc, 0x2a, 0xc8, 0x18, 0xeb, 0x64, 0xfe, 0xd8, 0x00, 0x4e, 0x11, 0x5f, 0xbc, 0xca, 0x67,
 ];
 
 /// Uniswap V3 / Aerodrome Mint event topic0
 /// keccak256("Mint(address,address,int24,int24,uint128,uint256,uint256)")
 const MINT_EVENT_TOPIC: [u8; 32] = [
-    0x7a, 0x53, 0x08, 0x0b, 0xa4, 0x14, 0x15, 0x8b,
-    0xe7, 0xec, 0x69, 0xb9, 0x87, 0xb5, 0xfb, 0x7d,
-    0x07, 0xde, 0xe1, 0x01, 0xfe, 0x85, 0x48, 0x8f,
-    0x08, 0x53, 0xae, 0x16, 0x23, 0x9d, 0x0b, 0xde,
+    0x7a, 0x53, 0x08, 0x0b, 0xa4, 0x14, 0x15, 0x8b, 0xe7, 0xec, 0x69, 0xb9, 0x87, 0xb5, 0xfb, 0x7d,
+    0x07, 0xde, 0xe1, 0x01, 0xfe, 0x85, 0x48, 0x8f, 0x08, 0x53, 0xae, 0x16, 0x23, 0x9d, 0x0b, 0xde,
 ];
 
 /// Uniswap V3 / Aerodrome Burn event topic0
 /// keccak256("Burn(address,int24,int24,uint128,uint256,uint256)")
 const BURN_EVENT_TOPIC: [u8; 32] = [
-    0x0c, 0x39, 0x6c, 0xd9, 0x89, 0xa3, 0x9f, 0x44,
-    0x59, 0xb5, 0xfa, 0x1a, 0xed, 0x6a, 0x9a, 0x8d,
-    0xcd, 0xbc, 0x45, 0x90, 0x8a, 0xcf, 0xd6, 0x7e,
-    0x02, 0x8c, 0xd5, 0x68, 0xda, 0x98, 0x98, 0x2c,
+    0x0c, 0x39, 0x6c, 0xd9, 0x89, 0xa3, 0x9f, 0x44, 0x59, 0xb5, 0xfa, 0x1a, 0xed, 0x6a, 0x9a, 0x8d,
+    0xcd, 0xbc, 0x45, 0x90, 0x8a, 0xcf, 0xd6, 0x7e, 0x02, 0x8c, 0xd5, 0x68, 0xda, 0x98, 0x98, 0x2c,
 ];
 
 /// Swap event log verisinden havuz durumunu çıkar ve güncelle.
@@ -1535,8 +1582,7 @@ pub fn process_swap_event_log(
     states: &[SharedPoolState],
 ) -> Result<bool> {
     // Log adresi hangi havuza ait?
-    let pool_idx = pools.iter()
-        .position(|p| p.address == log_address);
+    let pool_idx = pools.iter().position(|p| p.address == log_address);
 
     let pool_idx = match pool_idx {
         Some(idx) => idx,
@@ -1732,12 +1778,15 @@ pub async fn start_pool_event_listener<P: Provider + Sync>(
         .address(pool_addresses)
         .event_signature(vec![swap_topic, mint_topic, burn_topic]);
 
-    let sub = provider.subscribe_logs(&filter).await
+    let sub = provider
+        .subscribe_logs(&filter)
+        .await
         .map_err(|e| eyre::eyre!("Pool event subscription error: {}", e))?;
     let mut stream = sub.into_stream();
 
     println!(
-        "  Event-driven pool listener active ({} pools, Swap+Mint+Burn)", pools.len()
+        "  Event-driven pool listener active ({} pools, Swap+Mint+Burn)",
+        pools.len()
     );
 
     loop {
@@ -1775,7 +1824,7 @@ pub async fn start_pool_event_listener<P: Provider + Sync>(
                         Err(e) => eprintln!("     [Event] Swap log error: {}", e),
                     }
                 } else if topic0 == mint_topic {
-                    let b256_topics: Vec<alloy::primitives::B256> = topics.iter().copied().collect();
+                    let b256_topics: Vec<alloy::primitives::B256> = topics.to_vec();
                     match process_mint_event_log(log_data, &b256_topics, log_address, block_number, pools, states) {
                         Ok(true) => {
                             if let Some(idx) = pools.iter().position(|p| p.address == log_address) {
@@ -1789,7 +1838,7 @@ pub async fn start_pool_event_listener<P: Provider + Sync>(
                         Err(e) => eprintln!("     [Event] Mint log error: {}", e),
                     }
                 } else if topic0 == burn_topic {
-                    let b256_topics: Vec<alloy::primitives::B256> = topics.iter().copied().collect();
+                    let b256_topics: Vec<alloy::primitives::B256> = topics.to_vec();
                     match process_burn_event_log(log_data, &b256_topics, log_address, block_number, pools, states) {
                         Ok(true) => {
                             if let Some(idx) = pools.iter().position(|p| p.address == log_address) {
@@ -1830,12 +1879,11 @@ pub async fn start_pool_event_listener<P: Provider + Sync>(
 
 #[cfg(test)]
 mod rpc_failover_tests {
-    use alloy::primitives::U256;
-    use std::sync::Arc;
-    use arc_swap::ArcSwap;
-    use std::time::{Duration, Instant};
     use crate::types::*;
-
+    use alloy::primitives::U256;
+    use arc_swap::ArcSwap;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     fn make_active_state(price: f64, liq: u128, block: u64) -> SharedPoolState {
         Arc::new(ArcSwap::from_pointee(PoolState {
@@ -1881,7 +1929,10 @@ mod rpc_failover_tests {
                 s.staleness_ms()
             );
             assert_eq!(s.eth_price_usd, 2500.0, "Fiyat son bilinen değerde kalmalı");
-            assert_eq!(s.liquidity, 10_000_000_000_000_000_000, "Likidite korunmalı");
+            assert_eq!(
+                s.liquidity, 10_000_000_000_000_000_000,
+                "Likidite korunmalı"
+            );
         }
 
         // Kurtarma
@@ -1945,7 +1996,10 @@ mod rpc_failover_tests {
         let s1 = state.load();
         let s2 = state.load();
 
-        assert_eq!(s1.eth_price_usd, s2.eth_price_usd, "Eş zamanlı okuma tutarlı");
+        assert_eq!(
+            s1.eth_price_usd, s2.eth_price_usd,
+            "Eş zamanlı okuma tutarlı"
+        );
         assert_eq!(s1.liquidity, s2.liquidity, "Likidite değerleri tutarlı");
 
         drop(s1);
@@ -1977,8 +2031,16 @@ mod rpc_failover_tests {
             };
 
             // Hiçbir durumda panik veya integer overflow olmamalı
-            assert!(delay_ms >= 100, "Minimum delay 100ms: retry={}", retry_count);
-            assert!(delay_ms <= 10_000, "Maksimum delay 10s: retry={}", retry_count);
+            assert!(
+                delay_ms >= 100,
+                "Minimum delay 100ms: retry={}",
+                retry_count
+            );
+            assert!(
+                delay_ms <= 10_000,
+                "Maksimum delay 10s: retry={}",
+                retry_count
+            );
 
             // İlk 3 deneme agresif
             if retry_count <= 3 {
@@ -1987,12 +2049,12 @@ mod rpc_failover_tests {
         }
 
         // Specific backoff values
-        assert_eq!(100u64 * (1u64 << 1u32.min(6)), 200);  // retry 4 → 200ms
-        assert_eq!(100u64 * (1u64 << 2u32.min(6)), 400);  // retry 5 → 400ms
-        assert_eq!(100u64 * (1u64 << 3u32.min(6)), 800);  // retry 6 → 800ms
-        assert_eq!(100u64 * (1u64 << 4u32.min(6)), 1600); // retry 7 → 1600ms
-        assert_eq!(100u64 * (1u64 << 5u32.min(6)), 3200); // retry 8 → 3200ms
-        assert_eq!(100u64 * (1u64 << 6u32.min(6)), 6400); // retry 9 → 6400ms
-        // retry 10+: min(6) clamp → 6400ms (< 10000 cap)
+        assert_eq!(100u64 * (1u64 << 1u32), 200); // retry 4 → 200ms
+        assert_eq!(100u64 * (1u64 << 2u32), 400); // retry 5 → 400ms
+        assert_eq!(100u64 * (1u64 << 3u32), 800); // retry 6 → 800ms
+        assert_eq!(100u64 * (1u64 << 4u32), 1600); // retry 7 → 1600ms
+        assert_eq!(100u64 * (1u64 << 5u32), 3200); // retry 8 → 3200ms
+        assert_eq!(100u64 * (1u64 << 6u32), 6400); // retry 9 → 6400ms
+                                                   // retry 10+: min(6) clamp → 6400ms (< 10000 cap)
     }
 }

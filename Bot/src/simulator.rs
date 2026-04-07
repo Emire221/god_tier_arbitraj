@@ -17,25 +17,25 @@
 //    4. Sonuç: Success → işlem gönder / Revert → işlemi atla
 // ============================================================================
 
-use alloy::primitives::{Address, Bytes as RevmBytes, U256};
 use alloy::hex;
+use alloy::primitives::{Address, Bytes as RevmBytes, U256};
 
 use revm::{
-    database::InMemoryDB,
-    state::AccountInfo,
     bytecode::Bytecode,
     context::{Context, Journal},
     context_interface::result::ExecutionResult,
-    handler::{MainBuilder, ExecuteEvm},
+    database::InMemoryDB,
+    handler::{ExecuteEvm, MainBuilder},
     primitives::hardfork::SpecId,
+    state::AccountInfo,
 };
 
 // revm v36: Address/U256/Bytes artık alloy primitives — dönüşüm gereksiz
 type RevmAddress = Address;
 type RevmU256 = U256;
 
-use crate::types::{DexType, PoolConfig, SharedPoolState, SimulationResult};
 use crate::math;
+use crate::types::{DexType, PoolConfig, SharedPoolState, SimulationResult};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tip Dönüşüm Yardımcıları
@@ -84,7 +84,7 @@ struct StorageLayout {
     /// liquidity storage slot indeksi
     liquidity_index: RevmU256,
     /// slot0'da unlocked flag'inin bit pozisyonu (None = ayrı slot'ta)
-        unlocked_bit_in_slot0: Option<u32>,
+    unlocked_bit_in_slot0: Option<u32>,
     /// PCS V3 gibi unlocked ayrı slot'taysa: (slot_index, bit_pozisyonu)
     unlocked_separate_slot: Option<(RevmU256, u32)>,
 }
@@ -115,7 +115,14 @@ impl StorageLayout {
     }
 
     /// Bu layout'a göre slot0 ve ilişkili storage slot'larını DB'ye yaz
-    fn inject_slot0(&self, db: &mut InMemoryDB, addr: RevmAddress, sqrt_price_x96: U256, tick: i32, dex: DexType) {
+    fn inject_slot0(
+        &self,
+        db: &mut InMemoryDB,
+        addr: RevmAddress,
+        sqrt_price_x96: U256,
+        tick: i32,
+        dex: DexType,
+    ) {
         let slot0_value = pack_slot0(sqrt_price_x96, tick, dex);
         let _ = db.insert_account_storage(addr, self.slot0_index, slot0_value);
 
@@ -262,7 +269,11 @@ impl SimulationEngine {
     pub fn cache_bytecodes(&mut self, pools: &[PoolConfig], states: &[SharedPoolState]) {
         for (config, state_lock) in pools.iter().zip(states.iter()) {
             // Mevcut adres zaten cache'te varsa atla
-            if self.bytecode_cache.iter().any(|(addr, _)| *addr == config.address) {
+            if self
+                .bytecode_cache
+                .iter()
+                .any(|(addr, _)| *addr == config.address)
+            {
                 continue;
             }
             let state = state_lock.load();
@@ -296,11 +307,7 @@ impl SimulationEngine {
     /// Bytecode zaten base_db'de mevcut — yeniden yüklenmez.
     /// Sadece slot0 (sqrtPriceX96) ve slot4 (liquidity) güncellenir.
     /// Performans: ~0.05ms (eski: ~2-3ms)
-    fn build_db_from_base(
-        &self,
-        pools: &[PoolConfig],
-        states: &[SharedPoolState],
-    ) -> InMemoryDB {
+    fn build_db_from_base(&self, pools: &[PoolConfig], states: &[SharedPoolState]) -> InMemoryDB {
         let mut db = self.base_db.as_ref().unwrap().clone();
 
         // v20.0: StorageLayout şablonu ile DEX-bağımsız storage injection
@@ -334,12 +341,7 @@ impl SimulationEngine {
             // Bytecode
             if let Some(ref code) = state.bytecode {
                 let bytecode = Bytecode::new_raw(RevmBytes::from(code.clone()));
-                let info = AccountInfo::new(
-                    RevmU256::ZERO,
-                    0,
-                    bytecode.hash_slow(),
-                    bytecode,
-                );
+                let info = AccountInfo::new(RevmU256::ZERO, 0, bytecode.hash_slow(), bytecode);
                 db.insert_account_info(addr, info);
             }
 
@@ -360,12 +362,7 @@ impl SimulationEngine {
         // Bytecode yoksa boş hesap (sadece gas tahmini olarak kullanılır).
         if let Some(ref code) = self.contract_bytecode {
             let bytecode = Bytecode::new_raw(RevmBytes::from(code.clone()));
-            let info = AccountInfo::new(
-                RevmU256::ZERO,
-                0,
-                bytecode.hash_slow(),
-                bytecode,
-            );
+            let info = AccountInfo::new(RevmU256::ZERO, 0, bytecode.hash_slow(), bytecode);
             db.insert_account_info(to_revm_addr(contract), info);
         } else {
             let contract_info = AccountInfo::from_balance(RevmU256::ZERO);
@@ -416,15 +413,16 @@ impl SimulationEngine {
         use revm::context::TxEnv;
         use revm::primitives::TxKind;
 
-        let ctx: Context<revm::context::BlockEnv, _, _, InMemoryDB, Journal<InMemoryDB>, ()> = Context::new(db, SpecId::CANCUN)
-            .modify_cfg_chained(|cfg| {
-                cfg.chain_id = self.chain_id; // v22.1: config'den, hardcoded değil
-            })
-            .modify_block_chained(|block: &mut revm::context::BlockEnv| {
-                block.number = RevmU256::from(current_block);
-                block.timestamp = RevmU256::from(block_timestamp);
-                block.basefee = block_base_fee;
-            });
+        let ctx: Context<revm::context::BlockEnv, _, _, InMemoryDB, Journal<InMemoryDB>, ()> =
+            Context::new(db, SpecId::CANCUN)
+                .modify_cfg_chained(|cfg| {
+                    cfg.chain_id = self.chain_id; // v22.1: config'den, hardcoded değil
+                })
+                .modify_block_chained(|block: &mut revm::context::BlockEnv| {
+                    block.number = RevmU256::from(current_block);
+                    block.timestamp = RevmU256::from(block_timestamp);
+                    block.basefee = block_base_fee;
+                });
 
         let tx = TxEnv::builder()
             .caller(to_revm_addr(caller))
@@ -440,41 +438,34 @@ impl SimulationEngine {
 
         // 3. İşlemi çalıştır
         match evm.transact(tx) {
-            Ok(result_and_state) => {
-                match result_and_state.result {
-                    ExecutionResult::Success { gas, .. } => {
-                        SimulationResult {
-                            success: true,
-                            gas_used: gas.spent(),
-                            error: None,
-                        }
-                    }
-                    ExecutionResult::Revert { gas, output, .. } => {
-                        SimulationResult {
-                            success: false,
-                            gas_used: gas.spent(),
-                            error: Some(format!(
-                                "REVERT: 0x{}",
-                                output.iter().map(|b| format!("{:02x}", b)).collect::<String>()
-                            )),
-                        }
-                    }
-                    ExecutionResult::Halt { reason, gas, .. } => {
-                        SimulationResult {
-                            success: false,
-                            gas_used: gas.spent(),
-                            error: Some(format!("HALT: {:?}", reason)),
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                SimulationResult {
+            Ok(result_and_state) => match result_and_state.result {
+                ExecutionResult::Success { gas, .. } => SimulationResult {
+                    success: true,
+                    gas_used: gas.spent(),
+                    error: None,
+                },
+                ExecutionResult::Revert { gas, output, .. } => SimulationResult {
                     success: false,
-                    gas_used: 0,
-                    error: Some(format!("EVM error: {:?}", e)),
-                }
-            }
+                    gas_used: gas.spent(),
+                    error: Some(format!(
+                        "REVERT: 0x{}",
+                        output
+                            .iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<String>()
+                    )),
+                },
+                ExecutionResult::Halt { reason, gas, .. } => SimulationResult {
+                    success: false,
+                    gas_used: gas.spent(),
+                    error: Some(format!("HALT: {:?}", reason)),
+                },
+            },
+            Err(e) => SimulationResult {
+                success: false,
+                gas_used: 0,
+                error: Some(format!("EVM error: {:?}", e)),
+            },
         }
     }
 
@@ -537,7 +528,8 @@ impl SimulationEngine {
                 gas_used: 0,
                 error: Some(format!(
                     "Stale data: BUY={}ms, SELL={}ms",
-                    buy_state.staleness_ms(), sell_state.staleness_ms()
+                    buy_state.staleness_ms(),
+                    sell_state.staleness_ms()
                 )),
             };
         }
@@ -594,11 +586,15 @@ impl SimulationEngine {
         // Toplam tahmini: 260K + 50K = ~310K (minimum taban)
         let estimated_gas: u64 = {
             let base_gas: u64 = 310_000; // 2-havuz çapraz swap baz gas
-            // TickBitmap varsa tahmini tick geçişi ekle
-            let buy_tick_crossings = buy_state.tick_bitmap.as_ref()
+                                         // TickBitmap varsa tahmini tick geçişi ekle
+            let buy_tick_crossings = buy_state
+                .tick_bitmap
+                .as_ref()
                 .map(|bm| bm.initialized_tick_count().min(5) as u64)
                 .unwrap_or(1);
-            let sell_tick_crossings = sell_state.tick_bitmap.as_ref()
+            let sell_tick_crossings = sell_state
+                .tick_bitmap
+                .as_ref()
                 .map(|bm| bm.initialized_tick_count().min(5) as u64)
                 .unwrap_or(1);
             let tick_cross_gas = (buy_tick_crossings + sell_tick_crossings) * 20_000;
@@ -611,7 +607,6 @@ impl SimulationEngine {
             error: None,
         }
     }
-
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -700,7 +695,9 @@ pub fn encode_compact_calldata(
 ///
 /// 134 byte → (pool_a, pool_b, owed_token, received_token, amount, uni_dir, aero_dir, min_profit, deadline_block)
 #[allow(dead_code, clippy::type_complexity)]
-pub fn decode_compact_calldata(data: &[u8]) -> Option<(Address, Address, Address, Address, U256, u8, u8, u128, u32)> {
+pub fn decode_compact_calldata(
+    data: &[u8],
+) -> Option<(Address, Address, Address, Address, U256, u8, u8, u128, u32)> {
     if data.len() != 134 {
         return None;
     }
@@ -715,7 +712,17 @@ pub fn decode_compact_calldata(data: &[u8]) -> Option<(Address, Address, Address
     let min_profit = u128::from_be_bytes(data[114..130].try_into().ok()?);
     let deadline_block = u32::from_be_bytes(data[130..134].try_into().ok()?);
 
-    Some((pool_a, pool_b, owed_token, received_token, amount, uni_direction, aero_direction, min_profit, deadline_block))
+    Some((
+        pool_a,
+        pool_b,
+        owed_token,
+        received_token,
+        amount,
+        uni_direction,
+        aero_direction,
+        min_profit,
+        deadline_block,
+    ))
 }
 
 /// Kompakt calldata'yı hex string olarak formatla (log/debug)
@@ -758,7 +765,11 @@ pub fn encode_multi_hop_calldata(
 ) -> Vec<u8> {
     let hop_count = pools.len();
     debug_assert!((2..=4).contains(&hop_count), "Hop sayısı 2-4 arası olmalı");
-    debug_assert_eq!(pools.len(), directions.len(), "Pool ve direction sayıları eşit olmalı");
+    debug_assert_eq!(
+        pools.len(),
+        directions.len(),
+        "Pool ve direction sayıları eşit olmalı"
+    );
 
     // Header: 1 + 32 + 16 + 4 = 53 byte
     // Hops: hopCount × 21 byte
@@ -780,12 +791,15 @@ pub fn encode_multi_hop_calldata(
     // [0x35..] Hop dizisi: her biri 21 byte (20 pool + 1 direction)
     for (pool, &dir) in pools.iter().zip(directions.iter()) {
         calldata.extend_from_slice(pool.as_slice()); // 20 byte
-        calldata.push(dir);                           // 1 byte
+        calldata.push(dir); // 1 byte
     }
 
-    debug_assert_eq!(calldata.len(), total_size,
+    debug_assert_eq!(
+        calldata.len(),
+        total_size,
         "Multi-hop calldata boyutu yanlış: beklenen={}, gerçek={}",
-        total_size, calldata.len()
+        total_size,
+        calldata.len()
     );
 
     calldata
@@ -794,7 +808,8 @@ pub fn encode_multi_hop_calldata(
 /// Multi-hop calldata çözümle (test/debug için)
 #[allow(dead_code, clippy::type_complexity)]
 pub fn decode_multi_hop_calldata(data: &[u8]) -> Option<(Vec<Address>, Vec<u8>, U256, u128, u32)> {
-    if data.len() < 53 + 42 { // minimum 2-hop
+    if data.len() < 53 + 42 {
+        // minimum 2-hop
         return None;
     }
 
@@ -831,7 +846,7 @@ pub fn decode_multi_hop_calldata(data: &[u8]) -> Option<(Vec<Address>, Vec<u8>, 
 #[cfg(test)]
 mod calldata_tests {
     use super::*;
-    use alloy::primitives::{U256, address};
+    use alloy::primitives::{address, U256};
 
     // Sabit test adresleri
     const POOL_A: Address = address!("d0b53D9277642d899DF5C87A3966A349A798F224");
@@ -844,8 +859,15 @@ mod calldata_tests {
         let amount = U256::from(5_000_000_000_000_000_000u128); // 5 WETH
 
         let calldata = encode_compact_calldata(
-            POOL_A, POOL_B, WETH, USDC,
-            amount, 0x00, 0x01, 1_000_000u128, 99_999_999u32,
+            POOL_A,
+            POOL_B,
+            WETH,
+            USDC,
+            amount,
+            0x00,
+            0x01,
+            1_000_000u128,
+            99_999_999u32,
         );
 
         assert_eq!(calldata.len(), 134, "Kompakt calldata 134 byte olmalı");
@@ -859,14 +881,22 @@ mod calldata_tests {
 
         // Kodla
         let calldata = encode_compact_calldata(
-            POOL_A, POOL_B, USDC, WETH,
-            amount, 0x01, 0x00, min_profit, deadline,
+            POOL_A, POOL_B, USDC, WETH, amount, 0x01, 0x00, min_profit, deadline,
         );
         assert_eq!(calldata.len(), 134);
 
         // Çözümle (round-trip)
-        let (dec_a, dec_b, dec_owed, dec_recv, dec_amount, dec_uni, dec_aero, dec_profit, dec_deadline) =
-            decode_compact_calldata(&calldata).expect("Decode başarısız");
+        let (
+            dec_a,
+            dec_b,
+            dec_owed,
+            dec_recv,
+            dec_amount,
+            dec_uni,
+            dec_aero,
+            dec_profit,
+            dec_deadline,
+        ) = decode_compact_calldata(&calldata).expect("Decode başarısız");
 
         assert_eq!(dec_a, POOL_A, "Pool A adresi eşleşmeli");
         assert_eq!(dec_b, POOL_B, "Pool B adresi eşleşmeli");
@@ -888,7 +918,9 @@ mod calldata_tests {
         let amount = U256::from(1u64);
         let deadline: u32 = 0x01020304;
 
-        let cd = encode_compact_calldata(pool_a, pool_b, owed, recv, amount, 0x00, 0x01, 0xFF, deadline);
+        let cd = encode_compact_calldata(
+            pool_a, pool_b, owed, recv, amount, 0x00, 0x01, 0xFF, deadline,
+        );
 
         // [0..20] = pool_a → son byte 0x01
         assert_eq!(cd[19], 0x01, "Pool A son byte = 0x01");
@@ -919,19 +951,31 @@ mod calldata_tests {
     fn test_compact_calldata_invalid_length_rejected() {
         // 133 byte (eksik) — decode None döndürmeli
         let short = vec![0u8; 133];
-        assert!(decode_compact_calldata(&short).is_none(), "133 byte reddedilmeli");
+        assert!(
+            decode_compact_calldata(&short).is_none(),
+            "133 byte reddedilmeli"
+        );
 
         // 135 byte (fazla) — decode None döndürmeli
         let long = vec![0u8; 135];
-        assert!(decode_compact_calldata(&long).is_none(), "135 byte reddedilmeli");
+        assert!(
+            decode_compact_calldata(&long).is_none(),
+            "135 byte reddedilmeli"
+        );
 
         // Eski 130 byte — reddedilmeli
         let old = vec![0u8; 130];
-        assert!(decode_compact_calldata(&old).is_none(), "130 byte eski format reddedilmeli");
+        assert!(
+            decode_compact_calldata(&old).is_none(),
+            "130 byte eski format reddedilmeli"
+        );
 
         // Boş veri
         let empty: Vec<u8> = vec![];
-        assert!(decode_compact_calldata(&empty).is_none(), "Boş veri reddedilmeli");
+        assert!(
+            decode_compact_calldata(&empty).is_none(),
+            "Boş veri reddedilmeli"
+        );
     }
 
     #[test]
@@ -942,14 +986,24 @@ mod calldata_tests {
         let amount = U256::from(10_000_000_000_000_000_000u128);
 
         let compact = encode_compact_calldata(
-            POOL_A, POOL_B, WETH, USDC,
-            amount, 0x00, 0x01, 1_000_000u128, 99_999_999u32,
+            POOL_A,
+            POOL_B,
+            WETH,
+            USDC,
+            amount,
+            0x00,
+            0x01,
+            1_000_000u128,
+            99_999_999u32,
         );
         let abi_size: usize = 4 + 32 * 9; // 9 parametreli ABI
 
         assert_eq!(compact.len(), 134);
         assert_eq!(abi_size, 292);
-        assert!(compact.len() < abi_size, "Kompakt format ABI'den küçük olmalı");
+        assert!(
+            compact.len() < abi_size,
+            "Kompakt format ABI'den küçük olmalı"
+        );
 
         let saved = abi_size - compact.len();
         assert_eq!(saved, 158, "158 byte tasarruf");
@@ -977,15 +1031,26 @@ mod calldata_tests {
         // u128::MAX minProfit testi
         let max_profit = u128::MAX;
         let calldata = encode_compact_calldata(
-            POOL_A, POOL_B, WETH, USDC,
-            U256::from(1u64), 0x00, 0x01, max_profit, u32::MAX,
+            POOL_A,
+            POOL_B,
+            WETH,
+            USDC,
+            U256::from(1u64),
+            0x00,
+            0x01,
+            max_profit,
+            u32::MAX,
         );
         assert_eq!(calldata.len(), 134);
 
         let (_, _, _, _, _, _, _, decoded_profit, decoded_deadline) =
             decode_compact_calldata(&calldata).expect("Decode başarısız");
         assert_eq!(decoded_profit, max_profit, "u128::MAX minProfit round-trip");
-        assert_eq!(decoded_deadline, u32::MAX, "u32::MAX deadlineBlock round-trip");
+        assert_eq!(
+            decoded_deadline,
+            u32::MAX,
+            "u32::MAX deadlineBlock round-trip"
+        );
     }
 
     #[test]
@@ -1000,19 +1065,16 @@ mod calldata_tests {
         let deadline = 20_000_000u32; // Blok ~20M
 
         let calldata = encode_compact_calldata(
-            POOL_A, POOL_B,
-            WETH,    // owedToken (WETH borçlu)
-            USDC,    // receivedToken (USDC alınan)
-            amount,
-            0x01,   // UniV3: oneForZero (WETH al = zeroForOne=false → direction=1)
-            0x00,   // Slipstream: zeroForOne (USDC sat → WETH al)
-            min_profit,
-            deadline,
+            POOL_A, POOL_B, WETH, // owedToken (WETH borçlu)
+            USDC, // receivedToken (USDC alınan)
+            amount, 0x01, // UniV3: oneForZero (WETH al = zeroForOne=false → direction=1)
+            0x00, // Slipstream: zeroForOne (USDC sat → WETH al)
+            min_profit, deadline,
         );
 
         assert_eq!(calldata.len(), 134);
 
-        // Round-trip doğrula  
+        // Round-trip doğrula
         let decoded = decode_compact_calldata(&calldata).expect("Decode başarısız");
         assert_eq!(decoded.0, POOL_A);
         assert_eq!(decoded.1, POOL_B);
@@ -1040,11 +1102,11 @@ mod calldata_tests {
 #[cfg(test)]
 mod sequencer_reorg_tests {
     use super::*;
-    use alloy::primitives::{Address, U256, address};
-    use std::sync::Arc;
-    use arc_swap::ArcSwap;
-    use std::time::{Instant, Duration};
     use crate::types::*;
+    use alloy::primitives::{address, Address, U256};
+    use arc_swap::ArcSwap;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     const POOL_A: Address = address!("d0b53D9277642d899DF5C87A3966A349A798F224");
     const POOL_B: Address = address!("cDAC0d6c6C59727a65F871236188350531885C43");
@@ -1090,7 +1152,7 @@ mod sequencer_reorg_tests {
 
         Arc::new(ArcSwap::from_pointee(PoolState {
             sqrt_price_x96: sqrt_price_x96_u256,
-            sqrt_price_f64: sqrt_price_f64,
+            sqrt_price_f64,
             tick,
             liquidity,
             liquidity_f64: liquidity as f64,
@@ -1144,7 +1206,10 @@ mod sequencer_reorg_tests {
 
         // Simülasyon: bayat state'li havuz → BAŞARISIZ olmalı
         let result = sim.validate_mathematical(&pools, &states, 0, 1, 1.0);
-        assert!(!result.success, "Bayat (stale) state ile simülasyon reddedilmeli");
+        assert!(
+            !result.success,
+            "Bayat (stale) state ile simülasyon reddedilmeli"
+        );
         assert!(
             result.error.as_deref().unwrap_or("").contains("Stale data"),
             "Hata mesajı 'Stale data' içermeli, aldığımız: {:?}",
@@ -1185,7 +1250,10 @@ mod sequencer_reorg_tests {
         let states: Vec<SharedPoolState> = vec![state_a, state_b];
 
         let result = sim.validate_mathematical(&pools, &states, 0, 1, 1.0);
-        assert!(!result.success, "Hayalet fırsat (phantom opportunity) reddedilmeli");
+        assert!(
+            !result.success,
+            "Hayalet fırsat (phantom opportunity) reddedilmeli"
+        );
         assert!(
             result.error.as_deref().unwrap_or("").contains("not active"),
             "Hata mesajı 'not active' içermeli: {:?}",
@@ -1227,7 +1295,10 @@ mod sequencer_reorg_tests {
         let states: Vec<SharedPoolState> = vec![stale_state(2500.0), stale_state(2520.0)];
 
         let result = sim.validate_mathematical(&pools, &states, 0, 1, 0.5);
-        assert!(!result.success, "Tam kesintide her iki bayat havuz reddedilmeli");
+        assert!(
+            !result.success,
+            "Tam kesintide her iki bayat havuz reddedilmeli"
+        );
         assert!(
             result.error.as_deref().unwrap_or("").contains("Stale data"),
             "Hata 'Stale data' içermeli: {:?}",
@@ -1268,7 +1339,11 @@ mod sequencer_reorg_tests {
         // 999,999 < 100,000 sınırı aşılıyor → anormal fiyat reddedilmeli
         assert!(!result.success, "Anormal fiyat ($999,999) reddedilmeli");
         assert!(
-            result.error.as_deref().unwrap_or("").contains("Abnormal price"),
+            result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("Abnormal price"),
             "Hata 'Abnormal price' içermeli: {:?}",
             result.error
         );

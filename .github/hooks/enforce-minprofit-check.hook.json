@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "powershell -NoProfile -Command \"$input = [Console]::In.ReadToEnd() | ConvertFrom-Json; $toolName = $input.toolName; $filePath = $input.toolInput.file_path; if ($toolName -in @('edit','create') -and $filePath -like '*.sol') { $newContent = $input.toolInput.new_str; if ($newContent -and ($newContent -match 'function.*arbitrage' -or $newContent -match 'function.*Arbitrage' -or $newContent -match 'executeSwap' -or $newContent -match 'executeTrade')) { @{systemMessage='💰 SANDVİÇ KORUMASI: Arbitraj fonksiyonunda minProfit kontrolü (if profit < minProfit revert) zorunludur!'} | ConvertTo-Json } }\""
+      }
+    ]
+  }
+}

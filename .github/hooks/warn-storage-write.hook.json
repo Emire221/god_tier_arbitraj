@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "powershell -NoProfile -Command \"$input = [Console]::In.ReadToEnd() | ConvertFrom-Json; $toolName = $input.toolName; $filePath = $input.toolInput.file_path; if ($toolName -in @('edit','create') -and $filePath -like '*.sol') { $newContent = $input.toolInput.new_str; if ($newContent -and ($newContent -match 'sstore\\(' -or $newContent -match 'SSTORE')) { @{systemMessage='⛽ GAS OPTİMİZASYONU: SSTORE (20000 gas) yerine TSTORE (100 gas) kullanmayı değerlendirin! EIP-1153 transient storage TX-scoped veriler için idealdir.'} | ConvertTo-Json } }\""
+      }
+    ]
+  }
+}

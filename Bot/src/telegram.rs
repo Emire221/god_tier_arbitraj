@@ -27,10 +27,13 @@ pub struct TelegramConfig {
     /// Hedef chat/grup ID
     pub chat_id: String,
     /// Bildirimler aktif mi?
+    #[allow(dead_code)]
     pub enabled: bool,
     /// Vardiya raporu aralığı (saniye, default: 21600 = 6 saat)
+    #[allow(dead_code)]
     pub shift_report_secs: u64,
     /// Doomsday bakiye eşiği (ETH, default: 0.05)
+    #[allow(dead_code)]
     pub balance_warn_eth: f64,
 }
 
@@ -201,10 +204,7 @@ impl TelemetryCounters {
 ///
 /// # Dönüş
 /// `TelegramSender` — tüm modüller bu handle üzerinden mesaj gönderir.
-pub fn spawn_telegram_service(
-    config: TelegramConfig,
-    cancel: CancellationToken,
-) -> TelegramSender {
+pub fn spawn_telegram_service(config: TelegramConfig, cancel: CancellationToken) -> TelegramSender {
     let (tx, mut rx) = mpsc::channel::<TelegramMessage>(256);
 
     tokio::spawn(async move {
@@ -282,7 +282,8 @@ async fn send_to_telegram(
                 if status.as_u16() == 429 {
                     eprintln!(
                         "  ⚠️ [Telegram] Rate limited (attempt {}/3) — waiting {}s",
-                        attempt + 1, delay * 2
+                        attempt + 1,
+                        delay * 2
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(delay * 2)).await;
                     last_error = format!("HTTP {} — {}", status, body);
@@ -301,7 +302,10 @@ async fn send_to_telegram(
         }
     }
 
-    Err(format!("Telegram send failed after 3 attempts: {}", last_error))
+    Err(format!(
+        "Telegram send failed after 3 attempts: {}",
+        last_error
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -337,10 +341,12 @@ fn format_message(msg: &TelegramMessage) -> String {
                  ⏱️ Gecikme: {:.1} ms\n\
                  🔗 TX: <code>{}</code>\n\
                  ⏰ {}\n",
-                buy_pool, sell_pool,
+                buy_pool,
+                sell_pool,
                 gross_profit_weth,
                 gas_cost_weth,
-                net_profit_weth, net_usd_estimate,
+                net_profit_weth,
+                net_usd_estimate,
                 latency_ms,
                 tx_hash,
                 ts,
@@ -378,9 +384,15 @@ fn format_message(msg: &TelegramMessage) -> String {
                 attempted_trades,
                 successful_trades,
                 reverts,
-                revert_gas_cost_weth, revert_usd,
-                if *net_period_profit_weth >= 0.0 { "+" } else { "" },
-                net_period_profit_weth, net_usd_estimate,
+                revert_gas_cost_weth,
+                revert_usd,
+                if *net_period_profit_weth >= 0.0 {
+                    "+"
+                } else {
+                    ""
+                },
+                net_period_profit_weth,
+                net_usd_estimate,
                 wallet_balance_eth,
                 uptime,
                 ts,
@@ -474,8 +486,10 @@ fn format_message(msg: &TelegramMessage) -> String {
                  ❌ Ardisik basarisizlik: {}\n\
                  ⏳ Kara liste: {} blok (~{}s)\n\
                  ⏰ {}\n",
-                pair_name, consecutive_failures,
-                cooldown_blocks, cooldown_blocks * 2,
+                pair_name,
+                consecutive_failures,
+                cooldown_blocks,
+                cooldown_blocks * 2,
                 ts,
             )
         }

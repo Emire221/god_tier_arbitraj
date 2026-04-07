@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "powershell -NoProfile -Command \"@{systemMessage='🎯 GOD TIER ARBITRAJ OTURUMU BAŞLADI | Proje: Base Network Arbitraj Botu v25.0 | Stack: Rust+alloy 1.7, revm 36, Solidity 0.8.27 (Cancun EVM) | KRİTİK KURALLAR: unwrap() YASAK, string revert YASAK, reentrancy guard ZORUNLU, ethers-rs DEĞİL alloy KULLAN | Detay: .github/copilot-instructions.md'} | ConvertTo-Json\""
+      }
+    ]
+  }
+}

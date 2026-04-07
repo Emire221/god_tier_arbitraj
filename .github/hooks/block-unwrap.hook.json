@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "powershell -NoProfile -Command \"$input = [Console]::In.ReadToEnd() | ConvertFrom-Json; $toolName = $input.toolName; $filePath = $input.toolInput.file_path; if ($toolName -in @('edit','create') -and $filePath -like '*.rs') { $newContent = $input.toolInput.new_str; if ($newContent -and ($newContent -match '\\.unwrap\\(\\)' -or $newContent -match '\\.expect\\(')) { Write-Error '🚨 ANAYASA İHLALİ: unwrap() ve expect() kullanımı yasaktır! Alternatifler: result?, .ok_or()?, .unwrap_or_default()'; exit 2 } }\""
+      }
+    ]
+  }
+}

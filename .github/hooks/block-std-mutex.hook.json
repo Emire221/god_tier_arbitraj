@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "powershell -NoProfile -Command \"$input = [Console]::In.ReadToEnd() | ConvertFrom-Json; $toolName = $input.toolName; $filePath = $input.toolInput.file_path; if ($toolName -in @('edit','create') -and $filePath -like '*.rs') { $newContent = $input.toolInput.new_str; if ($newContent -and ($newContent -match 'std::sync::Mutex' -or $newContent -match 'std::sync::RwLock')) { @{systemMessage='🔒 UYARI: std::sync::Mutex/RwLock yerine parking_lot kullanmayı değerlendirin!'} | ConvertTo-Json } }\""
+      }
+    ]
+  }
+}

@@ -2,10 +2,9 @@
 /target
 
 /CHANGELOG_v25_session.md
-/README.md  
+/README.md
 
 # IDE
-.vscode/
 .idea/
 *.swp
 *.swo

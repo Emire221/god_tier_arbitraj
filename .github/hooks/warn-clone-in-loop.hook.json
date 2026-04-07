@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "powershell -NoProfile -Command \"$input = [Console]::In.ReadToEnd() | ConvertFrom-Json; $toolName = $input.toolName; $filePath = $input.toolInput.file_path; if ($toolName -in @('edit','create') -and $filePath -like '*.rs') { $newContent = $input.toolInput.new_str; if ($newContent -and $newContent -match 'for\\s+.*\\s+in\\s+' -and $newContent -match '\\.clone\\(\\)') { @{systemMessage='🔄 BELLEK UYARISI: Loop içinde clone() tespit edildi! Referans (&T) veya Arc::clone kullanmayı değerlendirin.'} | ConvertTo-Json } }\""
+      }
+    ]
+  }
+}

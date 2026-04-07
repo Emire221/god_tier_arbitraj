@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "powershell -NoProfile -Command \"$input = [Console]::In.ReadToEnd() | ConvertFrom-Json; $toolName = $input.toolName; $filePath = $input.toolInput.file_path; if ($toolName -in @('edit','create') -and $filePath -like '*.rs') { $newContent = $input.toolInput.new_str; if ($newContent -and ($newContent -match 'ethers::' -or $newContent -match 'use ethers' -or $newContent -match 'ethers_')) { Write-Error '🚫 HALİSÜLASYON KORUMASI: Bu proje ethers-rs DEĞİL, alloy kullanıyor!'; exit 2 } }\""
+      }
+    ]
+  }
+}

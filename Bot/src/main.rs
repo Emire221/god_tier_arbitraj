@@ -13,40 +13,40 @@
 //  ✓ Modüler mimari (types, math, state_sync, simulator, strategy)
 // ============================================================================
 
-mod types;
-mod math;
-mod state_sync;
-mod simulator;
-mod strategy;
-mod key_manager;
-mod transport;
-mod executor;
-mod pool_discovery;
 mod discovery_engine;
-mod route_engine;
-mod json_logger;
 mod dust_sweeper;
+mod executor;
+mod json_logger;
+mod key_manager;
+mod math;
+mod pool_discovery;
+mod route_engine;
+mod simulator;
+mod state_sync;
+mod strategy;
 mod telegram;
+mod transport;
+mod types;
 
-use types::*;
-use state_sync::*;
-use simulator::SimulationEngine;
-use strategy::*;
 use discovery_engine::{DiscoveryConfig, DiscoveryEngine, LivePoolRegistry};
+use simulator::SimulationEngine;
+use state_sync::*;
+use strategy::*;
+use types::*;
 
 use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder, WsConnect};
-use futures_util::StreamExt;
-use futures_util::future::join_all;
-use eyre::Result;
+use arc_swap::ArcSwap;
 use chrono::Local;
 use colored::*;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
-use std::collections::HashMap;
+use eyre::Result;
+use futures_util::future::join_all;
+use futures_util::StreamExt;
 use parking_lot::RwLock;
-use arc_swap::ArcSwap;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 // ── OPT-4: L1 Data Fee arka plan cache'i ──
@@ -67,82 +67,152 @@ fn print_banner(config: &BotConfig) {
     println!(
         "{}",
         "╔══════════════════════════════════════════════════════════════════╗"
-            .cyan().bold()
+            .cyan()
+            .bold()
     );
     println!(
         "{}",
         "║       ARBITRAGE BOT v25.0 — Quantum Brain IV                    ║"
-            .cyan().bold()
+            .cyan()
+            .bold()
     );
     println!(
         "{}",
         "║    Base Network Cross-DEX Arbitrage System                       ║"
-            .cyan().bold()
+            .cyan()
+            .bold()
     );
     println!(
         "{}",
         "╠══════════════════════════════════════════════════════════════════╣"
-            .cyan().bold()
+            .cyan()
+            .bold()
     );
     println!(
         "{}",
-        "║  [v25] Autonomous Discovery: Factory WSS + Multi-API + Scoring + GC ║"
-            .cyan()
+        "║  [v25] Autonomous Discovery: Factory WSS + Multi-API + Scoring + GC ║".cyan()
     );
     println!(
         "{}",
-        "║  [v9] Executor/Admin Role Separation + Deadline Block             ║"
-            .cyan()
+        "║  [v9] Executor/Admin Role Separation + Deadline Block             ║".cyan()
     );
     println!(
         "{}",
-        "║  [v9] Encrypted Key Management (AES-256-GCM + PBKDF2)             ║"
-            .cyan()
+        "║  [v9] Encrypted Key Management (AES-256-GCM + PBKDF2)             ║".cyan()
     );
     println!(
         "{}",
-        "║  [v9] Dynamic Bribe/Priority Fee + 134-Byte Calldata              ║"
-            .cyan()
+        "║  [v9] Dynamic Bribe/Priority Fee + 134-Byte Calldata              ║".cyan()
     );
     println!(
         "{}",
-        "║  [v6] TickBitmap + Multi-Tick Depth + REVM Simulation              ║"
-            .cyan()
+        "║  [v6] TickBitmap + Multi-Tick Depth + REVM Simulation              ║".cyan()
     );
     println!(
         "{}",
-        "║  [v5] State Sync + Newton-Raphson + Multi-Transport            ║"
-            .cyan()
+        "║  [v5] State Sync + Newton-Raphson + Multi-Transport            ║".cyan()
     );
     println!(
         "{}",
         "╚══════════════════════════════════════════════════════════════════╝"
-            .cyan().bold()
+            .cyan()
+            .bold()
     );
     println!();
-    println!("  {} Engine         : {}", "▸".cyan(), "Rust + Alloy + REVM (Zero Latency)".white());
-    println!("  {} Network        : {}", "▸".cyan(), format!("Base Network (Chain ID: {})", config.chain_id).white());
-    println!("  {} Transport      : {}", "▸".cyan(), format!("{:?} (Priority: IPC > WSS > HTTP)", config.transport_mode).white());
-    println!("  {} Strategy       : {}", "▸".cyan(), "Cross-DEX Spread Arbitrage (Uniswap V3 + Aerodrome)".white());
-    println!("  {} Depth          : {}", "▸".cyan(), format!("TickBitmap (±{} tick range, max {}blk age)", config.tick_bitmap_range, config.tick_bitmap_max_age_blocks).white());
-    println!("  {} Calldata       : {}", "▸".cyan(), format!("134 byte compact (deadline: +{} block)", config.deadline_blocks).white());
-    println!("  {} Bribe          : {}", "▸".cyan(), format!("Dynamic %{:.0} profit → priority fee", config.bribe_pct * 100.0).white());
-    println!("  {} Key Mgmt       : {}", "▸".cyan(), if config.key_manager_active { "Encrypted Keystore (AES-256-GCM)".green().to_string() } else if config.private_key.is_some() { "Env Var (UNSAFE)".yellow().to_string() } else { "None".red().to_string() });
-    println!("  {} Flash Loan     : {}", "▸".cyan(), "Direct Flash Swap (No External Fee)".white());
-    println!("  {} Max Trade      : {}", "▸".cyan(), format!("{:.1} WETH", config.max_trade_size_weth).white());
-    println!("  {} Min Net Profit : {}", "▸".cyan(), format!("{:.6} WETH", config.min_net_profit_weth).white());
+    println!(
+        "  {} Engine         : {}",
+        "▸".cyan(),
+        "Rust + Alloy + REVM (Zero Latency)".white()
+    );
+    println!(
+        "  {} Network        : {}",
+        "▸".cyan(),
+        format!("Base Network (Chain ID: {})", config.chain_id).white()
+    );
+    println!(
+        "  {} Transport      : {}",
+        "▸".cyan(),
+        format!("{:?} (Priority: IPC > WSS > HTTP)", config.transport_mode).white()
+    );
+    println!(
+        "  {} Strategy       : {}",
+        "▸".cyan(),
+        "Cross-DEX Spread Arbitrage (Uniswap V3 + Aerodrome)".white()
+    );
+    println!(
+        "  {} Depth          : {}",
+        "▸".cyan(),
+        format!(
+            "TickBitmap (±{} tick range, max {}blk age)",
+            config.tick_bitmap_range, config.tick_bitmap_max_age_blocks
+        )
+        .white()
+    );
+    println!(
+        "  {} Calldata       : {}",
+        "▸".cyan(),
+        format!(
+            "134 byte compact (deadline: +{} block)",
+            config.deadline_blocks
+        )
+        .white()
+    );
+    println!(
+        "  {} Bribe          : {}",
+        "▸".cyan(),
+        format!(
+            "Dynamic %{:.0} profit → priority fee",
+            config.bribe_pct * 100.0
+        )
+        .white()
+    );
+    println!(
+        "  {} Key Mgmt       : {}",
+        "▸".cyan(),
+        if config.key_manager_active {
+            "Encrypted Keystore (AES-256-GCM)".green().to_string()
+        } else if config.private_key.is_some() {
+            "Env Var (UNSAFE)".yellow().to_string()
+        } else {
+            "None".red().to_string()
+        }
+    );
+    println!(
+        "  {} Flash Loan     : {}",
+        "▸".cyan(),
+        "Direct Flash Swap (No External Fee)".white()
+    );
+    println!(
+        "  {} Max Trade      : {}",
+        "▸".cyan(),
+        format!("{:.1} WETH", config.max_trade_size_weth).white()
+    );
+    println!(
+        "  {} Min Net Profit : {}",
+        "▸".cyan(),
+        format!("{:.6} WETH", config.min_net_profit_weth).white()
+    );
     println!(
         "  {} Start Time     : {}",
         "▸".cyan(),
-        Local::now().format("%Y-%m-%d %H:%M:%S").to_string().yellow()
+        Local::now()
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+            .yellow()
     );
     println!(
         "  {} Mode           : {}",
         "▸".cyan(),
         if config.execution_enabled() {
-            "LIVE (Contract Execution Active)".green().bold().to_string()
+            "LIVE (Contract Execution Active)"
+                .green()
+                .bold()
+                .to_string()
         } else if config.shadow_mode() {
-            "SHADOW MODE (Dry Run — logging to shadow_analytics.jsonl)".yellow().bold().to_string()
+            "SHADOW MODE (Dry Run — logging to shadow_analytics.jsonl)"
+                .yellow()
+                .bold()
+                .to_string()
         } else {
             "OBSERVE (Watch Only)".yellow().bold().to_string()
         }
@@ -151,12 +221,17 @@ fn print_banner(config: &BotConfig) {
 }
 
 fn print_pool_header(pools: &[PoolConfig], states: &[SharedPoolState]) {
-    println!("{}", "  ┌──────────────────────────────────────────────────────────────┐".dimmed());
+    println!(
+        "{}",
+        "  ┌──────────────────────────────────────────────────────────────┐".dimmed()
+    );
     println!("  {} {}", "│".dimmed(), "Monitored Pools:".white().bold());
     for (i, p) in pools.iter().enumerate() {
         let icon = if i == 0 { "🔵" } else { "🟣" };
         let fee_display = if i < states.len() {
-            states[i].load().live_fee_bps
+            states[i]
+                .load()
+                .live_fee_bps
                 .map(|b| b as f64 / 100.0)
                 .unwrap_or(p.fee_bps as f64 / 100.0)
         } else {
@@ -170,9 +245,16 @@ fn print_pool_header(pools: &[PoolConfig], states: &[SharedPoolState]) {
             p.dex,
             fee_display
         );
-        println!("  {}     {}", "│".dimmed(), format!("{}", p.address).dimmed());
+        println!(
+            "  {}     {}",
+            "│".dimmed(),
+            format!("{}", p.address).dimmed()
+        );
     }
-    println!("{}", "  └──────────────────────────────────────────────────────────────┘".dimmed());
+    println!(
+        "{}",
+        "  └──────────────────────────────────────────────────────────────┘".dimmed()
+    );
     println!();
 }
 
@@ -194,11 +276,7 @@ fn print_block_update(
             } else {
                 &config.name
             };
-            pool_info.push_str(&format!(
-                "{}={:.6}Q",
-                short_name,
-                state.eth_price_usd,
-            ));
+            pool_info.push_str(&format!("{}={:.6}Q", short_name, state.eth_price_usd,));
         }
     }
 
@@ -215,79 +293,168 @@ fn print_block_update(
     json_logger::log_block(block_number, sync_ms, pools.len());
 }
 
-
-fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools: &[PoolConfig], pair_combos: &[pool_discovery::PairCombo]) {
+fn print_stats_summary(
+    stats: &ArbitrageStats,
+    states: &[SharedPoolState],
+    pools: &[PoolConfig],
+    pair_combos: &[pool_discovery::PairCombo],
+) {
     println!();
-    println!("{}", "  ┌───── SESSION STATISTICS (v16.2) ──────────────────────────────┐".yellow());
-    println!("  {}  Uptime               : {}", "│".yellow(), stats.uptime_str().white().bold());
-    println!("  {}  Blocks Processed     : {}", "│".yellow(), format!("{}", stats.total_blocks_processed).white());
-    println!("  {}  Opportunities Detected: {}", "│".yellow(), format!("{}", stats.total_opportunities).white());
+    println!(
+        "{}",
+        "  ┌───── SESSION STATISTICS (v16.2) ──────────────────────────────┐".yellow()
+    );
+    println!(
+        "  {}  Uptime               : {}",
+        "│".yellow(),
+        stats.uptime_str().white().bold()
+    );
+    println!(
+        "  {}  Blocks Processed     : {}",
+        "│".yellow(),
+        format!("{}", stats.total_blocks_processed).white()
+    );
+    println!(
+        "  {}  Opportunities Detected: {}",
+        "│".yellow(),
+        format!("{}", stats.total_opportunities).white()
+    );
     println!(
         "  {}  Net Profitable       : {}",
         "│".yellow(),
         if stats.profitable_opportunities > 0 {
-            format!("{}", stats.profitable_opportunities).green().bold().to_string()
+            format!("{}", stats.profitable_opportunities)
+                .green()
+                .bold()
+                .to_string()
         } else {
-            format!("{}", stats.profitable_opportunities).dimmed().to_string()
+            format!("{}", stats.profitable_opportunities)
+                .dimmed()
+                .to_string()
         }
     );
-    println!("  {}  Failed Simulations   : {}", "│".yellow(), stats.failed_simulations);
+    println!(
+        "  {}  Failed Simulations   : {}",
+        "│".yellow(),
+        stats.failed_simulations
+    );
     println!(
         "  {}  Executed Trades      : {}",
         "│".yellow(),
         if stats.executed_trades > 0 {
-            format!("{}", stats.executed_trades).green().bold().to_string()
+            format!("{}", stats.executed_trades)
+                .green()
+                .bold()
+                .to_string()
         } else {
             format!("{}", stats.executed_trades).dimmed().to_string()
         }
     );
-    println!("  {}  Max Spread           : {:.4}%", "│".yellow(), stats.max_spread_pct);
-    println!("  {}  Max Profit (single)  : {:.6} WETH", "│".yellow(), stats.max_profit_weth);
-    println!("  {}  Total Pot. Profit    : {:.6} WETH", "│".yellow(), stats.total_potential_profit);
+    println!(
+        "  {}  Max Spread           : {:.4}%",
+        "│".yellow(),
+        stats.max_spread_pct
+    );
+    println!(
+        "  {}  Max Profit (single)  : {:.6} WETH",
+        "│".yellow(),
+        stats.max_profit_weth
+    );
+    println!(
+        "  {}  Total Pot. Profit    : {:.6} WETH",
+        "│".yellow(),
+        stats.total_potential_profit
+    );
 
     // v11.0: Fee & break-even — tüm çiftler
-    println!("  {} ─── Fee & Economic Analysis ───────────────", "│".yellow());
+    println!(
+        "  {} ─── Fee & Economic Analysis ───────────────",
+        "│".yellow()
+    );
     let mut min_total_fee_pct = f64::MAX;
     for combo in pair_combos {
         if combo.pool_a_idx < pools.len() && combo.pool_b_idx < pools.len() {
             let fee_a = if combo.pool_a_idx < states.len() {
-                states[combo.pool_a_idx].load().live_fee_bps
+                states[combo.pool_a_idx]
+                    .load()
+                    .live_fee_bps
                     .map(|b| b as f64 / 10_000.0)
                     .unwrap_or(pools[combo.pool_a_idx].fee_fraction)
             } else {
                 pools[combo.pool_a_idx].fee_fraction
             };
             let fee_b = if combo.pool_b_idx < states.len() {
-                states[combo.pool_b_idx].load().live_fee_bps
+                states[combo.pool_b_idx]
+                    .load()
+                    .live_fee_bps
                     .map(|b| b as f64 / 10_000.0)
                     .unwrap_or(pools[combo.pool_b_idx].fee_fraction)
             } else {
                 pools[combo.pool_b_idx].fee_fraction
             };
             let total = (fee_a + fee_b) * 100.0;
-            if total < min_total_fee_pct { min_total_fee_pct = total; }
-            println!("  {}  {} : {:.2}% + {:.2}% = {:.2}%",
-                "│".yellow(), combo.pair_name,
-                fee_a * 100.0, fee_b * 100.0, total,
+            if total < min_total_fee_pct {
+                min_total_fee_pct = total;
+            }
+            println!(
+                "  {}  {} : {:.2}% + {:.2}% = {:.2}%",
+                "│".yellow(),
+                combo.pair_name,
+                fee_a * 100.0,
+                fee_b * 100.0,
+                total,
             );
         }
     }
     if min_total_fee_pct < f64::MAX {
         let profitable = stats.max_spread_pct > min_total_fee_pct;
         if profitable {
-            println!("  {}  Status               : {} (spread > fee)", "│".yellow(), "POTENTIALLY PROFITABLE".green().bold());
+            println!(
+                "  {}  Status               : {} (spread > fee)",
+                "│".yellow(),
+                "POTENTIALLY PROFITABLE".green().bold()
+            );
         } else {
-            println!("  {}  Status               : {} (spread {:.4}% < min fee {:.2}%)", "│".yellow(), "UNPROFITABLE".red().bold(), stats.max_spread_pct, min_total_fee_pct);
+            println!(
+                "  {}  Status               : {} (spread {:.4}% < min fee {:.2}%)",
+                "│".yellow(),
+                "UNPROFITABLE".red().bold(),
+                stats.max_spread_pct,
+                min_total_fee_pct
+            );
         }
     }
 
     // v6.0: Gecikme istatistikleri
-    println!("  {} ─── Latency (State Sync) ─────────────────", "│".yellow());
-    println!("  {}  Avg Latency          : {:.1}ms", "│".yellow(), stats.avg_block_latency_ms);
-    println!("  {}  Min Latency          : {:.1}ms", "│".yellow(), stats.min_block_latency_ms);
-    println!("  {}  Max Latency          : {:.1}ms", "│".yellow(), stats.max_block_latency_ms);
-    println!("  {}  Latency Spikes       : {} times", "│".yellow(), stats.latency_spikes);
-    println!("  {}  TickBitmap Sync       : {} times", "│".yellow(), stats.tick_bitmap_syncs);
+    println!(
+        "  {} ─── Latency (State Sync) ─────────────────",
+        "│".yellow()
+    );
+    println!(
+        "  {}  Avg Latency          : {:.1}ms",
+        "│".yellow(),
+        stats.avg_block_latency_ms
+    );
+    println!(
+        "  {}  Min Latency          : {:.1}ms",
+        "│".yellow(),
+        stats.min_block_latency_ms
+    );
+    println!(
+        "  {}  Max Latency          : {:.1}ms",
+        "│".yellow(),
+        stats.max_block_latency_ms
+    );
+    println!(
+        "  {}  Latency Spikes       : {} times",
+        "│".yellow(),
+        stats.latency_spikes
+    );
+    println!(
+        "  {}  TickBitmap Sync       : {} times",
+        "│".yellow(),
+        stats.tick_bitmap_syncs
+    );
 
     for (i, state_lock) in states.iter().enumerate() {
         let state = state_lock.load();
@@ -299,12 +466,19 @@ fn print_stats_summary(stats: &ArbitrageStats, states: &[SharedPoolState], pools
             };
             println!(
                 "  {}  Pool {} Price        : {:.6} Q (tick: {}){}",
-                "│".yellow(), i + 1, state.eth_price_usd, state.tick, bitmap_info,
+                "│".yellow(),
+                i + 1,
+                state.eth_price_usd,
+                state.tick,
+                bitmap_info,
             );
         }
     }
 
-    println!("{}", "  └──────────────────────────────────────────────────────────────┘".yellow());
+    println!(
+        "{}",
+        "  └──────────────────────────────────────────────────────────────┘".yellow()
+    );
     println!();
 
     // JSON structured log: session statistics snapshot
@@ -395,27 +569,13 @@ TELEGRAM_BALANCE_WARN_ETH=0.05
     match std::fs::write(".env", template) {
         Ok(_) => {
             println!();
-            println!(
-                "╔══════════════════════════════════════════════════════════════════╗"
-            );
-            println!(
-                "║  .env file not found — default template generated.             ║"
-            );
-            println!(
-                "║                                                                  ║"
-            );
-            println!(
-                "║  Please open the .env file,                                      ║"
-            );
-            println!(
-                "║  fill in RPC_WSS_URL and RPC_HTTP_URL fields                     ║"
-            );
-            println!(
-                "║  and restart the bot.                                            ║"
-            );
-            println!(
-                "╚══════════════════════════════════════════════════════════════════╝"
-            );
+            println!("╔══════════════════════════════════════════════════════════════════╗");
+            println!("║  .env file not found — default template generated.             ║");
+            println!("║                                                                  ║");
+            println!("║  Please open the .env file,                                      ║");
+            println!("║  fill in RPC_WSS_URL and RPC_HTTP_URL fields                     ║");
+            println!("║  and restart the bot.                                            ║");
+            println!("╚══════════════════════════════════════════════════════════════════╝");
             println!();
         }
         Err(e) => {
@@ -478,10 +638,7 @@ async fn main() -> Result<()> {
                 }
                 "live" => {
                     config.execution_enabled_flag = true;
-                    println!(
-                        "  {} CLI: --mode live → Live mode forced",
-                        "🚀".green()
-                    );
+                    println!("  {} CLI: --mode live → Live mode forced", "🚀".green());
                 }
                 other => {
                     return Err(eyre::eyre!(
@@ -496,14 +653,21 @@ async fn main() -> Result<()> {
     // ═══ GÖREV 2: Auto-Bootstrap — Her başlangıçta havuz keşfi (v32.0) ═══
     // ═══ v29.0: CORE POOLS — Statik beyaz liste öncelikli ═══
     let matched_cfg = if let Some(core_cfg) = pool_discovery::load_core_pools() {
-        eprintln!("  {} core_pools.json found — skipping auto-discovery.", "⚙️".cyan());
+        eprintln!(
+            "  {} core_pools.json found — skipping auto-discovery.",
+            "⚙️".cyan()
+        );
         core_cfg
     } else {
-        eprintln!("  {} Auto pool discovery (Holy Trinity) starting...", "🔍".cyan());
+        eprintln!(
+            "  {} Auto pool discovery (Holy Trinity) starting...",
+            "🔍".cyan()
+        );
         pool_discovery::cli_discover_pools().await?;
         pool_discovery::load_matched_pools()?
     };
-    let (pools_initial, pair_combos_initial) = pool_discovery::build_runtime(&matched_cfg, config.max_tracked_pools)?;
+    let (pools_initial, pair_combos_initial) =
+        pool_discovery::build_runtime(&matched_cfg, config.max_tracked_pools)?;
     // v25.0: Havuz listeleri artık mutable — hot-reload için
     let mut pools = pools_initial;
     let mut pair_combos = pair_combos_initial;
@@ -524,17 +688,24 @@ async fn main() -> Result<()> {
     {
         let wl = crate::types::token_whitelist();
         if !wl.contains(&config.weth_address) {
-            return Err(eyre::eyre!("WETH address ({}) NOT in whitelist!", config.weth_address));
+            return Err(eyre::eyre!(
+                "WETH address ({}) NOT in whitelist!",
+                config.weth_address
+            ));
         }
         for pool in &pools {
             if !wl.contains(&pool.quote_token_address) {
-                return Err(eyre::eyre!("Quote token {} NOT in whitelist!", pool.quote_token_address));
+                return Err(eyre::eyre!(
+                    "Quote token {} NOT in whitelist!",
+                    pool.quote_token_address
+                ));
             }
         }
     }
     println!(
         "  {} Token Whitelist: All token addresses verified ({} pools)",
-        "✅".green(), pools.len()
+        "✅".green(),
+        pools.len()
     );
 
     // ═══ v9.0: KEY MANAGER BAŞLATMA ═══
@@ -546,16 +717,9 @@ async fn main() -> Result<()> {
         if config.private_key.is_none() {
             config.private_key = key_manager.private_key().map(|k: &str| k.to_string());
         }
-        println!(
-            "  {} Key Mgmt: {}",
-            "🔐".green(),
-            key_manager.source()
-        );
+        println!("  {} Key Mgmt: {}", "🔐".green(), key_manager.source());
     } else {
-        println!(
-            "  {} Key Mgmt: No key loaded (observe mode)",
-            "ℹ️".blue()
-        );
+        println!("  {} Key Mgmt: No key loaded (observe mode)", "ℹ️".blue());
     }
 
     // Banner göster
@@ -563,7 +727,9 @@ async fn main() -> Result<()> {
 
     // ═══ v32.0: TELEGRAM TELEMETRİ SERVİSİ (Katman 11) ═══
     let telegram_sender: Option<telegram::TelegramSender> = if config.telegram_enabled {
-        if let (Some(ref token), Some(ref chat_id)) = (&config.telegram_bot_token, &config.telegram_chat_id) {
+        if let (Some(ref token), Some(ref chat_id)) =
+            (&config.telegram_bot_token, &config.telegram_chat_id)
+        {
             let tg_config = telegram::TelegramConfig {
                 bot_token: token.clone(),
                 chat_id: chat_id.clone(),
@@ -598,18 +764,12 @@ async fn main() -> Result<()> {
 
     loop {
         if retry_count > 0 {
-            println!(
-                "  {} Reconnection attempt #{}",
-                "🔄".yellow(), retry_count
-            );
+            println!("  {} Reconnection attempt #{}", "🔄".yellow(), retry_count);
         }
 
         match run_bot(&config, &mut pools, &mut pair_combos, &telegram_sender).await {
             Ok(_) => {
-                println!(
-                    "\n  {} Connection lost. Reconnecting...",
-                    "⚠️".yellow()
-                );
+                println!("\n  {} Connection lost. Reconnecting...", "⚠️".yellow());
                 // v32.0: Telegram — bağlantı kopma bildirimi
                 if let Some(ref tg) = telegram_sender {
                     tg.send(telegram::TelegramMessage::ConnectionLost {
@@ -623,10 +783,7 @@ async fn main() -> Result<()> {
                 // run_bot döndüğünde token scope'u biter, yeni döngüde
                 // yeni token üretilir.
                 let err_msg = format!("{:#}", e);
-                println!(
-                    "\n  {} Error: {}",
-                    "❌".red(), &err_msg
-                );
+                println!("\n  {} Error: {}", "❌".red(), &err_msg);
                 // v32.0: Telegram — hata bildirimi
                 if let Some(ref tg) = telegram_sender {
                     tg.send(telegram::TelegramMessage::ConnectionLost {
@@ -650,7 +807,8 @@ async fn main() -> Result<()> {
             }
             println!(
                 "  {} Maximum retries ({}) exceeded. Bot shutting down.",
-                "🛑".red(), config.max_retries
+                "🛑".red(),
+                config.max_retries
             );
             return Err(eyre::eyre!("Maximum reconnection attempts exceeded"));
         }
@@ -671,7 +829,9 @@ async fn main() -> Result<()> {
         let delay_ms = delay_ms + jitter;
         println!(
             "  {} Reconnecting in {}ms... (attempt #{})",
-            "⚡".yellow(), delay_ms, retry_count
+            "⚡".yellow(),
+            delay_ms,
+            retry_count
         );
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
     }
@@ -681,7 +841,12 @@ async fn main() -> Result<()> {
 // BOT MOTORU — Blok Dinle → State Sync → Fırsat Tara → Simüle → Yürüt
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &mut Vec<pool_discovery::PairCombo>, telegram_sender: &Option<telegram::TelegramSender>) -> Result<()> {
+async fn run_bot(
+    config: &BotConfig,
+    pools: &mut Vec<PoolConfig>,
+    pair_combos: &mut Vec<pool_discovery::PairCombo>,
+    telegram_sender: &Option<telegram::TelegramSender>,
+) -> Result<()> {
     // ══════════════ CANCELLATION TOKEN (v11.0: Zombi Thread Önleme) ══════════════
     // Her run_bot çağrısında yeni bir CancellationToken üretilir.
     // Arka plan listener'larına (pending_tx, swap_event) paslanır.
@@ -702,7 +867,11 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
 
     // ══════════════ MULTI-TRANSPORT BAĞLANTI (v10.0: RpcPool) ══════════════
     // IPC öncelikli, Round-Robin WSS fallback, arka plan sağlık kontrolü
-    println!("  {} Establishing transport connection ({:?} mode)...", "⏳".yellow(), config.transport_mode);
+    println!(
+        "  {} Establishing transport connection ({:?} mode)...",
+        "⏳".yellow(),
+        config.transport_mode
+    );
     let connect_start = Instant::now();
 
     // RPC Pool için WSS URL listesi oluştur
@@ -713,10 +882,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     ws_urls.extend(config.rpc_wss_url_extra.iter().cloned());
 
     // RpcPool oluştur ve bağlan
-    let mut rpc_pool = transport::RpcPool::new(
-        config.rpc_ipc_path.clone(),
-        &ws_urls,
-    );
+    let mut rpc_pool = transport::RpcPool::new(config.rpc_ipc_path.clone(), &ws_urls);
     rpc_pool.connect_all().await?;
     let rpc_pool = Arc::new(rpc_pool);
 
@@ -767,7 +933,8 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     );
 
     // ══════════════ PAYLAŞIMLI DURUM ══════════════
-    let mut states: Vec<SharedPoolState> = pools.iter()
+    let mut states: Vec<SharedPoolState> = pools
+        .iter()
         .map(|_| Arc::new(ArcSwap::from_pointee(PoolState::default())))
         .collect();
 
@@ -779,7 +946,12 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     for (i, result) in bytecode_results.iter().enumerate() {
         match result {
             Ok(_) => println!("  {}   {} bytecode cached", "✅".green(), pools[i].name),
-            Err(e) => println!("  {}   {} bytecode error: {}", "⚠️".yellow(), pools[i].name, e),
+            Err(e) => println!(
+                "  {}   {} bytecode error: {}",
+                "⚠️".yellow(),
+                pools[i].name,
+                e
+            ),
         }
     }
 
@@ -787,12 +959,17 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     // v10.0: Başlangıçta tüm havuzları on-chain doğrula. Geçersiz havuzlar
     // (execution reverted, slot0/liquidity okunamayan) listeden çıkarılır.
     // Bu, runtime'da "error code 3: execution reverted" hatalarını önler.
-    println!("\n  {} Performing pool health check ({} pools)...", "🔍".yellow(), pools.len());
+    println!(
+        "\n  {} Performing pool health check ({} pools)...",
+        "🔍".yellow(),
+        pools.len()
+    );
     let invalid_pool_indices = validate_pools(&provider, pools).await;
     if !invalid_pool_indices.is_empty() {
         println!(
             "  {} {} invalid pools detected — removing from list",
-            "⚠️".yellow(), invalid_pool_indices.len(),
+            "⚠️".yellow(),
+            invalid_pool_indices.len(),
         );
         // Büyükten küçüğe sırala — indeks kayması olmasın
         let mut sorted_invalid = invalid_pool_indices;
@@ -800,7 +977,9 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         for &idx in &sorted_invalid {
             println!(
                 "  {}   Removed: {} ({})",
-                "🗑️".red(), pools[idx].name, pools[idx].address,
+                "🗑️".red(),
+                pools[idx].name,
+                pools[idx].address,
             );
             pools.remove(idx);
             states.remove(idx);
@@ -820,12 +999,14 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         }
         println!(
             "  {} Pool list updated: {} valid pools remaining",
-            "✅".green(), pools.len(),
+            "✅".green(),
+            pools.len(),
         );
     } else {
         println!(
             "  {} All pools validated — {} pools valid",
-            "✅".green(), pools.len(),
+            "✅".green(),
+            pools.len(),
         );
     }
 
@@ -854,11 +1035,14 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     }
 
     // ══════════════ İLK TİCKBİTMAP SENKRONİZASYONU ══════════════
-    println!("\n  {} Fetching TickBitmap depth map (±{} tick)...", "🗺️".yellow(), config.tick_bitmap_range);
+    println!(
+        "\n  {} Fetching TickBitmap depth map (±{} tick)...",
+        "🗺️".yellow(),
+        config.tick_bitmap_range
+    );
     let bitmap_start = Instant::now();
-    let bitmap_results = sync_all_tick_bitmaps(
-        &provider, pools, &states, block, config.tick_bitmap_range,
-    ).await;
+    let bitmap_results =
+        sync_all_tick_bitmaps(&provider, pools, &states, block, config.tick_bitmap_range).await;
     let bitmap_ms = bitmap_start.elapsed().as_millis();
 
     for (i, result) in bitmap_results.iter().enumerate() {
@@ -876,7 +1060,12 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                     );
                 }
             }
-            Err(e) => println!("  {}   {} bitmap error: {}", "⚠️".yellow(), pools[i].name, e),
+            Err(e) => println!(
+                "  {}   {} bitmap error: {}",
+                "⚠️".yellow(),
+                pools[i].name,
+                e
+            ),
         }
     }
     println!("  {} TickBitmap total time: {}ms", "🗺️".cyan(), bitmap_ms);
@@ -895,7 +1084,11 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         let mut bytecode_loaded = false;
         match provider.get_code_at(contract_addr).await {
             Ok(code) if !code.is_empty() => {
-                println!("  {} Contract bytecode loaded ({} bytes — from chain)", "✅".green(), code.len());
+                println!(
+                    "  {} Contract bytecode loaded ({} bytes — from chain)",
+                    "✅".green(),
+                    code.len()
+                );
                 sim_engine.set_contract_bytecode(code.to_vec());
                 bytecode_loaded = true;
             }
@@ -903,7 +1096,11 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                 eprintln!("  {} Contract bytecode empty — may not be deployed, searching local artifact...", "⚠️".yellow());
             }
             Err(e) => {
-                eprintln!("  {} Contract bytecode fetch failed: {} — searching local artifact...", "⚠️".yellow(), e);
+                eprintln!(
+                    "  {} Contract bytecode fetch failed: {} — searching local artifact...",
+                    "⚠️".yellow(),
+                    e
+                );
             }
         }
         // v24.0: Fallback — Foundry out/ veya Contract/out/ dizininden derlenmiş bytecode yükle
@@ -915,7 +1112,8 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             for path in &artifact_paths {
                 if let Ok(content) = std::fs::read_to_string(path) {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                        if let Some(deployed) = json.get("deployedBytecode")
+                        if let Some(deployed) = json
+                            .get("deployedBytecode")
                             .and_then(|v| v.get("object"))
                             .and_then(|v| v.as_str())
                         {
@@ -940,17 +1138,24 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
 
     // v10.0: Singleton base_db — bytecode bir kez yüklenir, sonra her blokta klonlanır
     {
-        let caller_addr = config.private_key.as_ref()
+        let caller_addr = config
+            .private_key
+            .as_ref()
             .and_then(|pk| pk.parse::<alloy::signers::local::PrivateKeySigner>().ok())
             .map(|signer| signer.address())
             .unwrap_or_default();
         let contract_addr = config.contract_address.unwrap_or_default();
         sim_engine.initialize_base_db(pools, &states, caller_addr, contract_addr);
-        println!("\n  {} REVM simulation engine ready (Singleton base_db)", "✅".green());
+        println!(
+            "\n  {} REVM simulation engine ready (Singleton base_db)",
+            "✅".green()
+        );
     }
 
     // ══════════════ ATOMİK NONCE YÖNETİCİSİ ══════════════
-    let executor_address: Option<Address> = config.private_key.as_ref()
+    let executor_address: Option<Address> = config
+        .private_key
+        .as_ref()
         .and_then(|pk| pk.parse::<alloy::signers::local::PrivateKeySigner>().ok())
         .map(|signer| signer.address());
 
@@ -962,7 +1167,11 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                 Arc::new(NonceManager::new(nonce))
             }
             Err(e) => {
-                println!("  {} Nonce read failed, starting from 0: {}", "⚠️".yellow(), e);
+                println!(
+                    "  {} Nonce read failed, starting from 0: {}",
+                    "⚠️".yellow(),
+                    e
+                );
                 Arc::new(NonceManager::new(0))
             }
         }
@@ -976,7 +1185,8 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             "  {} Contract execution: {} (Address: {})",
             "🚀".green(),
             "ACTIVE".green().bold(),
-            config.contract_address
+            config
+                .contract_address
                 .expect("BUG: execution_enabled() true but contract_address None")
         );
     } else {
@@ -994,11 +1204,11 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         let all_pool_addrs: Vec<Address> = pools.iter().map(|p| p.address).collect();
         if !all_pool_addrs.is_empty() {
             let calldata = crate::executor::encode_whitelist_calldata(&all_pool_addrs);
-            if let (Some(ref pk), Some(contract_addr)) = (&config.private_key, config.contract_address) {
+            if let (Some(ref pk), Some(contract_addr)) =
+                (&config.private_key, config.contract_address)
+            {
                 let startup_base_fee = provider
-                    .get_block_by_number(
-                        alloy::eips::BlockNumberOrTag::Latest,
-                    )
+                    .get_block_by_number(alloy::eips::BlockNumberOrTag::Latest)
                     .await
                     .ok()
                     .flatten()
@@ -1014,14 +1224,18 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                     nonce,
                     Arc::clone(&nonce_manager),
                     startup_base_fee,
-                ).await {
+                )
+                .await
+                {
                     Ok(_) => println!(
                         "  {} [Whitelist] {} pools added to on-chain whitelist (startup sync)",
-                        "✅".green(), all_pool_addrs.len(),
+                        "✅".green(),
+                        all_pool_addrs.len(),
                     ),
                     Err(e) => eprintln!(
                         "  {} [Whitelist] Startup whitelist error: {} — admin must add manually",
-                        "⚠️".yellow(), e,
+                        "⚠️".yellow(),
+                        e,
                     ),
                 }
             }
@@ -1030,15 +1244,33 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
 
     // ══════════════ BLOK BAŞLIĞI ABONELİĞİ ══════════════
     println!();
-    println!("{}", "  ════════════════════════════════════════════════════════════════".green());
-    println!("  {}  LIVE FEED v9.0 — Listening for new blocks + Pending TX...", "📡".green());
-    println!("  {}  Loop: Pending TX → State Sync → TickBitmap → NR → REVM → Execute", "📡".green());
-    println!("{}", "  ════════════════════════════════════════════════════════════════".green());
+    println!(
+        "{}",
+        "  ════════════════════════════════════════════════════════════════".green()
+    );
+    println!(
+        "  {}  LIVE FEED v9.0 — Listening for new blocks + Pending TX...",
+        "📡".green()
+    );
+    println!(
+        "  {}  Loop: Pending TX → State Sync → TickBitmap → NR → REVM → Execute",
+        "📡".green()
+    );
+    println!(
+        "{}",
+        "  ════════════════════════════════════════════════════════════════".green()
+    );
     println!();
 
     // v32.0: Telegram — sistem başlatıldı bildirimi
     if let Some(ref tg) = telegram_sender {
-        let mode_str = if config.execution_enabled() { "LIVE" } else if config.shadow_mode() { "SHADOW" } else { "OBSERVE" };
+        let mode_str = if config.execution_enabled() {
+            "LIVE"
+        } else if config.shadow_mode() {
+            "SHADOW"
+        } else {
+            "OBSERVE"
+        };
         tg.send(telegram::TelegramMessage::SystemStartup {
             pool_count: pools.len(),
             transport: active_transport.to_string(),
@@ -1111,19 +1343,20 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                         &pools_ev,
                         &states_ev,
                         token_ev,
-                    ).await {
+                    )
+                    .await
+                    {
                         Ok(_) => {}
                         Err(e) => {
                             eprintln!(
-                                "  [EventListener] error (block-based flow continues): {}", e
+                                "  [EventListener] error (block-based flow continues): {}",
+                                e
                             );
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "  [EventListener] WS connection error: {}", e
-                    );
+                    eprintln!("  [EventListener] WS connection error: {}", e);
                 }
             }
         });
@@ -1138,7 +1371,9 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         GLOBAL_L1_FEE.store(initial_l1_fee as u64, Ordering::Relaxed);
         eprintln!(
             "  {} L1 Data Fee cached: {} wei ({:.8} ETH) — background refresh every 12s",
-            "⛽".cyan(), initial_l1_fee, initial_l1_fee as f64 / 1e18
+            "⛽".cyan(),
+            initial_l1_fee,
+            initial_l1_fee as f64 / 1e18
         );
 
         let provider_l1 = provider.clone();
@@ -1163,7 +1398,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
 
     // ══════════════ KEŞİF MOTORU v25.0 (Otonom Keşif) ══════════════
     // On-Chain Factory Listener + Multi-API Aggregator + Skorlama + GC
-    let discovery_config = DiscoveryConfig::from_bot_config(&config);
+    let discovery_config = DiscoveryConfig::from_bot_config(config);
     let discovery_registry = Arc::new(RwLock::new(LivePoolRegistry::new(pools)));
     {
         let engine = DiscoveryEngine::new(discovery_registry.clone(), discovery_config.clone());
@@ -1194,17 +1429,12 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
     // ve run_bot() hata döndürerek agresif reconnect tetiklenir.
     // Base L2: ~2s blok süresi → 15s = ~7 blok kaybı toleransı
     loop {
-        let block_header = match tokio::time::timeout(
-            Duration::from_secs(15),
-            stream.next(),
-        ).await {
+        let block_header = match tokio::time::timeout(Duration::from_secs(15), stream.next()).await
+        {
             Ok(Some(header)) => header,
             Ok(None) => {
                 // Stream kapandı — reconnect gerekli
-                println!(
-                    "  {} WSS stream closed — reconnecting...",
-                    "⚠️".yellow()
-                );
+                println!("  {} WSS stream closed — reconnecting...", "⚠️".yellow());
                 return Err(eyre::eyre!("WSS stream closed"));
             }
             Err(_) => {
@@ -1213,7 +1443,9 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                     "  {} WSS heartbeat timeout (no block for 15s) — reconnecting",
                     "💔".red()
                 );
-                return Err(eyre::eyre!("WSS heartbeat timeout: no block received for 15 seconds"));
+                return Err(eyre::eyre!(
+                    "WSS heartbeat timeout: no block received for 15 seconds"
+                ));
             }
         };
 
@@ -1222,15 +1454,15 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
 
         // v10.0: Dinamik timestamp ve base_fee — zincir verisinden
         let block_timestamp = block_header.timestamp;
-        let block_base_fee = block_header.base_fee_per_gas
-            .unwrap_or(0) as u64;
+        let block_base_fee = block_header.base_fee_per_gas.unwrap_or(0) as u64;
 
         // ── 1. L1 FEE + SAFETY NET (EVENT-DRIVEN MİMARİ) ────────────────
         // v31.0: State artık event-driven güncellenir (Swap + Mint + Burn).
         // Per-block Multicall3 sync kaldırıldı → RPC yükü %95 azaldı.
         // Her 50 blokta hafif doğrulama sync'i yapılır (chain reorg koruması).
         const SAFETY_NET_INTERVAL: u64 = 50;
-        let needs_safety_sync = block_number.saturating_sub(last_bitmap_block) >= SAFETY_NET_INTERVAL;
+        let needs_safety_sync =
+            block_number.saturating_sub(last_bitmap_block) >= SAFETY_NET_INTERVAL;
 
         let safety_future = async {
             if needs_safety_sync {
@@ -1250,8 +1482,10 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             let ok_count = sync_results.iter().filter(|r| r.is_ok()).count();
             if ok_count > 0 {
                 eprintln!(
-                    "     {} Safety net sync ({}/{} pools) [Block #{}]",
-                    "🔄", ok_count, pools.len(), block_number,
+                    "     🔄 Safety net sync ({}/{} pools) [Block #{}]",
+                    ok_count,
+                    pools.len(),
+                    block_number,
                 );
             }
             last_bitmap_block = block_number;
@@ -1265,7 +1499,8 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             );
         } else {
             eprintln!(
-                "  ⛽ [L1 Fee] {} wei ({:.8} ETH)", l1_data_fee_wei, l1_fee_eth,
+                "  ⛽ [L1 Fee] {} wei ({:.8} ETH)",
+                l1_data_fee_wei, l1_fee_eth,
             );
         }
 
@@ -1278,9 +1513,8 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         if (sync_ms as f64) > config.latency_spike_threshold_ms {
             stats.latency_spikes += 1;
             eprintln!(
-                "  ⚡ [Block #{}] Latency SPIKE: {}ms (threshold: {:.0}ms) — #{} spike", block_number, sync_ms,
-                config.latency_spike_threshold_ms,
-                stats.latency_spikes,
+                "  ⚡ [Block #{}] Latency SPIKE: {}ms (threshold: {:.0}ms) — #{} spike",
+                block_number, sync_ms, config.latency_spike_threshold_ms, stats.latency_spikes,
             );
             // v32.0: Telegram — gecikme spike bildirimi (her 5. spike'ta)
             if stats.latency_spikes % 5 == 1 {
@@ -1307,7 +1541,10 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             if st.is_stale && i < pools.len() {
                 println!(
                     "  {} [Block #{}] {} stale (event-driven, last update: {}ms ago)",
-                    "⚠️".yellow(), block_number, pools[i].name, st.staleness_ms()
+                    "⚠️".yellow(),
+                    block_number,
+                    pools[i].name,
+                    st.staleness_ms()
                 );
             }
         }
@@ -1327,7 +1564,8 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                     let reload_contract = config.contract_address.unwrap_or_default();
                     sim_engine.initialize_base_db(pools, &states, reload_caller, reload_contract);
                     eprintln!(
-                        "  🔧 [Hot-Reload BG] REVM base_db rebuilt ({} pools)", pools.len(),
+                        "  🔧 [Hot-Reload BG] REVM base_db rebuilt ({} pools)",
+                        pools.len(),
                     );
                 }
             }
@@ -1335,7 +1573,10 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
 
         // [Adım 3] Bekleyen havuzları canlı sisteme enjekte et
         let hot_reload_count = discovery_engine::apply_pending_updates(
-            &discovery_registry, pools, &mut states, pair_combos,
+            &discovery_registry,
+            pools,
+            &mut states,
+            pair_combos,
             config.max_tracked_pools,
         );
         if hot_reload_count > 0 {
@@ -1351,7 +1592,9 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
 
             hot_reload_task = Some(tokio::spawn(async move {
                 // Adım 1: Bytecode al (paralel)
-                let bytecode_futs: Vec<_> = bg_pools.iter().enumerate()
+                let bytecode_futs: Vec<_> = bg_pools
+                    .iter()
+                    .enumerate()
                     .map(|(i, pool)| {
                         let provider = &bg_provider;
                         let addr = pool.address;
@@ -1373,7 +1616,9 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                 }
 
                 // Adım 2: State sync + TickBitmap sync (paralel)
-                let sync_futs: Vec<_> = bg_pools.iter().enumerate()
+                let sync_futs: Vec<_> = bg_pools
+                    .iter()
+                    .enumerate()
                     .map(|(i, pool_cfg)| {
                         let provider = &bg_provider;
                         let pool_state = &bg_states[i];
@@ -1381,20 +1626,35 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                         async move {
                             if let Err(e) = crate::state_sync::sync_pool_state(
                                 provider, pool_cfg, pool_state, bg_block,
-                            ).await {
-                                eprintln!("  ⚠️ [Hot-Reload BG] {} state sync failed: {}", pool_cfg.name, e);
+                            )
+                            .await
+                            {
+                                eprintln!(
+                                    "  ⚠️ [Hot-Reload BG] {} state sync failed: {}",
+                                    pool_cfg.name, e
+                                );
                             }
                             if let Err(e) = crate::state_sync::sync_tick_bitmap(
-                                provider, pool_cfg, pool_state, bg_block, bitmap_range,
-                            ).await {
-                                eprintln!("  ⚠️ [Hot-Reload BG] {} bitmap sync failed: {}", pool_cfg.name, e);
+                                provider,
+                                pool_cfg,
+                                pool_state,
+                                bg_block,
+                                bitmap_range,
+                            )
+                            .await
+                            {
+                                eprintln!(
+                                    "  ⚠️ [Hot-Reload BG] {} bitmap sync failed: {}",
+                                    pool_cfg.name, e
+                                );
                             }
                         }
                     })
                     .collect();
                 join_all(sync_futs).await;
                 eprintln!(
-                    "  ✅ [Hot-Reload BG] {} new pools synced in background", bg_pools.len(),
+                    "  ✅ [Hot-Reload BG] {} new pools synced in background",
+                    bg_pools.len(),
                 );
             }));
 
@@ -1402,10 +1662,13 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             // executorBatchAddPools() ile executor key'i kullanarak whitelist güncellenir.
             // Kontrat v25.0: executor yalnızca EKLEME yapabilir (güvenlik korunur).
             if config.execution_enabled() {
-                let new_addrs: Vec<Address> = pools[new_start..].iter().map(|p| p.address).collect();
+                let new_addrs: Vec<Address> =
+                    pools[new_start..].iter().map(|p| p.address).collect();
                 if !new_addrs.is_empty() {
                     let calldata = crate::executor::encode_whitelist_calldata(&new_addrs);
-                    if let (Some(ref pk), Some(contract_addr)) = (&config.private_key, config.contract_address) {
+                    if let (Some(ref pk), Some(contract_addr)) =
+                        (&config.private_key, config.contract_address)
+                    {
                         let pk_clone = pk.clone();
                         let mev_exec_clone = Arc::clone(&mev_executor);
                         let nonce = nonce_manager.get_and_increment();
@@ -1444,8 +1707,13 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                     match ProviderBuilder::default().connect_ws(ws).await {
                         Ok(ws_provider) => {
                             if let Err(e) = state_sync::start_pool_event_listener(
-                                &ws_provider, &pools_ev, &states_ev, token_ev,
-                            ).await {
+                                &ws_provider,
+                                &pools_ev,
+                                &states_ev,
+                                token_ev,
+                            )
+                            .await
+                            {
                                 eprintln!("  [EventListener] Hot-reload restart error: {}", e);
                             }
                         }
@@ -1453,21 +1721,31 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                     }
                 });
                 eprintln!(
-                    "  [Hot-Reload] Event listener restarted with {} pools", pools.len(),
+                    "  [Hot-Reload] Event listener restarted with {} pools",
+                    pools.len(),
                 );
             }
         }
 
         // [Adım 4] Çöp Toplayıcı — soğuk havuzları temizle
         let _gc_deactivated = discovery_engine::run_garbage_collector(
-            &discovery_registry, pools, &states, block_number, &discovery_config,
+            &discovery_registry,
+            pools,
+            &states,
+            block_number,
+            &discovery_config,
         );
 
         // v30.0: [Adim 4b] Uyuyan havuz tarayici -- her 50 blokta bir
         if block_number % 50 == 0 {
             let reactivated = discovery_engine::scan_sleeping_pools_for_reactivation(
-                &discovery_registry, pools, &mut states, pair_combos, &provider,
-            ).await;
+                &discovery_registry,
+                pools,
+                &mut states,
+                pair_combos,
+                &provider,
+            )
+            .await;
             if reactivated > 0 {
                 // Yeniden aktiflesen havuzlar icin event listener'i guncelle
                 event_listener_cancel.cancel();
@@ -1481,8 +1759,12 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                         let ws = WsConnect::new(&rpc_url_ev);
                         if let Ok(ws_provider) = ProviderBuilder::default().connect_ws(ws).await {
                             let _ = state_sync::start_pool_event_listener(
-                                &ws_provider, &pools_ev, &states_ev, token_ev,
-                            ).await;
+                                &ws_provider,
+                                &pools_ev,
+                                &states_ev,
+                                token_ev,
+                            )
+                            .await;
                         }
                     });
                 }
@@ -1491,13 +1773,19 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
 
         // [Adım 5] Skor güncelleme (her ~10 dakikada bir)
         discovery_engine::update_scores(
-            &discovery_registry, pools, block_number, &discovery_config,
+            &discovery_registry,
+            pools,
+            block_number,
+            &discovery_config,
         );
 
         // Spread gözlemlerini kaydet (skorlama için)
         for combo in pair_combos.iter() {
             discovery_engine::record_spread_observation(
-                &discovery_registry, combo.pool_a_idx, combo.pool_b_idx, &states,
+                &discovery_registry,
+                combo.pool_a_idx,
+                combo.pool_b_idx,
+                &states,
             );
         }
 
@@ -1519,9 +1807,15 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                 if min_p > 0.0 {
                     let spread_pct = (spread / min_p) * 100.0;
                     let direction = if sa.eth_price_usd < sb.eth_price_usd {
-                        format!("{} \u{2192} {}", pools[combo.pool_a_idx].name, pools[combo.pool_b_idx].name)
+                        format!(
+                            "{} \u{2192} {}",
+                            pools[combo.pool_a_idx].name, pools[combo.pool_b_idx].name
+                        )
                     } else {
-                        format!("{} \u{2192} {}", pools[combo.pool_b_idx].name, pools[combo.pool_a_idx].name)
+                        format!(
+                            "{} \u{2192} {}",
+                            pools[combo.pool_b_idx].name, pools[combo.pool_a_idx].name
+                        )
                     };
                     if spread_pct > 0.001 {
                         println!(
@@ -1559,11 +1853,18 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
             // OPT-3: İki fazlı arbitraj taraması — tüm combo'ları tara, EN İYİ fırsatı seç
             // Eski: Sıralı tarama, ilk kârlı fırsat bulununca simulate+execute (suboptimal)
             // Yeni: Tüm combo'lar değerlendirilir, en yüksek kârlı fırsat seçilir
-            let mut opportunities: Vec<(usize, ArbitrageOpportunity, [PoolConfig; 2], [SharedPoolState; 2])> = Vec::new();
+            let mut opportunities: Vec<(
+                usize,
+                ArbitrageOpportunity,
+                [PoolConfig; 2],
+                [SharedPoolState; 2],
+            )> = Vec::new();
 
             for (combo_idx, combo) in pair_combos.iter().enumerate() {
                 // OPT-6: Snapshot'tan aktiflik kontrolü (RwLock yok)
-                if combo.pool_a_idx >= active_snapshot.len() || combo.pool_b_idx >= active_snapshot.len() {
+                if combo.pool_a_idx >= active_snapshot.len()
+                    || combo.pool_b_idx >= active_snapshot.len()
+                {
                     continue;
                 }
                 if !active_snapshot[combo.pool_a_idx] || !active_snapshot[combo.pool_b_idx] {
@@ -1584,22 +1885,40 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                         pair_cooldown.remove(&combo_idx);
                         pair_failures.remove(&combo_idx);
                         eprintln!(
-                            "     \u{2705} [Blacklist] {} cool-down expired — reactivated", combo.pair_name,
+                            "     \u{2705} [Blacklist] {} cool-down expired — reactivated",
+                            combo.pair_name,
                         );
                     }
                 }
 
-                let pp = [pools[combo.pool_a_idx].clone(), pools[combo.pool_b_idx].clone()];
-                let ps = [states[combo.pool_a_idx].clone(), states[combo.pool_b_idx].clone()];
-                if let Some(opportunity) = check_arbitrage_opportunity(&pp, &ps, config, block_base_fee, last_simulated_gas, l1_data_fee_wei) {
+                let pp = [
+                    pools[combo.pool_a_idx].clone(),
+                    pools[combo.pool_b_idx].clone(),
+                ];
+                let ps = [
+                    states[combo.pool_a_idx].clone(),
+                    states[combo.pool_b_idx].clone(),
+                ];
+                if let Some(opportunity) = check_arbitrage_opportunity(
+                    &pp,
+                    &ps,
+                    config,
+                    block_base_fee,
+                    last_simulated_gas,
+                    l1_data_fee_wei,
+                ) {
                     opportunities.push((combo_idx, opportunity, pp, ps));
                 }
             }
 
             // Faz 2: En yüksek kârlı fırsatı seç, sadece onu simulate+execute et
             let opp_count = opportunities.len();
-            if let Some((best_idx, best_opp, best_pp, best_ps)) = opportunities.into_iter()
-                .max_by(|a, b| a.1.expected_profit_weth.partial_cmp(&b.1.expected_profit_weth).unwrap_or(std::cmp::Ordering::Equal))
+            if let Some((best_idx, best_opp, best_pp, best_ps)) =
+                opportunities.into_iter().max_by(|a, b| {
+                    a.1.expected_profit_weth
+                        .partial_cmp(&b.1.expected_profit_weth)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
             {
                 if opp_count > 1 {
                     eprintln!(
@@ -1625,7 +1944,9 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                     &mev_executor,
                     telegram_sender,
                     &mut tg_counters,
-                ).await {
+                )
+                .await
+                {
                     last_simulated_gas = Some(gas);
                     pair_failures.remove(&best_idx);
                 } else {
@@ -1696,22 +2017,39 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                 if let Some(best) = multi_hop_opps.first() {
                     // Exact U256 profit doğrulaması
                     let amount_wei = crate::math::exact::f64_to_u256_wei(best.optimal_amount_weth);
-                    let pool_states_ex: Vec<crate::types::PoolState> = best.pool_indices.iter()
-                        .map(|&i| states[i].load_full().as_ref().clone()).collect();
-                    let pool_configs_ex: Vec<&crate::types::PoolConfig> = best.pool_indices.iter()
-                        .map(|&i| &pools[i]).collect();
-                    let state_refs_ex: Vec<&crate::types::PoolState> = pool_states_ex.iter().collect();
+                    let pool_states_ex: Vec<crate::types::PoolState> = best
+                        .pool_indices
+                        .iter()
+                        .map(|&i| states[i].load_full().as_ref().clone())
+                        .collect();
+                    let pool_configs_ex: Vec<&crate::types::PoolConfig> =
+                        best.pool_indices.iter().map(|&i| &pools[i]).collect();
+                    let state_refs_ex: Vec<&crate::types::PoolState> =
+                        pool_states_ex.iter().collect();
                     let exact_profit = crate::math::compute_exact_profit_multi_hop(
-                        &state_refs_ex, &pool_configs_ex, &best.directions, amount_wei,
+                        &state_refs_ex,
+                        &pool_configs_ex,
+                        &best.directions,
+                        amount_wei,
                     );
 
                     // Calldata boyutu hesapla
-                    let pool_addrs: Vec<alloy::primitives::Address> = best.pool_indices.iter()
-                        .map(|&i| pools[i].address).collect();
-                    let dirs_u8: Vec<u8> = best.directions.iter()
-                        .map(|&d| if d { 0u8 } else { 1u8 }).collect();
+                    let pool_addrs: Vec<alloy::primitives::Address> = best
+                        .pool_indices
+                        .iter()
+                        .map(|&i| pools[i].address)
+                        .collect();
+                    let dirs_u8: Vec<u8> = best
+                        .directions
+                        .iter()
+                        .map(|&d| if d { 0u8 } else { 1u8 })
+                        .collect();
                     let calldata = crate::simulator::encode_multi_hop_calldata(
-                        &pool_addrs, &dirs_u8, amount_wei, 0, 0,
+                        &pool_addrs,
+                        &dirs_u8,
+                        amount_wei,
+                        0,
+                        0,
                     );
 
                     eprintln!(
@@ -1746,7 +2084,9 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                         &mev_executor,
                         telegram_sender,
                         &mut tg_counters,
-                    ).await {
+                    )
+                    .await
+                    {
                         last_simulated_gas = Some(gas);
                     }
                 }
@@ -1754,7 +2094,9 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         }
 
         // ── 5. PERİYODİK İSTATİSTİK ────────────────────────
-        if stats.total_blocks_processed.is_multiple_of(config.stats_interval)
+        if stats
+            .total_blocks_processed
+            .is_multiple_of(config.stats_interval)
             && stats.total_blocks_processed > 0
         {
             print_stats_summary(&stats, &states, pools, pair_combos);
@@ -1767,12 +2109,18 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         tg_counters.scanned_opportunities = stats.total_opportunities;
         tg_counters.attempted_trades = stats.failed_simulations + stats.executed_trades;
 
-        if stats.last_shift_report.elapsed() >= Duration::from_secs(config.telegram_shift_interval_secs) {
+        if stats.last_shift_report.elapsed()
+            >= Duration::from_secs(config.telegram_shift_interval_secs)
+        {
             if let Some(ref tg) = telegram_sender {
                 let period_secs = stats.last_shift_report.elapsed().as_secs();
-                let label = if period_secs >= 21600 { "Son 6 Saat".to_string() }
-                    else if period_secs >= 3600 { format!("Son {} Saat", period_secs / 3600) }
-                    else { format!("Son {} Dakika", period_secs / 60) };
+                let label = if period_secs >= 21600 {
+                    "Son 6 Saat".to_string()
+                } else if period_secs >= 3600 {
+                    format!("Son {} Saat", period_secs / 3600)
+                } else {
+                    format!("Son {} Dakika", period_secs / 60)
+                };
                 tg.send(telegram::TelegramMessage::ShiftReport {
                     period_label: label,
                     scanned_opportunities: tg_counters.scanned_opportunities,
@@ -1796,9 +2144,7 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
         // ── 6. PERİYODİK NONCE SENKRONİZASYONU (v10.0) ──────
         // Her 50 blokta bir zincirdeki gerçek nonce ile lokal nonce'u karşılaştır.
         // Uyumsuzluk varsa zincir değeri ile düzelt (TX kayıpları veya dış müdahale).
-        if stats.total_blocks_processed.is_multiple_of(50)
-            && stats.total_blocks_processed > 0
-        {
+        if stats.total_blocks_processed.is_multiple_of(50) && stats.total_blocks_processed > 0 {
             if let Some(addr) = executor_address {
                 match provider.get_transaction_count(addr).await {
                     Ok(onchain_nonce) => {
@@ -1806,7 +2152,9 @@ async fn run_bot(config: &BotConfig, pools: &mut Vec<PoolConfig>, pair_combos: &
                         if local_nonce != onchain_nonce {
                             println!(
                                 "  {} Nonce mismatch detected: local={} chain={} → correcting",
-                                "🔄".yellow(), local_nonce, onchain_nonce
+                                "🔄".yellow(),
+                                local_nonce,
+                                onchain_nonce
                             );
                             // v32.0: Telegram — nonce kayması bildirimi
                             if let Some(ref tg) = telegram_sender {
@@ -1851,13 +2199,20 @@ async fn pending_tx_listener(
     use alloy::providers::WsConnect;
 
     let ws = WsConnect::new(rpc_url);
-    let provider = ProviderBuilder::default().connect_ws(ws).await
+    let provider = ProviderBuilder::default()
+        .connect_ws(ws)
+        .await
         .map_err(|e| eyre::eyre!("Pending TX provider connection error: {}", e))?;
 
-    println!("  {} Pending TX listener started (optimistic mode)", "🔮".cyan());
+    println!(
+        "  {} Pending TX listener started (optimistic mode)",
+        "🔮".cyan()
+    );
 
     // Pending TX stream — full TX nesneleri ile
-    let sub: alloy::pubsub::Subscription<alloy::rpc::types::Transaction> = provider.subscribe_full_pending_transactions().await
+    let sub: alloy::pubsub::Subscription<alloy::rpc::types::Transaction> = provider
+        .subscribe_full_pending_transactions()
+        .await
         .map_err(|e| eyre::eyre!("Pending TX subscription error: {}", e))?;
     let mut stream = sub.into_stream();
 
@@ -1868,11 +2223,9 @@ async fn pending_tx_listener(
         let tx_to = tx_kind.to().copied();
         let tx_input = TxTrait::input(&*tx.inner);
 
-        if let Some(pool_idx) = state_sync::check_pending_tx_relevance(
-            tx_to,
-            tx_input,
-            pool_addresses,
-        ) {
+        if let Some(pool_idx) =
+            state_sync::check_pending_tx_relevance(tx_to, tx_input, pool_addresses)
+        {
             // Etkilenen havuzun durumunu anlık oku (optimistic refresh)
             let current_block = states[0].load().last_block;
             match state_sync::optimistic_refresh_pool(
@@ -1880,7 +2233,9 @@ async fn pending_tx_listener(
                 &pools[pool_idx],
                 &states[pool_idx],
                 current_block,
-            ).await {
+            )
+            .await
+            {
                 Ok(true) => {
                     // Fiyat değişti — havuz güncellendi
                     let state = states[pool_idx].load();
@@ -1895,7 +2250,8 @@ async fn pending_tx_listener(
                 Err(e) => {
                     // Hata — sessiz devam et, blok bazlı akış zaten çalışıyor
                     eprintln!(
-                        "     ⚠️ [Pending TX] {} refresh error: {}", pools[pool_idx].name, e
+                        "     ⚠️ [Pending TX] {} refresh error: {}",
+                        pools[pool_idx].name, e
                     );
                 }
             }
@@ -1923,10 +2279,11 @@ async fn whitelist_pools_on_chain(
     nonce_manager: Arc<NonceManager>,
     block_base_fee: u64,
 ) -> Result<()> {
-    use alloy::signers::local::PrivateKeySigner;
     use alloy::network::EthereumWallet;
+    use alloy::signers::local::PrivateKeySigner;
 
-    let signer: PrivateKeySigner = private_key.parse()
+    let signer: PrivateKeySigner = private_key
+        .parse()
         .map_err(|e| eyre::eyre!("Whitelist TX: key parse error: {}", e))?;
     let wallet = EthereumWallet::from(signer.clone());
 
@@ -1934,7 +2291,8 @@ async fn whitelist_pools_on_chain(
     let ws = alloy::providers::WsConnect::new(mev_executor.standard_rpc_url());
     let provider = ProviderBuilder::new()
         .wallet(wallet)
-        .connect_ws(ws).await
+        .connect_ws(ws)
+        .await
         .map_err(|e| eyre::eyre!("Whitelist TX: provider error: {}", e))?;
 
     let max_fee = block_base_fee as u128 + 1_000_000_000; // base_fee + 1 Gwei tip

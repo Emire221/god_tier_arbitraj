@@ -1,0 +1,315 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Rust: Check",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "check"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/Bot"
+            },
+            "group": "build",
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Rust: Build Release",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "build",
+                "--release"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/Bot"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Rust: Test",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "test",
+                "--release"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/Bot"
+            },
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Rust: Clippy",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "clippy",
+                "--",
+                "-D",
+                "warnings"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/Bot"
+            },
+            "group": "build",
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Rust: Format Check",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "fmt",
+                "--check"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/Bot"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Rust: Full Validation",
+            "dependsOn": [
+                "Rust: Check",
+                "Rust: Clippy",
+                "Rust: Test"
+            ],
+            "dependsOrder": "sequence",
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "Forge: Build",
+            "type": "shell",
+            "command": "forge",
+            "args": [
+                "build"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/Contract"
+            },
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Forge: Test",
+            "type": "shell",
+            "command": "forge",
+            "args": [
+                "test",
+                "-vvv"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/Contract"
+            },
+            "group": "test",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Forge: Test Verbose",
+            "type": "shell",
+            "command": "forge",
+            "args": [
+                "test",
+                "-vvvv"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/Contract"
+            },
+            "group": "test",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Forge: Gas Report",
+            "type": "shell",
+            "command": "forge",
+            "args": [
+                "test",
+                "--gas-report"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/Contract"
+            },
+            "group": "test",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Forge: Format Check",
+            "type": "shell",
+            "command": "forge",
+            "args": [
+                "fmt",
+                "--check"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/Contract"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Forge: Coverage",
+            "type": "shell",
+            "command": "forge",
+            "args": [
+                "coverage"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/Contract"
+            },
+            "group": "test",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Forge: Full Validation",
+            "dependsOn": [
+                "Forge: Build",
+                "Forge: Test",
+                "Forge: Gas Report"
+            ],
+            "dependsOrder": "sequence",
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "Full Project Validation",
+            "dependsOn": [
+                "Rust: Full Validation",
+                "Forge: Full Validation"
+            ],
+            "dependsOrder": "parallel",
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Quick Check (All)",
+            "dependsOn": [
+                "Rust: Check",
+                "Forge: Build"
+            ],
+            "dependsOrder": "parallel",
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Run Bot (Shadow Mode)",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "run",
+                "--release"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/Bot",
+                "env": {
+                    "RUST_LOG": "info",
+                    "RUST_BACKTRACE": "1"
+                }
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "focus": true
+            },
+            "isBackground": true
+        },
+        {
+            "label": "Start Anvil (Local Node)",
+            "type": "shell",
+            "command": "anvil",
+            "args": [
+                "--fork-url",
+                "${input:rpcUrl}",
+                "--port",
+                "8545"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            },
+            "isBackground": true
+        }
+    ],
+    "inputs": [
+        {
+            "id": "rpcUrl",
+            "type": "promptString",
+            "description": "Base RPC URL for forking",
+            "default": "https://mainnet.base.org"
+        }
+    ]
+}

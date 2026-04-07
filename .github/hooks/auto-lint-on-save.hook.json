@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "type": "command",
+        "command": "powershell -NoProfile -Command \"$input = [Console]::In.ReadToEnd() | ConvertFrom-Json; $toolName = $input.toolName; $filePath = $input.toolInput.file_path; if ($toolName -in @('edit','create')) { if ($filePath -like '*.rs') { @{systemMessage='✅ Rust dosyası değişti. Doğrulama: cargo check && cargo clippy -- -D warnings'} | ConvertTo-Json } elseif ($filePath -like '*.sol') { @{systemMessage='✅ Solidity dosyası değişti. Doğrulama: forge build && forge test --gas-report'} | ConvertTo-Json } }\""
+      }
+    ]
+  }
+}
